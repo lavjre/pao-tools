@@ -15,8 +15,34 @@ analysis workflows.
 - Managed helper processes with process-tree cleanup
 - Shared Python research environment with pwntools
 - Workspace-scoped command execution and repository fetching
+- Versioned structured responses shared by every MCP tool
 - HTTP and stdio MCP transports
 - Optional RetDec integration
+
+## Response API
+
+Every MCP tool returns the same `api_version: "1.0"` envelope. Payloads are
+returned in full; the server does not truncate stdout, stderr, GDB responses,
+events, or decompiled code.
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "get_memory",
+  "session_id": "chal-a",
+  "data": {
+    "command": "-data-read-memory-bytes $rsp 64",
+    "responses": [],
+    "state": "stopped"
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 3
+  }
+}
+```
 
 ## Quick start
 

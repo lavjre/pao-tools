@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
@@ -116,20 +116,20 @@ def register(mcp: FastMCP) -> None:
         return result
 
     @mcp.tool()
-    @catch_errors(tuple_on_error=True)
+    @catch_errors()
     async def attach(
         pid: int,
         session_id: str,
         ctx: Context = CurrentContext(),
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    ) -> Dict[str, Any]:
         """Attach to an existing process by PID using GDB/MI.
 
         Args:
             pid: Target process ID to attach to.
 
         Returns:
-            (result, context) where result is the MI attach result and context is a list of
-            quick context snapshots (e.g., backtrace/heap) captured immediately after attach.
+            Structured payload containing the MI attach result and immediate context
+            snapshots (for example, backtrace and heap context).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -139,7 +139,16 @@ def register(mcp: FastMCP) -> None:
             session, lambda: session.tools.attach(pid)
         )
         result["session_id"] = session.session_id
-        return result, context
+        response = {
+            "success": bool(result.get("success")),
+            "session_id": session.session_id,
+            "result": result,
+            "context": context,
+        }
+        if not response["success"]:
+            response["error"] = result.get("error", f"Failed to attach to pid {pid}")
+            response["type"] = result.get("type", "AttachError")
+        return response
 
     @mcp.tool()
     @catch_errors()

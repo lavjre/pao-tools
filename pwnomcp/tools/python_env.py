@@ -1,22 +1,22 @@
-import json
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from pwnomcp.tools.common import get_services, run_blocking
+from pwnomcp.tools.common import catch_errors, get_services, run_blocking
 from pwnomcp.utils.paths import resolve_workspace_cwd, resolve_workspace_path
 
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
+    @catch_errors()
     async def execute_python_script(
         script_path: str,
         args: Optional[str] = None,
         cwd: Optional[str] = None,
         timeout: float = 300.0,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Execute an existing Python script within the shared environment.
 
         Args:
@@ -42,15 +42,16 @@ def register(mcp: FastMCP) -> None:
         result = await run_blocking(
             lambda: tools.execute_script(resolved_script_path, args_list, cwd, timeout)
         )
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
+    @catch_errors()
     async def execute_python_code(
         code: str,
         cwd: Optional[str] = None,
         timeout: float = 300.0,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Execute Python code dynamically in the shared environment.
 
         Args:
@@ -68,14 +69,15 @@ def register(mcp: FastMCP) -> None:
             cwd, workspace_root=services.runtime_paths.workspace_root
         )
         result = await run_blocking(lambda: tools.execute_code(code, cwd, timeout))
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
+    @catch_errors()
     async def install_python_packages(
         packages: str,
         upgrade: bool = False,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Install additional Python packages using the shared package manager (uv).
 
         Args:
@@ -88,11 +90,14 @@ def register(mcp: FastMCP) -> None:
         result = await run_blocking(
             lambda: tools.install_packages(packages_list, upgrade)
         )
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
-    async def list_python_packages(ctx: Context = CurrentContext()) -> str:
+    @catch_errors()
+    async def list_python_packages(
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
         """List all packages installed in the shared Python environment."""
         services = get_services(ctx)
         result = await run_blocking(services.python_tools.get_installed_packages)
-        return json.dumps(result, indent=2)
+        return result

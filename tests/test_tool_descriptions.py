@@ -46,3 +46,25 @@ async def test_python_execution_tool_guidance_in_descriptions():
     assert "persistent" in descriptions["pwncli"]
     assert "/workspace scripts" in descriptions["pwncli"]
     assert "binary_path" in descriptions["pwncli"]
+
+
+@pytest.mark.asyncio
+async def test_all_mcp_tools_publish_unified_response_schema():
+    mcp = create_mcp()
+    tools = await mcp.list_tools(run_middleware=False)
+    required_properties = {
+        "api_version",
+        "success",
+        "tool",
+        "session_id",
+        "data",
+        "error",
+        "warnings",
+        "meta",
+    }
+
+    assert len(tools) == 36
+    for tool in tools:
+        assert tool.output_schema is not None, tool.name
+        properties = set(tool.output_schema.get("properties", {}))
+        assert properties == required_properties, tool.name

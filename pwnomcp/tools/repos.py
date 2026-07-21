@@ -1,16 +1,16 @@
-import json
 import os
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from pwnomcp.tools.common import get_services, run_blocking
+from pwnomcp.tools.common import catch_errors, get_services, run_blocking
 from pwnomcp.utils.paths import resolve_workspace_path
 
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
+    @catch_errors()
     async def fetch_repo(
         repo_url: str,
         version: Optional[str] = None,
@@ -18,7 +18,7 @@ def register(mcp: FastMCP) -> None:
         shallow: bool = True,
         overwrite: bool = False,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Fetch a git repository into /workspace.
 
         Args:
@@ -49,4 +49,4 @@ def register(mcp: FastMCP) -> None:
                 repo_url, version, target_dir, shallow, overwrite=overwrite
             )
         )
-        return json.dumps(result, indent=2)
+        return result

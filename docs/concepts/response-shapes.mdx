@@ -1,79 +1,126 @@
 ---
-title: "Response Shapes"
-description: "Understand how pwno-mcp tools return structured data, JSON strings, and errors."
+title: "Response API"
+description: "The versioned response envelope shared by every pao-tools MCP tool."
 ---
 
-Not every `pwno-mcp` tool returns data in exactly the same shape. This matters when you are wiring the server into an agent or building wrappers around it.
+Every MCP tool returns the same structured response object. Clients no longer need to
+parse JSON strings or special-case debugger, process, Python, repository, or RetDec
+tools.
 
-## Main response families
+## Envelope
 
-| Tool family | Typical shape | Notes |
+| Field | Type | Meaning |
 | --- | --- | --- |
-| debugger and inspection tools | structured object | usually includes `success` and session-specific fields |
-| `pwncli` tools | structured object | includes session-aware I/O or event data |
-| process, Python, repo, and RetDec helpers | JSON-formatted string | parse the string if your client does not already coerce it |
-| `attach` debugger tool | two-part result | returns the attach result plus a context snapshot list |
-| attach sidecar API | structured object | response model has `successful`, `attach`, and `result` |
+| `api_version` | string | Public response contract version; currently `1.0` |
+| `success` | boolean | Whether the requested tool operation succeeded |
+| `tool` | string | Name of the invoked MCP tool |
+| `session_id` | string or null | Debug/exploit session associated with the call |
+| `data` | any or null | Complete tool-specific payload |
+| `error` | object or null | Structured failure information |
+| `warnings` | string array | Non-fatal issues reported by the tool |
+| `meta.duration_ms` | integer | Server-side execution duration in milliseconds |
 
-## Structured object example
+## Complete output policy
 
-Debugger tools such as `set_file`, `run`, `get_context`, and `set_breakpoint` return objects directly.
+The response layer does not truncate, summarize, paginate, or discard payload data.
+Full stdout, stderr, GDB responses, event lists, decompiled code, and Python output are
+returned inside `data`.
+
+Clients should apply their own display or storage policy when handling large results.
+
+## Success example
+
+Example `run_command(command="checksec --file=/workspace/chal")` response:
 
 ```json
 {
+  "api_version": "1.0",
   "success": true,
-  "session_id": "chal-a"
-}
-```
-
-On failure they follow the common error envelope:
-
-```json
-{
-  "success": false,
-  "error": "Debug session 'chal-a' not found",
-  "type": "RuntimeError"
-}
-```
-
-## JSON-string helper example
-
-Automation helpers such as `run_command`, `spawn_process`, `execute_python_code`, `fetch_repo`, `get_retdec_status`, and `get_decompiled_code` return JSON strings.
-
-```json
-"{\n  \"success\": true,\n  \"returncode\": 0,\n  \"stdout\": \"...\"\n}"
-```
-
-<Warning>
-  If you are writing your own integration, do not assume every tool already returns a parsed object. Some helpers intentionally serialize their result with `json.dumps(..., indent=2)`.
-</Warning>
-
-## Attach-specific shapes
-
-There are two attach surfaces:
-
-- the MCP `attach` tool returns an attach result plus a list of context snapshots
-- the HTTP `/attach` helper API returns a single object with this shape:
-
-```json
-{
-  "successful": true,
-  "attach": {
-    "success": true,
-    "pid": 31337,
-    "session_id": "chal-a"
+  "tool": "run_command",
+  "session_id": null,
+  "data": {
+    "command": "checksec --file=/workspace/chal",
+    "returncode": 0,
+    "stdout": "[*] '/workspace/chal'\n    Arch: amd64-64-little\n    NX: Enabled\n",
+    "stderr": "",
+    "cwd": "/workspace"
   },
-  "result": {
-    "set-file": {
-      "success": true
-    }
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 84
   }
 }
 ```
 
-## Practical advice
+## Failure example
 
-- Treat debugger and `pwncli` tools as object-returning tools.
-- Treat process, Python, repo, and RetDec tools as string-returning helpers unless your client parses them for you.
-- When handling failures, always look for `success`, `error`, and `type` before assuming a result shape.
-- When handling attach flows, account for the extra context data or the attach-sidecar wrapper object.
+```json
+{
+  "api_version": "1.0",
+  "success": false,
+  "tool": "set_file",
+  "session_id": "chal-a",
+  "data": null,
+  "error": {
+    "code": "FILE_NOT_FOUND_ERROR",
+    "message": "binary_path not found: '/workspace/missing'",
+    "type": "FileNotFoundError",
+    "details": null
+  },
+  "warnings": [],
+  "meta": {
+    "duration_ms": 1
+  }
+}
+```
+
+## Tool-specific `data`
+
+The envelope is identical for all tools; only `data` changes.
+
+| Family | Tools | Main `data` content |
+| --- | --- | --- |
+| Sessions | `create_debug_session`, `list_debug_sessions`, `close_debug_session`, `get_session_info` | Session metadata and lifecycle results |
+| Execution | `execute`, `set_file`, `run`, `step_control`, `gdb_poll`, `gdb_interrupt`, `finish`, `jump`, `return_from_function`, `until` | GDB/MI responses and debugger state |
+| Attach | `attach` | `result` plus immediate `context` snapshots |
+| Breakpoints | `set_breakpoint` | Breakpoint command result |
+| Inspection | `get_context`, `get_memory` | Registers, frames, disassembly, or memory responses |
+| Exploit I/O | `pwncli`, `sendinput`, `checkoutput`, `checkevents`, `pwncli_stop`, `list_pwncli_sessions` | Driver state, output, structured events, and attach information |
+| Processes | `run_command`, `spawn_process`, `get_process`, `kill_process`, `list_processes` | Process metadata, complete stdout, and complete stderr |
+| Python | `execute_python_script`, `execute_python_code`, `install_python_packages`, `list_python_packages` | Execution or package-manager results |
+| Repositories | `fetch_repo` | Clone path, revision, branch, and checkout information |
+| RetDec | `get_retdec_status`, `get_decompiled_code` | Analysis status or complete decompiled source |
+
+## Attach result example
+
+The MCP `attach` tool now uses the same envelope. Its `data` field contains both old
+return values explicitly:
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "attach",
+  "session_id": "chal-a",
+  "data": {
+    "result": {
+      "success": true,
+      "pid": 31337,
+      "state": "stopped",
+      "session_id": "chal-a"
+    },
+    "context": []
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 116
+  }
+}
+```
+
+<Info>
+  The standalone HTTP `/attach` sidecar is not an MCP tool and retains its existing
+  `AttachResponse` contract for compatibility.
+</Info>

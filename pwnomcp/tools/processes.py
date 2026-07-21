@@ -1,21 +1,21 @@
-import json
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from pwnomcp.tools.common import get_services, run_blocking
+from pwnomcp.tools.common import catch_errors, get_services, run_blocking
 from pwnomcp.utils.paths import resolve_workspace_cwd
 
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
+    @catch_errors()
     async def run_command(
         command: str,
         cwd: Optional[str] = None,
         timeout: float = 30.0,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Execute a system command and wait for completion.
 
         Note:
@@ -32,7 +32,7 @@ def register(mcp: FastMCP) -> None:
             timeout: Timeout in seconds.
 
         Returns:
-            JSON string with stdout/stderr/exit code.
+            Structured response with stdout/stderr/exit code.
         """
         services = get_services(ctx)
         tools = services.subprocess_tools
@@ -42,14 +42,15 @@ def register(mcp: FastMCP) -> None:
         result = await run_blocking(
             lambda: tools.run_command(command, cwd=cwd, timeout=timeout)
         )
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
+    @catch_errors()
     async def spawn_process(
         command: str,
         cwd: Optional[str] = None,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Spawn a long-running background process and return its PID and log paths.
 
         Note:
@@ -69,31 +70,36 @@ def register(mcp: FastMCP) -> None:
             cwd, workspace_root=services.runtime_paths.workspace_root
         )
         result = await run_blocking(lambda: tools.spawn_process(command, cwd=cwd))
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
-    async def get_process(pid: int, ctx: Context = CurrentContext()) -> str:
+    @catch_errors()
+    async def get_process(pid: int, ctx: Context = CurrentContext()) -> Dict[str, Any]:
         """Get information about a tracked background process by PID."""
         services = get_services(ctx)
         result = await run_blocking(lambda: services.subprocess_tools.get_process(pid))
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
+    @catch_errors()
     async def kill_process(
         pid: int,
         signal: int = 15,
         ctx: Context = CurrentContext(),
-    ) -> str:
+    ) -> Dict[str, Any]:
         """Send a signal to a tracked background process (default SIGTERM=15)."""
         services = get_services(ctx)
         result = await run_blocking(
             lambda: services.subprocess_tools.kill_process(pid, signal)
         )
-        return json.dumps(result, indent=2)
+        return result
 
     @mcp.tool()
-    async def list_processes(ctx: Context = CurrentContext()) -> str:
+    @catch_errors()
+    async def list_processes(
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
         """List all tracked background processes and their metadata (PID, command, log paths)."""
         services = get_services(ctx)
         result = await run_blocking(services.subprocess_tools.list_processes)
-        return json.dumps(result, indent=2)
+        return result

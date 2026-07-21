@@ -1,11 +1,15 @@
 import asyncio
+import inspect
 import logging
 import os
+import re
+import time
 from functools import wraps
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 from fastmcp import Context
 
+from pwnomcp.api import ToolError, ToolMeta, ToolResponse
 from pwnomcp.pwnpipe import PwnPipe
 from pwnomcp.services import AppServices
 from pwnomcp.state import DebugSession, DebugSessionRegistry
@@ -15,22 +19,121 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-def catch_errors(tuple_on_error: bool = False) -> Callable[[Callable[..., Any]], Any]:
+def _error_code(error_type: Optional[str]) -> str:
+    if not error_type:
+        return "TOOL_ERROR"
+    snake_case = re.sub(r"(?<!^)(?=[A-Z])", "_", error_type).upper()
+    return snake_case or "TOOL_ERROR"
+
+
+def build_tool_response(
+    tool: str,
+    result: Any,
+    *,
+    duration_ms: int = 0,
+    session_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Normalize a tool result into the versioned public response envelope.
+
+    Payloads are preserved in full. This function does not truncate stdout,
+    debugger responses, decompiled code, events, or any other tool data.
+    """
+    if isinstance(result, ToolResponse):
+        response = result
+        response.meta.duration_ms = duration_ms
+        return response.as_dict()
+
+    success = True
+    warnings = []
+    error: Optional[ToolError] = None
+    data = result
+
+    if isinstance(result, dict):
+        payload = dict(result)
+        success = bool(payload.pop("success", True))
+        session_id_value = payload.pop("session_id", None)
+        if session_id_value is not None:
+            session_id = str(session_id_value)
+
+        raw_warnings = payload.pop("warnings", [])
+        if isinstance(raw_warnings, list):
+            warnings = [str(item) for item in raw_warnings]
+        elif raw_warnings:
+            warnings = [str(raw_warnings)]
+
+        if success:
+            data = payload
+        else:
+            raw_error = payload.pop("error", "Tool operation failed")
+            error_type = payload.pop("type", None)
+            error_code = payload.pop("code", None)
+            details = None
+            if isinstance(raw_error, dict):
+                message = str(raw_error.get("message", "Tool operation failed"))
+                error_code = raw_error.get("code", error_code)
+                error_type = raw_error.get("type", error_type)
+                details = raw_error.get("details")
+            else:
+                message = str(raw_error)
+            error = ToolError(
+                code=str(error_code or _error_code(error_type)),
+                message=message,
+                type=str(error_type) if error_type else None,
+                details=details,
+            )
+            data = payload or None
+
+    response = ToolResponse(
+        success=success,
+        tool=tool,
+        session_id=session_id,
+        data=data,
+        error=error,
+        warnings=warnings,
+        meta=ToolMeta(duration_ms=duration_ms),
+    )
+    return response.as_dict()
+
+
+def catch_errors() -> Callable[[Callable[..., Any]], Any]:
+    """Wrap an MCP tool with the shared response envelope and error handling."""
+
     def decorator(fn: Callable[..., Any]) -> Any:
+        fn_signature = inspect.signature(fn)
+
         @wraps(fn)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            started_at = time.monotonic()
+            bound_arguments = fn_signature.bind_partial(*args, **kwargs)
+            requested_session_id = bound_arguments.arguments.get("session_id")
             try:
-                return await fn(*args, **kwargs)
+                result = await fn(*args, **kwargs)
             except Exception as e:
                 logger.exception("tool error in %s", fn.__name__)
-                if tuple_on_error:
-                    return {
-                        "success": False,
-                        "error": str(e),
-                        "type": type(e).__name__,
-                    }, []
-                return {"success": False, "error": str(e), "type": type(e).__name__}
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "type": type(e).__name__,
+                }
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            return build_tool_response(
+                fn.__name__,
+                result,
+                duration_ms=duration_ms,
+                session_id=(
+                    str(requested_session_id)
+                    if requested_session_id is not None
+                    else None
+                ),
+            )
 
+        wrapper.__annotations__ = dict(wrapper.__annotations__)
+        wrapper.__annotations__["return"] = ToolResponse
+        setattr(
+            wrapper,
+            "__signature__",
+            fn_signature.replace(return_annotation=ToolResponse),
+        )
         return wrapper
 
     return decorator

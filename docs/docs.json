@@ -1,7 +1,7 @@
 {
 	"$schema": "https://mintlify.com/docs.json",
 	"theme": "aspen",
-	"name": "pwno-mcp",
+	"name": "pao-tools",
 	"description": "Stateful MCP server for autonomous pwn and binary research with GDB, pwndbg, and session-aware tooling.",
 	"colors": {
 		"primary": "#EA580C",
@@ -11,7 +11,7 @@
 	"logo": {
 		"light": "/images/logo-light.svg",
 		"dark": "/images/logo-dark.svg",
-		"href": "https://docs.pwno.io"
+		"href": "https://github.com/lavjre/pao-tools"
 	},
 	"icons": {
 		"library": "lucide"
@@ -115,11 +115,7 @@
 		"links": [
 			{
 				"label": "GitHub",
-				"href": "https://github.com/pwno-io/pwno-mcp"
-			},
-			{
-				"label": "Pwno",
-				"href": "https://pwno.io"
+				"href": "https://github.com/lavjre/pao-tools"
 			}
 		],
 		"primary": {
@@ -130,7 +126,7 @@
 	},
 	"footer": {
 		"socials": {
-			"github": "https://github.com/pwno-io/pwno-mcp",
+			"github": "https://github.com/lavjre/pao-tools",
 			"x": "https://x.com/retr0reg"
 		},
 		"links": [
@@ -160,7 +156,7 @@
 				"items": [
 					{
 						"label": "Repository",
-						"href": "https://github.com/pwno-io/pwno-mcp"
+						"href": "https://github.com/lavjre/pao-tools"
 					},
 					{
 						"label": "License",
