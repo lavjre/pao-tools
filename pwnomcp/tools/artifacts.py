@@ -44,6 +44,57 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors(auto_artifact=False)
+    async def get_artifact_store_status(
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Get artifact usage, free disk space, worker state, and retention policy."""
+        services = get_services(ctx)
+        status = await run_blocking(services.artifact_store.status)
+        return {"success": True, **status}
+
+    @mcp.tool()
+    @catch_errors(auto_artifact=False)
+    async def set_artifact_pinned(
+        artifact_id: str,
+        pinned: bool = True,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Pin or unpin an artifact against automatic TTL/quota cleanup."""
+        services = get_services(ctx)
+        artifact = await run_blocking(
+            lambda: services.artifact_store.set_pinned(artifact_id, pinned)
+        )
+        return {"success": True, "artifact": artifact.to_dict()}
+
+    @mcp.tool()
+    @catch_errors(auto_artifact=False)
+    async def delete_artifact(
+        artifact_id: str,
+        force: bool = False,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Delete an artifact. Pinned artifacts require force=true."""
+        services = get_services(ctx)
+        artifact = await run_blocking(
+            lambda: services.artifact_store.delete(artifact_id, force=force)
+        )
+        return {"success": True, "deleted": artifact.to_dict()}
+
+    @mcp.tool()
+    @catch_errors(auto_artifact=False)
+    async def cleanup_artifacts(
+        dry_run: bool = True,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Preview or apply the configured TTL, quota, and disk cleanup policy."""
+        services = get_services(ctx)
+        result = await run_blocking(
+            lambda: services.artifact_store.cleanup(dry_run=dry_run)
+        )
+        return {"success": True, **result}
+
+    @mcp.tool()
+    @catch_errors(auto_artifact=False)
     async def read_artifact(
         artifact_id: str,
         offset: int = 0,

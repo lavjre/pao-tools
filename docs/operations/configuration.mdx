@@ -23,11 +23,22 @@ This page covers the main knobs exposed by `pwno-mcp` itself.
 | `PWNO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
 | `PAO_INLINE_RESPONSE_BYTES` | inline payload threshold in bytes; defaults to `1048576` (1 MiB). Larger payloads use artifact delivery |
 | `PAO_ARTIFACT_CHUNK_BYTES` | default `read_artifact` range size; defaults to `262144` (256 KiB) |
+| `PAO_ARTIFACT_TTL_SECONDS` | retention time; defaults to `259200` (72 hours). Set `0` to disable expiry |
+| `PAO_ARTIFACT_QUOTA_BYTES` | soft store quota; defaults to `10737418240` (10 GiB). Set `0` to disable quota cleanup |
+| `PAO_ARTIFACT_CLEANUP_TARGET_RATIO` | low-watermark after quota cleanup; defaults to `0.8` |
+| `PAO_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | background cleanup interval; defaults to `900`. Set `0` to disable periodic cleanup |
+| `PAO_ARTIFACT_MIN_FREE_BYTES` | free disk reserve enforced before writes; defaults to `2147483648` (2 GiB) |
 | `BINARY_URL` | enables lazy RetDec analysis against an externally reachable binary URL |
 
 These values control delivery, not data retention: crossing the inline threshold does
 not truncate output. `read_artifact` also accepts an explicit `length` and does not
 enforce a maximum range size.
+
+Cleanup runs at startup, periodically, and before artifact writes. It deletes expired
+unpinned artifacts first, then the oldest unpinned artifacts until quota and disk
+targets are met. A single newest artifact may temporarily exceed the soft quota, but
+the free-space reserve is a hard safety check. Pinned artifacts are never removed by
+automatic cleanup.
 
 ## Example launches
 

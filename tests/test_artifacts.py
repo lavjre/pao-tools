@@ -4,10 +4,11 @@ import os
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from pwnomcp.artifacts import ArtifactStore
+from pwnomcp.artifacts import ArtifactPinnedError, ArtifactStore
 from pwnomcp.tools.backends.subproc import SubprocessTools
 from pwnomcp.tools.common import build_tool_response
 
@@ -116,3 +117,63 @@ def test_artifact_id_rejects_path_traversal(tmp_path):
 
     with pytest.raises(ValueError):
         store.read("../../outside")
+
+
+def test_ttl_cleanup_deletes_expired_but_preserves_pinned(tmp_path):
+    store = ArtifactStore(
+        str(tmp_path), ttl_seconds=60, quota_bytes=0, min_free_bytes=0
+    )
+    expired = store.save_bytes(b"old", tool="test")
+    pinned = store.save_bytes(b"important", tool="test")
+    store.set_pinned(pinned.artifact_id)
+
+    result = store.cleanup(now=datetime.now(timezone.utc) + timedelta(seconds=61))
+
+    assert result["deleted_count"] == 1
+    assert result["deletions"][0]["reason"] == "ttl"
+    with pytest.raises(FileNotFoundError):
+        store.get(expired.artifact_id)
+    assert store.get(pinned.artifact_id).pinned is True
+
+
+def test_cleanup_dry_run_does_not_delete(tmp_path):
+    store = ArtifactStore(str(tmp_path), ttl_seconds=1, quota_bytes=0, min_free_bytes=0)
+    artifact = store.save_bytes(b"preview", tool="test")
+
+    result = store.cleanup(
+        dry_run=True,
+        now=datetime.now(timezone.utc) + timedelta(seconds=2),
+    )
+
+    assert result["deleted_count"] == 1
+    assert store.get(artifact.artifact_id) == artifact
+
+
+def test_quota_cleanup_evicts_oldest_and_keeps_newest(tmp_path):
+    store = ArtifactStore(str(tmp_path), ttl_seconds=0, quota_bytes=0, min_free_bytes=0)
+    first = store.save_bytes(b"A" * 40, tool="test")
+    second = store.save_bytes(b"B" * 40, tool="test")
+    newest = store.save_bytes(b"C" * 40, tool="test")
+    store.quota_bytes = 100
+    store.cleanup_target_ratio = 0.5
+
+    result = store.cleanup()
+
+    assert result["deleted_count"] == 2
+    assert [item["artifact_id"] for item in result["deletions"]] == [
+        first.artifact_id,
+        second.artifact_id,
+    ]
+    assert [item.artifact_id for item in store.list()] == [newest.artifact_id]
+
+
+def test_pinned_artifact_requires_force_to_delete(tmp_path):
+    store = ArtifactStore(str(tmp_path), min_free_bytes=0)
+    artifact = store.save_bytes(b"important", tool="test")
+    store.set_pinned(artifact.artifact_id)
+
+    with pytest.raises(ArtifactPinnedError):
+        store.delete(artifact.artifact_id)
+
+    deleted = store.delete(artifact.artifact_id, force=True)
+    assert deleted.artifact_id == artifact.artifact_id

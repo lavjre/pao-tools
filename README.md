@@ -63,9 +63,10 @@ an artifact descriptor:
 }
 ```
 
-Use `list_artifacts`, `get_artifact_info`, and `read_artifact` to inspect or
-stream it. `read_artifact` defaults to 256 KiB per call and returns exact bytes
-as Base64 plus a decoded text convenience field.
+Use the artifact tools to inspect, stream, pin, delete, or clean stored output.
+`read_artifact` defaults to 256 KiB per call and returns exact bytes as Base64
+plus a decoded text convenience field. By default artifacts expire after 72
+hours; the store uses a 10 GiB soft quota and preserves 2 GiB of free disk.
 
 ## Quick start
 

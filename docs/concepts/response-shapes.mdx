@@ -97,7 +97,7 @@ The envelope is identical for all tools; only `data` changes.
 | Python | `execute_python_script`, `execute_python_code`, `install_python_packages`, `list_python_packages` | Execution or package-manager results |
 | Repositories | `fetch_repo` | Clone path, revision, branch, and checkout information |
 | RetDec | `get_retdec_status`, `get_decompiled_code` | Analysis status or complete decompiled source |
-| Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact` | Metadata or a lossless byte range from stored large output |
+| Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact`, `get_artifact_store_status`, `set_artifact_pinned`, `delete_artifact`, `cleanup_artifacts` | Storage lifecycle metadata, cleanup controls, or a lossless byte range |
 
 ## Attach result example
 

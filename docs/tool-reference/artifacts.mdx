@@ -14,6 +14,10 @@ and returns metadata containing an `artifact_id`, byte size, and SHA-256 digest.
 | `list_artifacts` | optional `session_id` | newest-first artifact metadata list |
 | `get_artifact_info` | `artifact_id` | size, hash, source tool, content type, and creation time |
 | `read_artifact` | `artifact_id`, optional `offset`, optional `length` | one byte range plus the next offset and EOF state |
+| `get_artifact_store_status` | none | usage, free disk, worker state, and effective retention policy |
+| `set_artifact_pinned` | `artifact_id`, optional `pinned` | protect or release an artifact from automatic cleanup |
+| `delete_artifact` | `artifact_id`, optional `force` | delete one artifact; pinned artifacts require `force=true` |
+| `cleanup_artifacts` | optional `dry_run` | preview or apply TTL, quota, and disk cleanup; defaults to preview |
 
 ## Read a chunk
 
@@ -71,3 +75,22 @@ multi-byte UTF-8 character.
 If `length` is omitted, the configured default is 256 KiB. The API does not impose a
 maximum explicit `length`; smaller repeated reads are recommended for bounded client
 memory and MCP message size.
+
+## Retention and cleanup
+
+The default policy expires artifacts after 72 hours, applies a 10 GiB soft quota,
+cleans back to 80%, checks every 15 minutes, and preserves 2 GiB of filesystem free
+space. Cleanup also runs at server startup and before storing a new artifact.
+
+```json
+{"tool":"cleanup_artifacts","arguments":{"dry_run":true}}
+```
+
+Inspect `deletions` first, then pass `dry_run=false` to apply the same plan. Automatic
+cleanup never deletes pinned artifacts. If pinned data prevents the free-space reserve,
+new artifact writes fail with `ArtifactStorageFullError` instead of filling the disk or
+truncating output.
+
+```json
+{"tool":"set_artifact_pinned","arguments":{"artifact_id":"4d3d4d939ae047a1a90a0ffda031bcd2","pinned":true}}
+```

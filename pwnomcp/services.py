@@ -54,7 +54,7 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
     logger.info("RetDec analyzer created (lazy initialization)")
     artifact_store = ArtifactStore(runtime_paths.artifacts_dir)
 
-    return AppServices(
+    services = AppServices(
         runtime_paths=runtime_paths,
         session_registry=session_registry,
         default_session_id=default_session.session_id,
@@ -68,6 +68,8 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
         retdec_analyzer=retdec_analyzer,
         artifact_store=artifact_store,
     )
+    artifact_store.start_cleanup_worker()
+    return services
 
 
 def close_services(services: AppServices) -> None:
@@ -80,3 +82,4 @@ def close_services(services: AppServices) -> None:
 
     services.subprocess_tools.close_all()
     services.session_registry.close_all()
+    services.artifact_store.close()
