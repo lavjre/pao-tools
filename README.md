@@ -8,6 +8,7 @@ analysis workflows.
 ## Features
 
 - Independent GDB/pwndbg sessions for parallel research
+- Runtime-verified GDB/pwndbg versions, commands, categories, and feature groups
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
@@ -130,6 +131,14 @@ uv run python -m pwnomcp
 - `/tmp/pwno/processes`: managed process logs
 - `/tmp/pwno/python`: shared Python virtual environment
 - `/tmp/pwno/artifacts`: complete large-response payloads and metadata
+
+## Pwndbg compatibility
+
+Docker builds pin the official pwndbg portable release to `2026.02.18`. At startup,
+the server queries the pwndbg instance inside its own runtime and records a non-fatal
+compatibility report. Use `get_debugger_capabilities`, `list_pwndbg_commands`, and
+`get_pwndbg_command_help` instead of assuming commands found in another environment
+are installed in pao-tools.
 
 ## Roadmap
 

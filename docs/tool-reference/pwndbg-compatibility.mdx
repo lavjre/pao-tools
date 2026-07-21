@@ -1,0 +1,69 @@
+---
+title: "Pwndbg Compatibility"
+description: "Discover the exact GDB/pwndbg runtime and typed command availability used by pao-tools."
+---
+
+Pao-tools does not infer capabilities from a developer's host or another pwndbg
+installation. These tools query the selected debugger session and return both parsed
+fields and raw runtime evidence.
+
+## Tools
+
+| Tool | Main arguments | Result |
+| --- | --- | --- |
+| `get_debugger_capabilities` | `session_id`, optional `refresh` | versions, command count, categories, external executables, grouped missing commands, and readiness |
+| `list_pwndbg_commands` | `session_id`, optional `category` or `query` | parsed command names/descriptions plus raw output |
+| `get_pwndbg_command_help` | `session_id`, `command_name` | help text and raw GDB responses for one validated command |
+
+## Capability report
+
+```json
+{"tool":"get_debugger_capabilities","arguments":{"session_id":"chal-a","refresh":true}}
+```
+
+Representative response data:
+
+```json
+{
+  "ready": true,
+  "parser_version": "1",
+  "expected_pwndbg_version": "2026.02.18",
+  "version_matches": true,
+  "versions": {
+    "pwndbg": "2026.02.18",
+    "gdb": "17.1"
+  },
+  "command_count": 211,
+  "command_groups": {
+    "core": {
+      "available": ["context", "regs", "telescope", "vmmap"],
+      "missing": []
+    }
+  },
+  "warnings": [],
+  "evidence": {
+    "version": "...",
+    "commands": "...",
+    "categories": "..."
+  }
+}
+```
+
+`ready=false` is evidence that the runtime differs from the compatibility baseline;
+it does not claim that every missing optional command makes GDB unusable. The `core`
+group and pinned version determine readiness, while all other groups report gaps for
+later typed API stages.
+
+## Startup behavior
+
+The default session runs the same probe when services start. A mismatch is logged as a
+warning rather than terminating the MCP server, so clients can still retrieve the
+report and use raw GDB functionality to diagnose the image.
+
+Docker uses the official portable release pinned by the `PWNDBG_VERSION` build
+argument. Rebuild explicitly with another release only when intentionally testing a
+compatibility upgrade:
+
+```bash
+docker build --build-arg PWNDBG_VERSION=2026.02.18 -t pao-tools:latest .
+```

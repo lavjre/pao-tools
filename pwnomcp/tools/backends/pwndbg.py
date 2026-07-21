@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from pwnomcp.tools.backends.compatibility import PwndbgCompatibility
 from pwnomcp.tools.backends.gdb import GdbController
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ class PwndbgTools:
         """
         self.gdb = gdb_controller
         self.session = session_state
+        self.compatibility = PwndbgCompatibility(gdb_controller)
         # Ensure GDB is initialized once lazily to avoid startup cost unless used
         try:
             self.gdb.initialize()
@@ -39,6 +41,25 @@ class PwndbgTools:
             logger.exception(
                 "GDB initialize() failed during tool init; will retry on demand"
             )
+
+    def get_debugger_capabilities(self, refresh: bool = False) -> Dict[str, Any]:
+        """Return typed pwndbg/GDB runtime compatibility information."""
+        self.gdb.initialize()
+        return self.compatibility.get_capabilities(refresh=refresh)
+
+    def list_pwndbg_commands(
+        self,
+        category: Optional[str] = None,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List installed pwndbg commands with parsed and raw evidence."""
+        self.gdb.initialize()
+        return self.compatibility.list_commands(category=category, query=query)
+
+    def get_pwndbg_command_help(self, command_name: str) -> Dict[str, Any]:
+        """Return raw help for one validated pwndbg command."""
+        self.gdb.initialize()
+        return self.compatibility.get_help(command_name)
 
     def execute(self, command: str) -> Dict[str, Any]:
         """Execute arbitrary GDB/pwndbg command and return raw responses"""

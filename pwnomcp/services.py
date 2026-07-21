@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Any, Dict
 
 from pwnomcp.artifacts import ArtifactStore
 from pwnomcp.pwnpipe import PwnPipe
@@ -28,6 +28,7 @@ class AppServices:
     python_tools: PythonTools
     retdec_analyzer: RetDecAnalyzer
     artifact_store: ArtifactStore
+    debugger_compatibility: Dict[str, Any]
     pwnpipe_sessions: Dict[str, PwnPipe] = field(default_factory=dict)
     pwnpipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -49,6 +50,30 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
 
     init_result = default_session.gdb.initialize()
     logger.info("GDB initialization: %s", init_result.get("status"))
+    try:
+        debugger_compatibility = default_session.tools.get_debugger_capabilities(
+            refresh=True
+        )
+    except Exception as exc:
+        logger.exception("Pwndbg compatibility probe failed")
+        debugger_compatibility = {
+            "success": False,
+            "ready": False,
+            "error": str(exc),
+            "type": type(exc).__name__,
+        }
+    if debugger_compatibility.get("ready"):
+        logger.info(
+            "Pwndbg compatibility ready: version=%s commands=%s",
+            debugger_compatibility.get("versions", {}).get("pwndbg"),
+            debugger_compatibility.get("command_count"),
+        )
+    else:
+        logger.warning(
+            "Pwndbg compatibility is not ready: %s",
+            debugger_compatibility.get("warnings")
+            or debugger_compatibility.get("error"),
+        )
 
     retdec_analyzer = RetDecAnalyzer()
     logger.info("RetDec analyzer created (lazy initialization)")
@@ -67,6 +92,7 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
         python_tools=PythonTools(workspace_dir=runtime_paths.python_dir),
         retdec_analyzer=retdec_analyzer,
         artifact_store=artifact_store,
+        debugger_compatibility=debugger_compatibility,
     )
     artifact_store.start_cleanup_worker()
     return services

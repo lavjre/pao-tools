@@ -63,7 +63,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 43
+    assert len(tools) == 46
     for tool in tools:
         assert tool.output_schema is not None, tool.name
         properties = set(tool.output_schema.get("properties", {}))

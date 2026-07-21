@@ -89,6 +89,7 @@ The envelope is identical for all tools; only `data` changes.
 | --- | --- | --- |
 | Sessions | `create_debug_session`, `list_debug_sessions`, `close_debug_session`, `get_session_info` | Session metadata and lifecycle results |
 | Execution | `execute`, `set_file`, `run`, `step_control`, `gdb_poll`, `gdb_interrupt`, `finish`, `jump`, `return_from_function`, `until` | GDB/MI responses and debugger state |
+| Compatibility | `get_debugger_capabilities`, `list_pwndbg_commands`, `get_pwndbg_command_help` | Parsed runtime capabilities plus raw GDB/pwndbg evidence |
 | Attach | `attach` | `result` plus immediate `context` snapshots |
 | Breakpoints | `set_breakpoint` | Breakpoint command result |
 | Inspection | `get_context`, `get_memory` | Registers, frames, disassembly, or memory responses |

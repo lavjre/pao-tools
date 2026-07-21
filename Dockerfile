@@ -2,12 +2,15 @@ ARG TARGETPLATFORM
 FROM --platform=$TARGETPLATFORM ghcr.io/astral-sh/uv:latest AS uv
 FROM --platform=$TARGETPLATFORM ubuntu:24.04 AS base
 
+ARG TARGETARCH
+ARG PWNDBG_VERSION=2026.02.18
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-      curl wget git vim nano file tmux sudo unzip ca-certificates \
+      curl wget git vim nano file tmux sudo unzip xz-utils ca-certificates \
       build-essential gcc g++ clang make cmake bison flex gcc-multilib \
       gdb gdbserver gdb-multiarch lldb strace ltrace patchelf elfutils libc6-dbg \
       qemu-system-x86 qemu-user qemu-user-binfmt \
@@ -20,7 +23,26 @@ RUN dpkg --add-architecture i386 && \
 
 COPY --from=uv /uv /uvx /bin/
 
-RUN curl -qsL 'https://install.pwndbg.re' | sh -s -- -t pwndbg-gdb
+RUN set -eux; \
+    case "$TARGETARCH" in \
+      amd64) PWNDBG_ARCH=x86_64 ;; \
+      arm64) PWNDBG_ARCH=arm64 ;; \
+      *) echo "Unsupported pwndbg portable architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    PWNDBG_ASSET="pwndbg_${PWNDBG_VERSION}_${PWNDBG_ARCH}-portable.tar.xz"; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      "https://github.com/pwndbg/pwndbg/releases/download/${PWNDBG_VERSION}/${PWNDBG_ASSET}" \
+      -o /tmp/pwndbg.tar.xz; \
+    mkdir -p /opt/pwndbg; \
+    tar -xJf /tmp/pwndbg.tar.xz -C /opt/pwndbg --strip-components=2; \
+    test -x /opt/pwndbg/bin/pwndbg; \
+    ln -s /opt/pwndbg/bin/pwndbg /usr/local/bin/pwndbg; \
+    rm /tmp/pwndbg.tar.xz
+
+ENV PAO_PWNDBG_EXPECTED_VERSION=${PWNDBG_VERSION}
+ENV PWNDBG_NO_AUTOUPDATE=1
+
+RUN pwndbg --batch --quiet -ex "version" -ex "quit"
 
 # Install systemd so the VM can boot it as PID 1 under Ignite
 RUN apt-get update && apt-get install -y systemd systemd-sysv && \
