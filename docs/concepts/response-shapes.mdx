@@ -92,7 +92,8 @@ The envelope is identical for all tools; only `data` changes.
 | Compatibility | `get_debugger_capabilities`, `list_pwndbg_commands`, `get_pwndbg_command_help` | Parsed runtime capabilities plus raw GDB/pwndbg evidence |
 | ELF/runtime | `analyze_elf`, `checksec`, `inspect_got_plt`, `memory_maps`, `list_threads`, `get_process_info`, `inspect_libc`, `inspect_address` | Typed security, linkage, mapping, thread, process, libc, and address data plus raw pwndbg evidence |
 | Attach | `attach` | `result` plus immediate `context` snapshots |
-| Breakpoints | `set_breakpoint` | Breakpoint command result |
+| Debugger state | `set_breakpoint`, `list_breakpoints`, `delete_breakpoint`, `toggle_breakpoint`, `set_watchpoint`, `read_registers`, `write_register`, `evaluate_expression`, `select_thread` | Typed debugger state or mutation results plus raw MI evidence |
+| Memory/stepping | `search_memory`, `write_memory`, `disassemble`, `step_until_event` | Parsed matches/instructions, verified memory writes, and stop evidence |
 | Inspection | `get_context`, `get_memory` | Registers, frames, disassembly, or memory responses |
 | Exploit I/O | `pwncli`, `sendinput`, `checkoutput`, `checkevents`, `pwncli_stop`, `list_pwncli_sessions` | Driver state, output, structured events, and attach information |
 | Processes | `run_command`, `spawn_process`, `get_process`, `kill_process`, `list_processes` | Process metadata, complete stdout, and complete stderr |

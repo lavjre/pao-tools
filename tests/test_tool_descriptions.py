@@ -63,7 +63,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 54
+    assert len(tools) == 66
     tool_names = {tool.name for tool in tools}
     assert {
         "analyze_elf",
@@ -74,6 +74,18 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "get_process_info",
         "inspect_libc",
         "inspect_address",
+        "list_breakpoints",
+        "delete_breakpoint",
+        "toggle_breakpoint",
+        "set_watchpoint",
+        "read_registers",
+        "write_register",
+        "evaluate_expression",
+        "select_thread",
+        "search_memory",
+        "write_memory",
+        "disassemble",
+        "step_until_event",
     } <= tool_names
     for tool in tools:
         assert tool.output_schema is not None, tool.name

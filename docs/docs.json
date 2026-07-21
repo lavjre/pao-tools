@@ -74,6 +74,7 @@
 							"tool-reference/index",
 							"tool-reference/pwndbg-compatibility",
 							"tool-reference/elf-runtime",
+							"tool-reference/debugger-memory",
 							"tool-reference/debug-sessions",
 							"tool-reference/inspection",
 							"tool-reference/attach-api"

@@ -10,6 +10,8 @@ analysis workflows.
 - Independent GDB/pwndbg sessions for parallel research
 - Runtime-verified GDB/pwndbg versions, commands, categories, and feature groups
 - Typed ELF mitigations, sections, GOT/PLT, mappings, threads, libc, and address data
+- Typed breakpoint/watchpoint CRUD, registers, expressions, memory search/write,
+  disassembly, thread selection, and event-oriented stepping
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
@@ -143,7 +145,6 @@ are installed in pao-tools.
 
 ## Roadmap
 
-- Complete breakpoint and watchpoint management
 - Crash triage and core-dump analysis
 - ROP gadget and libc workflows
 - Local, remote, SSH, and QEMU target providers

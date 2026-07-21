@@ -72,10 +72,12 @@ class GdbController:
         self._initialized = True
         return {"status": "initialized", "messages": results}
 
-    def execute_mi_command(self, command: str) -> Dict[str, Any]:
+    def execute_mi_command(
+        self, command: str, timeout_sec: float = 7.0
+    ) -> Dict[str, Any]:
         """Execute a GDB/MI command and return raw MI responses."""
         logger.debug(f"Executing MI command: {command}")
-        responses = self.controller.write(command, timeout_sec=7.0)
+        responses = self.controller.write(command, timeout_sec=timeout_sec)
         # Update internal state from notify messages and detect errors
         error_found = False
         for response in responses:
@@ -121,7 +123,9 @@ class GdbController:
 
         elif message == "stopped":
             self._state = "stopped"
-            payload = response.get("payload", {})
+            payload = response.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
             # Extract stop reason if available
             reason = payload.get("reason", "unknown")
             logger.debug(f"Inferior state: STOPPED (reason: {reason})")
@@ -133,7 +137,9 @@ class GdbController:
 
         elif message == "thread-group-started":
             # This happens when attaching to a process
-            payload = response.get("payload", {})
+            payload = response.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
             self._inferior_pid = payload.get("pid")
             logger.debug(f"Thread group started, PID: {self._inferior_pid}")
 
@@ -261,6 +267,21 @@ class GdbController:
         """Get register values using MI (hex)."""
         return self.execute_mi_command("-data-list-register-values x")
 
+    def get_register_names_mi(self) -> Dict[str, Any]:
+        """Get register names in GDB's target-specific number order."""
+        return self.execute_mi_command("-data-list-register-names")
+
+    def get_register_values_mi(
+        self, register_numbers: Optional[List[int]] = None, timeout_sec: float = 7.0
+    ) -> Dict[str, Any]:
+        """Get selected or all register values in hexadecimal format."""
+        suffix = ""
+        if register_numbers:
+            suffix = " " + " ".join(str(number) for number in register_numbers)
+        return self.execute_mi_command(
+            f"-data-list-register-values x{suffix}", timeout_sec=timeout_sec
+        )
+
     def get_backtrace_mi(self) -> Dict[str, Any]:
         """Get backtrace/frames using MI."""
         return self.execute_mi_command("-stack-list-frames")
@@ -351,6 +372,28 @@ class GdbController:
     def evaluate_expression(self, expression: str) -> Dict[str, Any]:
         """Evaluate an expression using MI command"""
         return self.execute_mi_command(f'-data-evaluate-expression "{expression}"')
+
+    def select_thread(self, thread_id: int) -> Dict[str, Any]:
+        """Select a GDB thread by global thread id."""
+        return self.execute_mi_command(f"-thread-select {thread_id}")
+
+    def set_watchpoint(self, expression: str, access: str = "write") -> Dict[str, Any]:
+        """Set a write, read, or access hardware watchpoint."""
+        option = {"write": "", "read": "-r ", "access": "-a "}[access]
+        return self.execute_mi_command(f"-break-watch {option}{expression}")
+
+    def write_memory_bytes(self, address: str, data_hex: str) -> Dict[str, Any]:
+        """Write raw bytes expressed as an even-length hexadecimal string."""
+        return self.execute_mi_command(f"-data-write-memory-bytes {address} {data_hex}")
+
+    def disassemble_range(
+        self, start: str, byte_count: int, timeout_sec: float = 7.0
+    ) -> Dict[str, Any]:
+        """Disassemble a byte range without source interleaving."""
+        return self.execute_mi_command(
+            f"-data-disassemble -s {start} -e {start}+{byte_count} -- 0",
+            timeout_sec=timeout_sec,
+        )
 
     def read_memory_mi(
         self, address: str, word_format: str, word_size: int, nr_rows: int, nr_cols: int

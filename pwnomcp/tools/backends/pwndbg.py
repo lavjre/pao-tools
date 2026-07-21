@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from pwnomcp.tools.backends.compatibility import PwndbgCompatibility
+from pwnomcp.tools.backends.debugger import DebuggerOperations
 from pwnomcp.tools.backends.gdb import GdbController
 from pwnomcp.tools.backends.inspection import PwndbgInspection
 
@@ -35,6 +36,9 @@ class PwndbgTools:
         self.session = session_state
         self.compatibility = PwndbgCompatibility(gdb_controller)
         self.inspection = PwndbgInspection(gdb_controller)
+        self.debugger = DebuggerOperations(
+            gdb_controller, timeout_seconds=self.inspection.timeout_seconds
+        )
         # Ensure GDB is initialized once lazily to avoid startup cost unless used
         try:
             self.gdb.initialize()
@@ -169,6 +173,7 @@ class PwndbgTools:
         if result.get("success"):
             self.session.binary_path = binary_path
             self.session.binary_loaded = True
+            self.debugger.clear_register_cache()
         self.session.update_state(result["state"])
         self.session.record_command(
             result.get("command", f"-file-exec-and-symbols {binary_path}"), result
@@ -329,41 +334,161 @@ class PwndbgTools:
     def set_breakpoint(
         self, location: str, condition: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Set a breakpoint; return raw responses"""
+        """Set a breakpoint and return a typed breakpoint record."""
         logger.info(f"Set breakpoint at {location}")
-        result = self.gdb.set_breakpoint(location, condition)
+        self.gdb.initialize()
+        result = self.debugger.decorate_created_breakpoint(
+            self.gdb.set_breakpoint(location, condition)
+        )
+        breakpoint = result.get("parsed", {}).get("breakpoint")
+        if result.get("success") and breakpoint:
+            number = str(breakpoint.get("number", ""))
+            if number.isdigit():
+                self.session.add_breakpoint(
+                    int(number),
+                    breakpoint.get("original_location")
+                    or breakpoint.get("address")
+                    or location,
+                    condition,
+                )
+        self.session.update_state(result.get("state", self.gdb.get_state()))
         self.session.record_command(result.get("command", "-break-insert"), result)
         return result
 
     def list_breakpoints(self) -> Dict[str, Any]:
-        """List all breakpoints; return raw responses"""
+        """List all breakpoints as typed records."""
         logger.info("List breakpoints")
-        result = self.gdb.list_breakpoints()
+        self.gdb.initialize()
+        result = self.debugger.list_breakpoints()
         self.session.record_command(result.get("command", "-break-list"), result)
         return result
 
     def delete_breakpoint(self, number: int) -> Dict[str, Any]:
-        """Delete a breakpoint; return raw responses"""
+        """Delete a breakpoint and synchronize session metadata."""
         logger.info(f"Delete breakpoint #{number}")
-        result = self.gdb.delete_breakpoint(number)
+        self.gdb.initialize()
+        result = self.debugger.delete_breakpoint(number)
+        if result.get("success"):
+            self.session.remove_breakpoint(number)
         self.session.record_command(
             result.get("command", f"-break-delete {number}"), result
         )
         return result
 
     def toggle_breakpoint(self, number: int, enable: bool) -> Dict[str, Any]:
-        """Enable or disable a breakpoint; return raw responses"""
+        """Enable or disable a breakpoint and synchronize session metadata."""
         action = "enable" if enable else "disable"
         logger.info(f"{action} breakpoint #{number}")
-        result = (
-            self.gdb.enable_breakpoint(number)
-            if enable
-            else self.gdb.disable_breakpoint(number)
-        )
+        self.gdb.initialize()
+        result = self.debugger.toggle_breakpoint(number, enable)
+        if result.get("success") and number in self.session.breakpoints:
+            self.session.breakpoints[number].enabled = enable
         self.session.record_command(
             result.get("command", f"-break-{action} {number}"), result
         )
         return result
+
+    def _record_debugger(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronize state and record one typed debugger operation."""
+        self.session.update_state(result.get("state", self.gdb.get_state()))
+        self.session.record_command(result.get("command", "debugger"), result)
+        return result
+
+    def set_watchpoint(self, expression: str, access: str = "write") -> Dict[str, Any]:
+        """Set a typed write, read, or access watchpoint."""
+        self.gdb.initialize()
+        result = self.debugger.set_watchpoint(expression, access)
+        return self._record_debugger(result)
+
+    def read_registers(
+        self,
+        names: Optional[List[str]] = None,
+        refresh_names: bool = False,
+    ) -> Dict[str, Any]:
+        """Read selected or all registers as typed records."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.read_registers(names, refresh_names=refresh_names)
+        )
+
+    def write_register(self, name: str, value: str) -> Dict[str, Any]:
+        """Write a register and return before/after evidence."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.write_register(name, value))
+
+    def evaluate_expression_typed(self, expression: str) -> Dict[str, Any]:
+        """Evaluate a validated GDB expression with typed output."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.evaluate_expression(expression))
+
+    def select_thread(self, thread_id: int) -> Dict[str, Any]:
+        """Select the active inferior thread."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.select_thread(thread_id))
+
+    def search_memory(
+        self,
+        value: str,
+        value_type: str = "bytes",
+        mapping: Optional[str] = None,
+        hex_encoded: bool = False,
+        executable: bool = False,
+        writable: bool = False,
+        limit: Optional[int] = None,
+        aligned: Optional[int] = None,
+        step: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Search mapped memory through pwndbg with parsed matches."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.search_memory(
+                value=value,
+                value_type=value_type,
+                mapping=mapping,
+                hex_encoded=hex_encoded,
+                executable=executable,
+                writable=writable,
+                limit=limit,
+                aligned=aligned,
+                step=step,
+            )
+        )
+
+    def write_memory(
+        self, address: str, data_hex: str, verify: bool = True
+    ) -> Dict[str, Any]:
+        """Write bytes to inferior memory with optional read-back verification."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.write_memory(address, data_hex, verify=verify)
+        )
+
+    def disassemble(self, start: str = "$pc", byte_count: int = 64) -> Dict[str, Any]:
+        """Return typed MI disassembly for a bounded byte range."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.disassemble(start=start, byte_count=byte_count)
+        )
+
+    def step_until_event(
+        self,
+        event: str,
+        symbol_regex: Optional[str] = None,
+        mnemonic: Optional[str] = None,
+        operands: Optional[str] = None,
+        target: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Step until a typed call, jump, return, syscall, instruction, or address."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.step_until_event(
+                event=event,
+                symbol_regex=symbol_regex,
+                mnemonic=mnemonic,
+                operands=operands,
+                target=target,
+            )
+        )
 
     def _get_full_context(self) -> Dict[str, Any]:
         """Get complete debugging context (raw responses per context)"""

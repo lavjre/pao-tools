@@ -1,0 +1,159 @@
+---
+title: "Debugger and Memory"
+description: "Typed breakpoint, watchpoint, register, expression, memory, disassembly, thread, and advanced stepping APIs."
+---
+
+This API layer turns common GDB/MI and pinned-pwndbg operations into validated,
+typed responses. Every response retains raw evidence, and every tool is scoped to an
+existing `session_id`.
+
+## Tools
+
+| Tool | Main arguments | Typed result |
+| --- | --- | --- |
+| `list_breakpoints` | `session_id` | Breakpoint ids, state, locations, conditions, and hit counts |
+| `delete_breakpoint` | `session_id`, `number` | Deletion status |
+| `toggle_breakpoint` | `session_id`, `number`, `enable` | Explicit enabled state |
+| `set_watchpoint` | `session_id`, `expression`, optional `access` | Hardware watchpoint id, expression, access mode, and type |
+| `read_registers` | `session_id`, optional `names` | Target register numbers, names, and hexadecimal values |
+| `write_register` | `session_id`, `name`, `value` | Before/after values and assignment evidence |
+| `evaluate_expression` | `session_id`, `expression` | GDB-formatted value |
+| `select_thread` | `session_id`, `thread_id` | Selected thread and frame |
+| `search_memory` | `session_id`, `value`, optional filters | Every parsed address, module, and displayed value |
+| `write_memory` | `session_id`, `address`, `data_hex`, optional `verify` | Byte count and optional read-back verification |
+| `disassemble` | `session_id`, optional `start`, `byte_count` | Address, function, offset, and instruction records |
+| `step_until_event` | `session_id`, `event`, event-specific filters | Executed pwndbg command and stop notification |
+
+## Breakpoints and watchpoints
+
+`set_breakpoint` remains on the Debug Sessions API, but now returns the same typed
+breakpoint record as the CRUD tools.
+
+```json
+{"tool":"set_breakpoint","arguments":{"session_id":"chal-a","location":"main"}}
+{"tool":"list_breakpoints","arguments":{"session_id":"chal-a"}}
+{"tool":"toggle_breakpoint","arguments":{"session_id":"chal-a","number":1,"enable":false}}
+```
+
+Representative `list_breakpoints` data:
+
+```json
+{
+  "command": "-break-list",
+  "state": "stopped",
+  "parser_version": "1",
+  "parsed": {
+    "count": 1,
+    "breakpoints": [{
+      "number": "1",
+      "type": "breakpoint",
+      "enabled": true,
+      "address": "0x401136",
+      "function": "main",
+      "condition": null,
+      "hit_count": 0,
+      "original_location": "main"
+    }]
+  },
+  "raw_output": "",
+  "raw_responses": ["..."]
+}
+```
+
+Hardware watchpoints depend on the target architecture and available debug
+registers. An unsupported read/access watchpoint returns a structured
+`WatchpointError`; it is not silently downgraded.
+
+```json
+{"tool":"set_watchpoint","arguments":{"session_id":"chal-a","expression":"*(long*)$rsp","access":"write"}}
+```
+
+## Registers and expressions
+
+Register names are discovered from the current target architecture rather than from
+a hard-coded x86 list. Loading another file clears this cache.
+
+```json
+{"tool":"read_registers","arguments":{"session_id":"chal-a","names":["rip","rsp","rax"]}}
+{"tool":"evaluate_expression","arguments":{"session_id":"chal-a","expression":"$rsp+0x20"}}
+{"tool":"write_register","arguments":{"session_id":"chal-a","name":"rax","value":"0x1337"}}
+```
+
+Representative write response:
+
+```json
+{
+  "success": true,
+  "command": "write_register rax",
+  "parsed": {
+    "name": "rax",
+    "requested_value": "0x1337",
+    "before": [{"number": 0, "name": "rax", "value": "0x0"}],
+    "after": [{"number": 0, "name": "rax", "value": "0x1337"}]
+  },
+  "raw_responses": {
+    "before": ["..."],
+    "assignment": ["..."],
+    "after": ["..."]
+  }
+}
+```
+
+## Memory search and mutation
+
+`search_memory` supports pwndbg types `byte`, `short`, `word`, `dword`, `qword`,
+`pointer`, `string`, `bytes`, and `asm`. Filters include mapping, executable/writable
+permissions, alignment, step, hex input, and an optional result limit.
+
+```json
+{
+  "tool": "search_memory",
+  "arguments": {
+    "session_id": "chal-a",
+    "value": "7f454c46",
+    "value_type": "bytes",
+    "hex_encoded": true,
+    "mapping": "chal"
+  }
+}
+```
+
+No MCP-side result limit is imposed. If a large binary or broad mapping produces a
+large response, the common response layer stores the complete JSON as a lossless
+artifact. Set `limit` only when you intentionally want pwndbg to stop after a fixed
+number of matches.
+
+`write_memory` accepts an even-length hexadecimal byte string. With `verify=true`
+(the default), the API reads the bytes back and fails if the result differs.
+
+```json
+{"tool":"write_memory","arguments":{"session_id":"chal-a","address":"$rsp","data_hex":"41424300","verify":true}}
+```
+
+## Disassembly and advanced stepping
+
+```json
+{"tool":"disassemble","arguments":{"session_id":"chal-a","start":"$pc","byte_count":128}}
+{"tool":"step_until_event","arguments":{"session_id":"chal-a","event":"next_call","symbol_regex":"malloc.*"}}
+```
+
+Supported step events:
+
+| Event | Pwndbg primitive | Required extra argument |
+| --- | --- | --- |
+| `next_call` | `nextcall` | optional `symbol_regex` |
+| `next_jump` | `nextjmp` | none |
+| `next_return` | `nextret` | none |
+| `next_syscall` | `nextsyscall` | none |
+| `step_syscall` | `stepsyscall` | none |
+| `instruction` | `stepuntilasm` | `mnemonic`, optional `operands` |
+| `address` | `xuntil` | `target` |
+
+Depending on GDB async timing, `parsed.stop` can initially be `null` while `state` is
+`running`. Call `gdb_poll` with a suitable timeout to retrieve the later stop event.
+
+<Warning>
+  `write_register`, `write_memory`, `delete_breakpoint`, `toggle_breakpoint`,
+  `set_watchpoint`, `select_thread`, and `step_until_event` change debugger or target
+  state. Use a dedicated session when comparing alternate exploit paths.
+</Warning>
