@@ -8,6 +8,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         artifacts,
         compatibility,
         debug,
+        elf_runtime,
         inspect,
         processes,
         pwncli,
@@ -19,6 +20,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     artifacts.register(mcp)
     compatibility.register(mcp)
     debug.register(mcp)
+    elf_runtime.register(mcp)
     inspect.register(mcp)
     processes.register(mcp)
     repos.register(mcp)

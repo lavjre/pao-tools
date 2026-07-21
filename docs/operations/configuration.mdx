@@ -29,6 +29,7 @@ This page covers the main knobs exposed by `pwno-mcp` itself.
 | `PAO_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | background cleanup interval; defaults to `900`. Set `0` to disable periodic cleanup |
 | `PAO_ARTIFACT_MIN_FREE_BYTES` | free disk reserve enforced before writes; defaults to `2147483648` (2 GiB) |
 | `PAO_PWNDBG_EXPECTED_VERSION` | expected runtime pwndbg version; Docker sets this to its pinned release |
+| `PAO_PWNDBG_INSPECTION_TIMEOUT_SECONDS` | per-command timeout for typed ELF/runtime inspection; defaults to `60` and can be increased for very large binaries |
 | `BINARY_URL` | enables lazy RetDec analysis against an externally reachable binary URL |
 
 These values control delivery, not data retention: crossing the inline threshold does

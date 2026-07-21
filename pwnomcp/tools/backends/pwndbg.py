@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from pwnomcp.tools.backends.compatibility import PwndbgCompatibility
 from pwnomcp.tools.backends.gdb import GdbController
+from pwnomcp.tools.backends.inspection import PwndbgInspection
 
 if TYPE_CHECKING:
     from pwnomcp.state.session import SessionState
@@ -33,6 +34,7 @@ class PwndbgTools:
         self.gdb = gdb_controller
         self.session = session_state
         self.compatibility = PwndbgCompatibility(gdb_controller)
+        self.inspection = PwndbgInspection(gdb_controller)
         # Ensure GDB is initialized once lazily to avoid startup cost unless used
         try:
             self.gdb.initialize()
@@ -60,6 +62,95 @@ class PwndbgTools:
         """Return raw help for one validated pwndbg command."""
         self.gdb.initialize()
         return self.compatibility.get_help(command_name)
+
+    def _record_inspection(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """Synchronize and record one typed inspection result."""
+        state = result.get("state", self.gdb.get_state())
+        self.session.update_state(state)
+        self.session.record_command(result.get("command", "inspection"), result)
+        return result
+
+    def analyze_elf(self, binary_path: str) -> Dict[str, Any]:
+        """Load and inspect an ELF using checksec, sections, and PLT parsers."""
+        self.gdb.initialize()
+        if not self.session.binary_loaded or self.session.binary_path != binary_path:
+            load_result = self.set_file(binary_path)
+            if not load_result.get("success"):
+                return {
+                    "success": False,
+                    "command": "analyze_elf",
+                    "state": self.gdb.get_state(),
+                    "error": f"Failed to load ELF: {binary_path}",
+                    "type": "ElfLoadError",
+                    "load_result": load_result,
+                }
+        return self._record_inspection(self.inspection.analyze_elf(binary_path))
+
+    def checksec(self, binary_path: str) -> Dict[str, Any]:
+        """Return typed mitigation information for an ELF path."""
+        self.gdb.initialize()
+        return self._record_inspection(self.inspection.checksec(binary_path))
+
+    def inspect_got_plt(
+        self,
+        symbol_filter: Optional[str] = None,
+        include_got: bool = True,
+        include_plt: bool = True,
+        include_readonly: bool = False,
+        all_objects: bool = False,
+        all_plt_symbols: bool = False,
+    ) -> Dict[str, Any]:
+        """Inspect typed GOT/PLT entries for the selected binary/runtime."""
+        self.gdb.initialize()
+        result = self.inspection.inspect_got_plt(
+            symbol_filter=symbol_filter,
+            include_got=include_got,
+            include_plt=include_plt,
+            include_readonly=include_readonly,
+            all_objects=all_objects,
+            all_plt_symbols=all_plt_symbols,
+        )
+        return self._record_inspection(result)
+
+    def memory_maps(
+        self,
+        address_or_module: Optional[str] = None,
+        writable: bool = False,
+        executable: bool = False,
+        gaps: bool = False,
+    ) -> Dict[str, Any]:
+        """Return parsed virtual memory mappings."""
+        self.gdb.initialize()
+        return self._record_inspection(
+            self.inspection.memory_maps(
+                address_or_module=address_or_module,
+                writable=writable,
+                executable=executable,
+                gaps=gaps,
+            )
+        )
+
+    def list_threads(self, limit: Optional[int] = None) -> Dict[str, Any]:
+        """Return parsed pwndbg thread information."""
+        self.gdb.initialize()
+        return self._record_inspection(self.inspection.threads(limit=limit))
+
+    def get_process_info(self) -> Dict[str, Any]:
+        """Return parsed process metadata from procinfo."""
+        self.gdb.initialize()
+        return self._record_inspection(self.inspection.process_info())
+
+    def inspect_libc(self, include_link_map: bool = True) -> Dict[str, Any]:
+        """Return parsed libc metadata and optional dynamic link map."""
+        self.gdb.initialize()
+        return self._record_inspection(
+            self.inspection.inspect_libc(include_link_map=include_link_map)
+        )
+
+    def inspect_address(self, address: str = "$pc") -> Dict[str, Any]:
+        """Return parsed mapping, offsets, and sections for an address."""
+        self.gdb.initialize()
+        return self._record_inspection(self.inspection.address_info(address))
 
     def execute(self, command: str) -> Dict[str, Any]:
         """Execute arbitrary GDB/pwndbg command and return raw responses"""

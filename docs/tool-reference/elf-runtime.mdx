@@ -1,0 +1,246 @@
+---
+title: "ELF and Runtime Inspection"
+description: "Typed pwndbg APIs for mitigations, sections, linkage, mappings, threads, process state, libc, and addresses."
+---
+
+These tools parse the output of the pinned pwndbg runtime into stable fields while
+retaining `raw_output` and `raw_responses` as evidence. Addresses remain hexadecimal
+strings so JavaScript/JSON clients do not lose 64-bit precision.
+
+## Tools
+
+| Tool | Main arguments | Typed result |
+| --- | --- | --- |
+| `analyze_elf` | `session_id`, optional `binary_path` | Aggregated mitigations, sections, and PLT |
+| `checksec` | `session_id`, optional `binary_path` | Architecture and normalized mitigation status |
+| `inspect_got_plt` | `session_id`, optional filters/flags | GOT targets, protection, and PLT symbols |
+| `memory_maps` | `session_id`, optional module/address and permission filters | Virtual mappings and decoded permissions |
+| `list_threads` | `session_id`, optional `limit` | Thread number, name, status, PC, and symbol |
+| `get_process_info` | `session_id` | Executable, command line, IDs, groups, cwd, and FDs |
+| `inspect_libc` | `session_id`, optional `include_link_map` | libc type/version, bases, paths, symbolication, and link map |
+| `inspect_address` | `session_id`, `address` | Containing mapping, file offsets, and ELF sections |
+
+## `analyze_elf`
+
+Supplying `binary_path` loads that ELF into the selected debugger session. Omitting
+it uses the session binary or `/workspace/target`.
+
+```json
+{"tool":"analyze_elf","arguments":{"session_id":"chal-a","binary_path":"/workspace/chal"}}
+```
+
+Representative `data.parsed`:
+
+```json
+{
+  "binary_path": "/workspace/chal",
+  "security": {
+    "arch": "amd64",
+    "mitigations": {
+      "relro": {"status": "Full RELRO", "level": "full"},
+      "canary": {"status": "Canary found", "enabled": true},
+      "nx": {"status": "NX enabled", "enabled": true},
+      "pie": {"status": "PIE enabled", "enabled": true}
+    }
+  },
+  "sections": {"count": 29, "sections": ["..."]},
+  "plt": {"section_count": 3, "entry_count": 104, "sections": ["..."]}
+}
+```
+
+## `checksec`
+
+`checksec` can inspect a workspace ELF without changing the selected inferior.
+
+```json
+{"tool":"checksec","arguments":{"session_id":"chal-a","binary_path":"/workspace/chal"}}
+```
+
+```json
+{
+  "command": "checksec -f \"/workspace/chal\"",
+  "parsed": {
+    "file": "/workspace/chal",
+    "arch": "amd64",
+    "mitigations": {
+      "relro": {"status": "Partial RELRO", "level": "partial"},
+      "canary": {"status": "No canary found", "enabled": false},
+      "nx": {"status": "NX enabled", "enabled": true},
+      "pie": {"status": "No PIE (0x400000)", "enabled": false}
+    }
+  },
+  "raw_output": "...",
+  "raw_responses": ["..."]
+}
+```
+
+## `inspect_got_plt`
+
+```json
+{
+  "tool": "inspect_got_plt",
+  "arguments": {
+    "session_id": "chal-a",
+    "symbol_filter": "puts",
+    "include_readonly": true
+  }
+}
+```
+
+```json
+{
+  "complete": true,
+  "component_status": {"got": true, "plt": true},
+  "parsed": {
+    "got": {
+      "protection": "Full RELRO",
+      "count": 1,
+      "entries": [
+        {"address": "0x555555557fc0", "symbol": "puts@GLIBC_2.2.5", "target": "0x7ffff7e2a980"}
+      ]
+    },
+    "plt": {
+      "entry_count": 1,
+      "sections": [
+        {"name": ".plt", "entries": [{"address": "0x1030", "symbol": "puts@plt"}]}
+      ]
+    }
+  }
+}
+```
+
+GOT data normally requires a stopped inferior. If GOT fails but PLT succeeds, the
+tool returns `success=true`, `complete=false`, the PLT data, and a warning naming the
+failed component.
+
+## `memory_maps`
+
+```json
+{"tool":"memory_maps","arguments":{"session_id":"chal-a","executable":true}}
+```
+
+```json
+{
+  "parsed": {
+    "count": 1,
+    "mappings": [
+      {
+        "start": "0x555555555000",
+        "end": "0x555555556000",
+        "size": "0x1000",
+        "offset": "0x1000",
+        "permissions": "r-xp",
+        "readable": true,
+        "writable": false,
+        "executable": true,
+        "private": true,
+        "shared": false,
+        "file": "/workspace/chal"
+      }
+    ]
+  }
+}
+```
+
+## `list_threads`
+
+```json
+{"tool":"list_threads","arguments":{"session_id":"chal-a","limit":32}}
+```
+
+```json
+{
+  "parsed": {
+    "shown": 1,
+    "total": 1,
+    "threads": [
+      {"global_num": 1, "name": "chal", "status": "stopped", "pc": "0x555555555149", "symbol": "main+4"}
+    ]
+  }
+}
+```
+
+## `get_process_info`
+
+```json
+{"tool":"get_process_info","arguments":{"session_id":"chal-a"}}
+```
+
+```json
+{
+  "parsed": {
+    "exe": "/workspace/chal",
+    "cmdline": "/workspace/chal --mode test",
+    "cwd": "/workspace",
+    "pid": 31337,
+    "tid": 31337,
+    "uid": [1000, 1000, 1000, 1000],
+    "gid": [1000, 1000, 1000, 1000],
+    "groups": [1000],
+    "file_descriptors": {"0": "/dev/null", "1": "pipe:[1234]"}
+  }
+}
+```
+
+## `inspect_libc`
+
+```json
+{"tool":"inspect_libc","arguments":{"session_id":"chal-a","include_link_map":true}}
+```
+
+```json
+{
+  "parsed": {
+    "libc": {
+      "libc": "glibc",
+      "version": "2.39",
+      "linked": "dynamically",
+      "mappings": {
+        "libc": {"base": "0x7ffff7c00000", "path": "/usr/lib/x86_64-linux-gnu/libc.so.6"},
+        "ld": {"base": "0x7ffff7fc0000", "path": "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"}
+      },
+      "symbolication": {"has_exported_symbols": true, "has_internal_symbols": true, "has_debug_info": true}
+    },
+    "link_map": {
+      "count": 1,
+      "entries": [
+        {"node": "0x7ffff7ffd6b0", "objfile": "/usr/lib/x86_64-linux-gnu/libc.so.6", "load_bias": "0x7ffff7c00000", "dynamic_segment": "0x7ffff7dd1b60"}
+      ]
+    }
+  }
+}
+```
+
+## `inspect_address`
+
+```json
+{"tool":"inspect_address","arguments":{"session_id":"chal-a","address":"$pc"}}
+```
+
+```json
+{
+  "parsed": {
+    "address": "0x555555555149",
+    "mapping": {"start": "0x555555555000", "end": "0x555555556000", "permissions": "r-xp", "file": "/workspace/chal"},
+    "offsets": {
+      "file_(base)": {"address": "0x555555555149", "base": "0x555555554000", "offset": "0x1149"},
+      "file_(disk)": {"address": "0x555555555149", "base": "/workspace/chal", "offset": "0x1149"}
+    },
+    "sections": [{"name": ".text", "address": "0x555555555149", "base": "0x555555555040", "offset": "0x109"}]
+  }
+}
+```
+
+## State and output behavior
+
+- `checksec` only needs a readable ELF under `/workspace`.
+- `analyze_elf` loads the ELF into the selected session but does not run it.
+- PLT and non-rebased sections are available after file loading.
+- GOT, mappings, threads, process, libc, and address inspection are most complete
+  while an inferior is stopped.
+- Filter strings and address expressions reject command separators and control
+  characters before reaching GDB.
+- Large section, PLT, GOT, mapping, or link-map results use the normal artifact
+  delivery policy without truncation.
+- Typed inspection commands use a 60-second timeout by default. Set
+  `PAO_PWNDBG_INSPECTION_TIMEOUT_SECONDS` higher for exceptionally large targets.
