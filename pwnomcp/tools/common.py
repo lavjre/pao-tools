@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 from fastmcp import Context
 
 from pwnomcp.api import ToolError, ToolMeta, ToolResponse
+from pwnomcp.artifacts import ArtifactStore
 from pwnomcp.pwnpipe import PwnPipe
 from pwnomcp.services import AppServices
 from pwnomcp.state import DebugSession, DebugSessionRegistry
@@ -32,6 +33,8 @@ def build_tool_response(
     *,
     duration_ms: int = 0,
     session_id: Optional[str] = None,
+    artifact_store: Optional[ArtifactStore] = None,
+    auto_artifact: bool = True,
 ) -> Dict[str, Any]:
     """Normalize a tool result into the versioned public response envelope.
 
@@ -92,10 +95,20 @@ def build_tool_response(
         warnings=warnings,
         meta=ToolMeta(duration_ms=duration_ms),
     )
+
+    if auto_artifact and artifact_store is not None and response.data is not None:
+        serialized_data = artifact_store.serialize_json(response.data)
+        if artifact_store.should_store(serialized_data):
+            artifact = artifact_store.save_json_bytes(
+                serialized_data,
+                tool=tool,
+                session_id=session_id,
+            )
+            response.data = artifact.to_dict()
     return response.as_dict()
 
 
-def catch_errors() -> Callable[[Callable[..., Any]], Any]:
+def catch_errors(*, auto_artifact: bool = True) -> Callable[[Callable[..., Any]], Any]:
     """Wrap an MCP tool with the shared response envelope and error handling."""
 
     def decorator(fn: Callable[..., Any]) -> Any:
@@ -106,6 +119,15 @@ def catch_errors() -> Callable[[Callable[..., Any]], Any]:
             started_at = time.monotonic()
             bound_arguments = fn_signature.bind_partial(*args, **kwargs)
             requested_session_id = bound_arguments.arguments.get("session_id")
+            artifact_store = None
+            context = bound_arguments.arguments.get("ctx")
+            if context is not None:
+                try:
+                    services = context.lifespan_context.get("services")
+                    if services is not None:
+                        artifact_store = services.artifact_store
+                except (AttributeError, RuntimeError):
+                    artifact_store = None
             try:
                 result = await fn(*args, **kwargs)
             except Exception as e:
@@ -125,6 +147,8 @@ def catch_errors() -> Callable[[Callable[..., Any]], Any]:
                     if requested_session_id is not None
                     else None
                 ),
+                artifact_store=artifact_store,
+                auto_artifact=auto_artifact,
             )
 
         wrapper.__annotations__ = dict(wrapper.__annotations__)

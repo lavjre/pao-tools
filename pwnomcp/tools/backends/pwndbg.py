@@ -5,11 +5,15 @@ Provides MCP tool implementations for GDB/pwndbg commands.
 Each tool returns immediate results suitable for LLM interaction.
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from pwnomcp.tools.backends.gdb import GdbController
-from pwnomcp.state.session import SessionState
+
+if TYPE_CHECKING:
+    from pwnomcp.state.session import SessionState
 
 logger = logging.getLogger(__name__)
 

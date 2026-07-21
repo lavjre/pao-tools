@@ -12,7 +12,8 @@ These tools are for helper services, build steps, and supporting automation. The
 ## Returned shape
 
 All tools on this page return the shared structured [Response API](/concepts/response-shapes).
-Complete stdout and stderr are preserved in `data`.
+Complete stdout and stderr are preserved. Large streams are spooled to disk and their
+fields contain an artifact descriptor instead of an oversized inline string.
 
 ## `run_command`
 
@@ -21,6 +22,32 @@ Use for short-lived shell commands such as compiles and helper scripts.
 ```json
 {"tool":"run_command","arguments":{"command":"gcc -g vuln.c -o chal","cwd":"/workspace","timeout":30.0}}
 ```
+
+Large-output response excerpt:
+
+```json
+{
+  "data": {
+    "command": "objdump -d /workspace/large-chal",
+    "returncode": 0,
+    "stdout": {
+      "delivery": "artifact",
+      "artifact_id": "4d3d4d939ae047a1a90a0ffda031bcd2",
+      "tool": "run_command",
+      "content_type": "text/plain",
+      "encoding": "utf-8",
+      "size_bytes": 7340032,
+      "sha256": "...",
+      "stream": "stdout"
+    },
+    "stderr": "",
+    "cwd": "/workspace"
+  }
+}
+```
+
+Read the output with [artifact tools](/tool-reference/artifacts). The original bytes
+are available through `content_base64`, including chunks that split a UTF-8 character.
 
 ## Background helpers
 

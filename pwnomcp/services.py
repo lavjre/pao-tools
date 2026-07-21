@@ -4,6 +4,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict
 
+from pwnomcp.artifacts import ArtifactStore
 from pwnomcp.pwnpipe import PwnPipe
 from pwnomcp.state import DebugSessionRegistry
 from pwnomcp.tools.backends import (
@@ -26,6 +27,7 @@ class AppServices:
     git_tools: GitTools
     python_tools: PythonTools
     retdec_analyzer: RetDecAnalyzer
+    artifact_store: ArtifactStore
     pwnpipe_sessions: Dict[str, PwnPipe] = field(default_factory=dict)
     pwnpipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -50,6 +52,7 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
 
     retdec_analyzer = RetDecAnalyzer()
     logger.info("RetDec analyzer created (lazy initialization)")
+    artifact_store = ArtifactStore(runtime_paths.artifacts_dir)
 
     return AppServices(
         runtime_paths=runtime_paths,
@@ -58,10 +61,12 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
         subprocess_tools=SubprocessTools(
             process_root=runtime_paths.processes_dir,
             workspace_root=runtime_paths.workspace_root,
+            artifact_store=artifact_store,
         ),
         git_tools=GitTools(workspace_dir=runtime_paths.repos_dir),
         python_tools=PythonTools(workspace_dir=runtime_paths.python_dir),
         retdec_analyzer=retdec_analyzer,
+        artifact_store=artifact_store,
     )
 
 

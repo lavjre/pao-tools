@@ -66,6 +66,7 @@ def test_build_runtime_paths_creates_isolated_directories(tmp_path):
     assert os.path.isdir(paths.processes_dir)
     assert os.path.isdir(paths.python_dir)
     assert os.path.isdir(paths.repos_dir)
+    assert os.path.isdir(paths.artifacts_dir)
 
 
 def test_session_ids_are_validated_instead_of_normalized():

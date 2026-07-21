@@ -25,6 +25,7 @@ class RuntimePaths:
     processes_dir: str
     python_dir: str
     repos_dir: str
+    artifacts_dir: str
 
 
 def build_runtime_paths(
@@ -41,6 +42,7 @@ def build_runtime_paths(
         processes_dir=os.path.join(resolved_runtime, "processes"),
         python_dir=os.path.join(resolved_runtime, "python"),
         repos_dir=os.path.join(resolved_runtime, "repos"),
+        artifacts_dir=os.path.join(resolved_runtime, "artifacts"),
     )
     for path in [
         paths.workspace_root,
@@ -49,6 +51,7 @@ def build_runtime_paths(
         paths.processes_dir,
         paths.python_dir,
         paths.repos_dir,
+        paths.artifacts_dir,
     ]:
         os.makedirs(path, exist_ok=True)
     return paths

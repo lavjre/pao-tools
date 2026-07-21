@@ -24,9 +24,15 @@ tools.
 
 The response layer does not truncate, summarize, paginate, or discard payload data.
 Full stdout, stderr, GDB responses, event lists, decompiled code, and Python output are
-returned inside `data`.
+preserved. Small payloads are returned directly inside `data`. When serialized `data`
+exceeds `PAO_INLINE_RESPONSE_BYTES`, the server stores it on disk and returns an
+artifact descriptor instead.
 
-Clients should apply their own display or storage policy when handling large results.
+For process tools, a large `stdout` or `stderr` stream can independently become an
+artifact descriptor while command metadata remains inline. This lets the subprocess
+backend spool output to disk instead of first accumulating it in server RAM.
+
+See [Large Output Artifacts](/tool-reference/artifacts) for range reads and examples.
 
 ## Success example
 
@@ -91,6 +97,7 @@ The envelope is identical for all tools; only `data` changes.
 | Python | `execute_python_script`, `execute_python_code`, `install_python_packages`, `list_python_packages` | Execution or package-manager results |
 | Repositories | `fetch_repo` | Clone path, revision, branch, and checkout information |
 | RetDec | `get_retdec_status`, `get_decompiled_code` | Analysis status or complete decompiled source |
+| Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact` | Metadata or a lossless byte range from stored large output |
 
 ## Attach result example
 

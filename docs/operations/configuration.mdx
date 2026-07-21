@@ -21,7 +21,13 @@ This page covers the main knobs exposed by `pwno-mcp` itself.
 | Variable | Purpose |
 | --- | --- |
 | `PWNO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
+| `PAO_INLINE_RESPONSE_BYTES` | inline payload threshold in bytes; defaults to `1048576` (1 MiB). Larger payloads use artifact delivery |
+| `PAO_ARTIFACT_CHUNK_BYTES` | default `read_artifact` range size; defaults to `262144` (256 KiB) |
 | `BINARY_URL` | enables lazy RetDec analysis against an externally reachable binary URL |
+
+These values control delivery, not data retention: crossing the inline threshold does
+not truncate output. `read_artifact` also accepts an explicit `length` and does not
+enforce a maximum range size.
 
 ## Example launches
 

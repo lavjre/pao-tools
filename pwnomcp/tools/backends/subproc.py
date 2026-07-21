@@ -8,17 +8,20 @@ Provides tools for running system commands, particularly useful for:
 """
 
 import logging
-import signal as signal_module
-import subprocess
-import shlex
-import threading
-from typing import Dict, Any, Optional, List
-import psutil
 import os
-import tempfile
-import time
 import re
+import signal as signal_module
+import shlex
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+from typing import Any, Dict, List, Optional
 
+import psutil
+
+from pwnomcp.artifacts import ArtifactStore
 from pwnomcp.utils.paths import DEFAULT_WORKSPACE
 
 logger = logging.getLogger(__name__)
@@ -32,15 +35,34 @@ class SubprocessTools:
         self,
         process_root: Optional[str] = None,
         workspace_root: str = DEFAULT_WORKSPACE,
+        artifact_store: Optional[ArtifactStore] = None,
     ):
         """Initialize subprocess tools."""
         self.background_processes: Dict[int, Dict[str, Any]] = {}
         self._lock = threading.RLock()
         self.workspace_root = os.path.normpath(workspace_root)
+        self.artifact_store = artifact_store
         self.process_root = process_root or os.path.join(
             tempfile.gettempdir(), "pwno", "processes"
         )
         os.makedirs(self.process_root, exist_ok=True)
+
+    def _read_output(self, path: str, stream: str, tool: str) -> Any:
+        """Return a small stream inline or persist a large stream incrementally."""
+        if (
+            self.artifact_store is not None
+            and os.path.getsize(path) > self.artifact_store.inline_response_bytes
+        ):
+            metadata = self.artifact_store.save_file(
+                path,
+                tool=tool,
+                content_type="text/plain",
+                encoding="utf-8",
+            )
+            return {**metadata.to_dict(), "stream": stream}
+
+        with open(path, "rb") as output_file:
+            return output_file.read().decode("utf-8", errors="replace")
 
     def _is_under_workspace(self, path: str) -> bool:
         workspace_root = self.workspace_root
@@ -226,6 +248,9 @@ class SubprocessTools:
             Dictionary with execution results
         """
         logger.info(f"Running command: {command}")
+        process_dir: Optional[str] = None
+        stdout_file = None
+        stderr_file = None
 
         try:
             # Parse command for safer execution
@@ -244,28 +269,37 @@ class SubprocessTools:
             if env:
                 cmd_env.update(env)
 
+            process_dir = tempfile.mkdtemp(prefix="command_", dir=self.process_root)
+            stdout_path = os.path.join(process_dir, "stdout.log")
+            stderr_path = os.path.join(process_dir, "stderr.log")
+            stdout_file = open(stdout_path, "wb")
+            stderr_file = open(stderr_path, "wb")
+
             process = subprocess.Popen(
                 self._shell_argv(command),
                 cwd=cwd,
                 env=cmd_env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                stdout=stdout_file,
+                stderr=stderr_file,
                 **self._popen_group_options(),
             )
+            timed_out = False
             try:
-                stdout, stderr = process.communicate(timeout=timeout)
+                process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._signal_process_tree(process, KILL_SIGNAL)
                 process.wait(timeout=5)
-                return {
-                    "success": False,
-                    "command": command,
-                    "error": f"Command timed out after {timeout} seconds",
-                    "cwd": cwd or os.getcwd(),
-                }
 
-            return {
+                timed_out = True
+
+            stdout_file.close()
+            stdout_file = None
+            stderr_file.close()
+            stderr_file = None
+            stdout = self._read_output(stdout_path, "stdout", "run_command")
+            stderr = self._read_output(stderr_path, "stderr", "run_command")
+
+            result = {
                 "success": process.returncode == 0,
                 "command": command,
                 "returncode": process.returncode,
@@ -273,15 +307,28 @@ class SubprocessTools:
                 "stderr": stderr,
                 "cwd": cwd or os.getcwd(),
             }
+            if timed_out:
+                result["success"] = False
+                result["error"] = f"Command timed out after {timeout} seconds"
+            return result
 
         except Exception as e:
-            logger.error(f"Failed to run command: {e}")
+            logger.exception("Failed to run command")
             return {
                 "success": False,
                 "command": command,
                 "error": str(e),
                 "cwd": cwd or os.getcwd(),
             }
+        finally:
+            for output_file in (stdout_file, stderr_file):
+                if output_file is not None:
+                    try:
+                        output_file.close()
+                    except OSError:
+                        pass
+            if process_dir is not None:
+                shutil.rmtree(process_dir, ignore_errors=True)
 
     def spawn_process(
         self,
@@ -324,8 +371,8 @@ class SubprocessTools:
             process_dir = tempfile.mkdtemp(prefix="proc_", dir=self.process_root)
             stdout_path = os.path.join(process_dir, "stdout.log")
             stderr_path = os.path.join(process_dir, "stderr.log")
-            stdout_file = open(stdout_path, "w+", encoding="utf-8")
-            stderr_file = open(stderr_path, "w+", encoding="utf-8")
+            stdout_file = open(stdout_path, "wb")
+            stderr_file = open(stderr_path, "wb")
 
             # Prepare environment
             cmd_env = os.environ.copy()
@@ -339,7 +386,6 @@ class SubprocessTools:
                 env=cmd_env,
                 stdout=stdout_file,
                 stderr=stderr_file,
-                text=True,
                 **self._popen_group_options(),
             )
 
@@ -365,10 +411,8 @@ class SubprocessTools:
                 # Process already terminated, read outputs
                 stdout_file.flush()
                 stderr_file.flush()
-                with open(stdout_path, "r") as f:
-                    stdout = f.read()
-                with open(stderr_path, "r") as f:
-                    stderr = f.read()
+                stdout = self._read_output(stdout_path, "stdout", "spawn_process")
+                stderr = self._read_output(stderr_path, "stderr", "spawn_process")
                 stdout_file.close()
                 stderr_file.close()
                 with self._lock:
@@ -443,17 +487,15 @@ class SubprocessTools:
                     except Exception:
                         pass
                     try:
-                        with open(
-                            entry["stdout_path"], "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            live_stdout = f.read()
+                        live_stdout = self._read_output(
+                            entry["stdout_path"], "stdout", "get_process"
+                        )
                     except Exception:
                         live_stdout = ""
                     try:
-                        with open(
-                            entry["stderr_path"], "r", encoding="utf-8", errors="ignore"
-                        ) as f:
-                            live_stderr = f.read()
+                        live_stderr = self._read_output(
+                            entry["stderr_path"], "stderr", "get_process"
+                        )
                     except Exception:
                         live_stderr = ""
                     return {
@@ -472,10 +514,12 @@ class SubprocessTools:
                     # Process finished, read outputs
                     entry["stdout_file"].close()
                     entry["stderr_file"].close()
-                    with open(entry["stdout_path"], "r") as f:
-                        stdout = f.read()
-                    with open(entry["stderr_path"], "r") as f:
-                        stderr = f.read()
+                    stdout = self._read_output(
+                        entry["stdout_path"], "stdout", "get_process"
+                    )
+                    stderr = self._read_output(
+                        entry["stderr_path"], "stderr", "get_process"
+                    )
                     del self.background_processes[pid]
                     return {
                         "success": True,

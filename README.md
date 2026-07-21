@@ -16,14 +16,16 @@ analysis workflows.
 - Shared Python research environment with pwntools
 - Workspace-scoped command execution and repository fetching
 - Versioned structured responses shared by every MCP tool
+- Lossless artifact and chunk delivery for large tool/process output
 - HTTP and stdio MCP transports
 - Optional RetDec integration
 
 ## Response API
 
 Every MCP tool returns the same `api_version: "1.0"` envelope. Payloads are
-returned in full; the server does not truncate stdout, stderr, GDB responses,
-events, or decompiled code.
+preserved in full; the server does not truncate stdout, stderr, GDB responses,
+events, or decompiled code. Small results stay inline. Large results are stored
+as artifacts and retrieved losslessly with `read_artifact` byte ranges.
 
 ```json
 {
@@ -43,6 +45,27 @@ events, or decompiled code.
   }
 }
 ```
+
+When `data` exceeds `PAO_INLINE_RESPONSE_BYTES` (1 MiB by default), it becomes
+an artifact descriptor:
+
+```json
+{
+  "delivery": "artifact",
+  "artifact_id": "4d3d4d939ae047a1a90a0ffda031bcd2",
+  "tool": "get_memory",
+  "session_id": "chal-a",
+  "content_type": "application/json",
+  "encoding": "utf-8",
+  "size_bytes": 4194432,
+  "sha256": "...",
+  "created_at": "2026-07-21T12:00:00+00:00"
+}
+```
+
+Use `list_artifacts`, `get_artifact_info`, and `read_artifact` to inspect or
+stream it. `read_artifact` defaults to 256 KiB per call and returns exact bytes
+as Base64 plus a decoded text convenience field.
 
 ## Quick start
 
@@ -105,6 +128,7 @@ uv run python -m pwnomcp
 - `/tmp/pwno/sessions`: debugger and exploit-session runtime files
 - `/tmp/pwno/processes`: managed process logs
 - `/tmp/pwno/python`: shared Python virtual environment
+- `/tmp/pwno/artifacts`: complete large-response payloads and metadata
 
 ## Roadmap
 
@@ -113,7 +137,7 @@ uv run python -m pwnomcp
 - Crash triage and core-dump analysis
 - ROP gadget and libc workflows
 - Local, remote, SSH, and QEMU target providers
-- Persistent research artifacts and report generation
+- Artifact retention policies and report generation
 
 ## Credits
 

@@ -82,6 +82,7 @@
 						"pages": [
 							"tool-reference/pwncli",
 							"tool-reference/processes",
+							"tool-reference/artifacts",
 							"tool-reference/python",
 							"tool-reference/repositories",
 							"tool-reference/retdec"

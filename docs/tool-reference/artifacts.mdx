@@ -1,0 +1,73 @@
+---
+title: "Large Output Artifacts"
+description: "Retrieve complete large MCP payloads incrementally and without byte loss."
+---
+
+Artifact delivery keeps oversized output out of a single MCP message without
+truncating it. The server stores the full payload under `PWNO_RUNTIME_ROOT/artifacts`
+and returns metadata containing an `artifact_id`, byte size, and SHA-256 digest.
+
+## Tools
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_artifacts` | optional `session_id` | newest-first artifact metadata list |
+| `get_artifact_info` | `artifact_id` | size, hash, source tool, content type, and creation time |
+| `read_artifact` | `artifact_id`, optional `offset`, optional `length` | one byte range plus the next offset and EOF state |
+
+## Read a chunk
+
+```json
+{
+  "tool": "read_artifact",
+  "arguments": {
+    "artifact_id": "4d3d4d939ae047a1a90a0ffda031bcd2",
+    "offset": 0,
+    "length": 262144
+  }
+}
+```
+
+Sample response:
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "read_artifact",
+  "session_id": null,
+  "data": {
+    "artifact": {
+      "delivery": "artifact",
+      "artifact_id": "4d3d4d939ae047a1a90a0ffda031bcd2",
+      "tool": "run_command",
+      "session_id": null,
+      "content_type": "text/plain",
+      "encoding": "utf-8",
+      "size_bytes": 7340032,
+      "sha256": "...",
+      "created_at": "2026-07-21T12:00:00+00:00"
+    },
+    "offset": 0,
+    "length": 262144,
+    "next_offset": 262144,
+    "eof": false,
+    "content": "decoded text preview...",
+    "content_base64": "ZXhhY3QgYnl0ZXMuLi4="
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 2
+  }
+}
+```
+
+Use `next_offset` as the next call's `offset` until `eof` is `true`. Decode and
+concatenate `content_base64` for lossless reconstruction. `content` is convenient for
+text display but can contain a replacement character when a byte range ends inside a
+multi-byte UTF-8 character.
+
+If `length` is omitted, the configured default is 256 KiB. The API does not impose a
+maximum explicit `length`; smaller repeated reads are recommended for bounded client
+memory and MCP message size.

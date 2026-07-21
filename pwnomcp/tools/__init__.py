@@ -4,8 +4,18 @@ from fastmcp import FastMCP
 
 
 def register_all_tools(mcp: FastMCP) -> None:
-    from . import debug, inspect, processes, pwncli, python_env, repos, retdec
+    from . import (
+        artifacts,
+        debug,
+        inspect,
+        processes,
+        pwncli,
+        python_env,
+        repos,
+        retdec,
+    )
 
+    artifacts.register(mcp)
     debug.register(mcp)
     inspect.register(mcp)
     processes.register(mcp)
