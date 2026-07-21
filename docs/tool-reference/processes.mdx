@@ -1,0 +1,46 @@
+---
+title: "Processes"
+description: "Run helper commands and manage tracked background processes."
+---
+
+These tools are for helper services, build steps, and supporting automation. They are not for running the target binary under debugger control.
+
+<Warning>
+  `run_command` and `spawn_process` intentionally guard against some bad patterns, including using them to run a target ELF from `/workspace` or wrapping `python -c` instead of using the Python tool family.
+</Warning>
+
+## Returned shape
+
+All tools on this page return JSON-formatted strings. Parse the payload if your client does not already coerce it into an object.
+
+## `run_command`
+
+Use for short-lived shell commands such as compiles and helper scripts.
+
+```json
+{"tool":"run_command","arguments":{"command":"gcc -g vuln.c -o chal","cwd":"/workspace","timeout":30.0}}
+```
+
+## Background helpers
+
+| Tool | Use it for | Important fields |
+| --- | --- | --- |
+| `spawn_process` | start a long-running helper process | `pid`, `stdout_path`, `stderr_path`, `process_dir` |
+| `get_process` | inspect one tracked background process | running status plus live or final output |
+| `kill_process` | stop a tracked process tree | signal defaults to `15`; unmanaged PIDs are rejected |
+| `list_processes` | inspect all tracked helpers | lightweight running-process summary |
+
+```json
+{"tool":"spawn_process","arguments":{"command":"python3 -m http.server 8000","cwd":"/workspace"}}
+{"tool":"get_process","arguments":{"pid":12345}}
+{"tool":"kill_process","arguments":{"pid":12345,"signal":15}}
+{"tool":"list_processes","arguments":{}}
+```
+
+## What gets tracked
+
+- stdout and stderr are written to log files under a server-managed process directory
+- `get_process` returns live output for tracked running processes when available
+- `kill_process` keeps the entry cached long enough for `get_process` to read outputs afterward
+
+Use [Build and Helper Processes](/guides/build-and-helper-processes) for workflow guidance.

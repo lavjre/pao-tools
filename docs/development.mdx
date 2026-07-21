@@ -1,0 +1,49 @@
+---
+title: "Development"
+description: "Local development, verification commands, and docs preview for maintainers."
+---
+
+This page is for working on `pwno-mcp` itself, not for debugging a target binary.
+
+## Local development
+
+Prerequisites on the host are Python 3.12+, GDB with Python support, and a working pwndbg setup.
+
+<CodeGroup>
+
+```bash uv
+uv sync --extra dev
+uv run python -m pwnomcp
+uv run python -m pwnomcp --stdio
+```
+
+```bash pip
+python -m pip install -e ".[dev]"
+python -m pwnomcp
+python -m pwnomcp --stdio
+```
+
+</CodeGroup>
+
+## Verification commands
+
+```bash
+uv run black --check .
+uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped
+uv run pytest -v
+```
+
+## Docs preview
+
+```bash
+npm --prefix docs run dev
+```
+
+## CI snapshot
+
+Current GitHub Actions run these verification steps before build or publish:
+
+- `uv sync --locked --extra dev`
+- `uv run black --check .`
+- `uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped`
+- `uv run pytest -v`

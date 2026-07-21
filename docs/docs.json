@@ -1,0 +1,177 @@
+{
+	"$schema": "https://mintlify.com/docs.json",
+	"theme": "aspen",
+	"name": "pwno-mcp",
+	"description": "Stateful MCP server for autonomous pwn and binary research with GDB, pwndbg, and session-aware tooling.",
+	"colors": {
+		"primary": "#EA580C",
+		"light": "#FFF7ED",
+		"dark": "#111827"
+	},
+	"logo": {
+		"light": "/images/logo-light.svg",
+		"dark": "/images/logo-dark.svg",
+		"href": "https://docs.pwno.io"
+	},
+	"icons": {
+		"library": "lucide"
+	},
+	"favicon": "/images/logo.png",
+	"navigation": {
+		"tabs": [
+      {
+        "tab": "Get Started",
+        "icon": "rocket",
+        "groups": [
+          {
+            "group": "Introduction",
+            "icon": "album",
+            "pages": ["index", "quickstart", "verify-setup"]
+          },
+          {
+            "group": "Client Setup",
+            "icon": "pizza",
+            "pages": [
+              "client-setup/claude-desktop",
+              "client-setup/claude-code",
+              "client-setup/cursor",
+              "client-setup/opencode",
+              "client-setup/codex-cli"
+            ]
+          }
+        ]
+      },
+			{
+				"tab": "Core Concepts",
+				"icon": "layers",
+				"pages": [
+					"concepts/sessions",
+					"concepts/workspace-paths",
+					"concepts/transports-and-runtime",
+					"concepts/response-shapes"
+				]
+			},
+			{
+				"tab": "Guides",
+				"icon": "workflow",
+
+				"pages": [
+					"guides/index",
+					"guides/first-debug-session",
+					"guides/attach-to-running-process",
+					"guides/interactive-exploit-loop",
+					"guides/multi-session-workflows",
+					"guides/build-and-helper-processes"
+				]
+			},
+			{
+				"tab": "Reference",
+				"icon": "square-terminal",
+				"groups": [
+					{
+						"group": "Debugger and Inspection",
+						"pages": [
+							"tool-reference/index",
+							"tool-reference/debug-sessions",
+							"tool-reference/inspection",
+							"tool-reference/attach-api"
+						]
+					},
+					{
+						"group": "Automation and Exploit I/O",
+						"pages": [
+							"tool-reference/pwncli",
+							"tool-reference/processes",
+							"tool-reference/python",
+							"tool-reference/repositories",
+							"tool-reference/retdec"
+						]
+					}
+				]
+			},
+			{
+				"tab": "Operations",
+				"icon": "server",
+				"pages": [
+					"operations/configuration",
+					"operations/docker-and-compose",
+					"troubleshooting"
+				]
+			},
+			{
+				"tab": "Maintainers",
+				"icon": "book-open",
+				"pages": [
+					"development",
+					"architecture",
+					"background-story",
+					"license",
+					"contributing"
+				]
+			}
+		]
+	},
+	"navbar": {
+		"links": [
+			{
+				"label": "GitHub",
+				"href": "https://github.com/pwno-io/pwno-mcp"
+			},
+			{
+				"label": "Pwno",
+				"href": "https://pwno.io"
+			}
+		],
+		"primary": {
+			"type": "button",
+			"label": "Quick Start",
+			"href": "/quickstart"
+		}
+	},
+	"footer": {
+		"socials": {
+			"github": "https://github.com/pwno-io/pwno-mcp",
+			"x": "https://x.com/retr0reg"
+		},
+		"links": [
+			{
+				"header": "Docs",
+				"items": [
+					{
+						"label": "Quick Start",
+						"href": "/quickstart"
+					},
+					{
+						"label": "Guides",
+						"href": "/guides/index"
+					},
+					{
+						"label": "Reference",
+						"href": "/tool-reference/index"
+					},
+					{
+						"label": "Operations",
+						"href": "/operations/configuration"
+					}
+				]
+			},
+			{
+				"header": "Project",
+				"items": [
+					{
+						"label": "Repository",
+						"href": "https://github.com/pwno-io/pwno-mcp"
+					},
+					{
+						"label": "License",
+						"href": "/license"
+					},
+					{
+						"label": "Commercial Use",
+						"href": "mailto:oss@pwno.io"
+					}
+				]
+			}
+		]
+	}
+}

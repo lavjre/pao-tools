@@ -1,0 +1,45 @@
+---
+title: "Codex CLI"
+description: "Connect pwno-mcp to Codex CLI over HTTP or stdio."
+---
+
+Codex CLI uses `~/.codex/config.toml` for MCP configuration.
+
+<CodeGroup>
+
+```toml HTTP
+[mcp_servers.pwno-mcp]
+url = "http://127.0.0.1:5500/mcp"
+```
+
+```toml stdio
+[mcp_servers.pwno-mcp]
+command = "docker"
+args = [
+  "run",
+  "--rm",
+  "-i",
+  "--cap-add=SYS_PTRACE",
+  "--cap-add=SYS_ADMIN",
+  "--security-opt",
+  "seccomp=unconfined",
+  "--security-opt",
+  "apparmor=unconfined",
+  "-v",
+  "/ABSOLUTE/PATH/TO/YOUR/PROJECT/workspace:/workspace",
+  "ghcr.io/pwno-io/pwno-mcp:latest",
+  "--stdio"
+]
+```
+
+</CodeGroup>
+
+## Check configuration
+
+```bash
+codex mcp list
+```
+
+<Check>
+  Once `pwno-mcp` appears in `codex mcp list`, you can start issuing normal agent prompts that reference the server by name.
+</Check>
