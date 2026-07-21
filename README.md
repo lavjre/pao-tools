@@ -1,79 +1,100 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/pwno-mcp-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/pwno-mcp-light.png">
-  <img alt="pwno-mcp banner" src="assets/pwno-mcp-light.png">
-</picture>
+# pao-tools
 
-<p align="center">stateful system for autonomous <code>pwn</code> and binary research, designed for LLM agents.</p>
-
-## Overview
-
-`pwno-mcp` runs GDB + pwndbg in an isolated environment and exposes stateful debugging, exploit I/O, and helper tooling over MCP for agentic coding clients.
+`pao-tools` is a stateful MCP server for binary exploitation and low-level
+security research. It gives AI agents controlled access to GDB/pwndbg,
+interactive exploit processes, Python tooling, repositories, and supporting
+analysis workflows.
 
 ## Features
 
-- Stateful debugger sessions via GDB + pwndbg
-- Deterministic execution control via GDB/MI
-- Fast context snapshots for registers, stack, disassembly, source, and backtrace
-- Interactive exploit-driver workflows with `pwncli`
-- Multi-session support for parallel workflows
-- Workspace automation helpers for commands, processes, Python, repos, and RetDec
-- HTTP and stdio transport support
+- Independent GDB/pwndbg sessions for parallel research
+- Deterministic execution control through GDB/MI
+- Register, stack, memory, disassembly, and backtrace inspection
+- Breakpoints, stepping, attach, interrupt, and asynchronous event polling
+- Binary-safe interactive exploit workflows through `pwncli`
+- Managed helper processes with process-tree cleanup
+- Shared Python research environment with pwntools
+- Workspace-scoped command execution and repository fetching
+- HTTP and stdio MCP transports
+- Optional RetDec integration
 
-## Documentation
+## Quick start
 
-The full documentation is available at [docs.pwno.io](https://docs.pwno.io).
-
-## Quick Start
-
-Create a local `workspace` directory, put your target binary there, then run the container.
+The recommended workflow is Docker. Create a workspace and place a target binary
+inside it:
 
 ```bash
-mkdir -p ./workspace
-cp ./path/to/your/binary ./workspace/chal
-chmod +x ./workspace/chal
+mkdir -p workspace
+cp /path/to/chal workspace/chal
+chmod +x workspace/chal
 ```
 
+Build and run the server:
+
 ```bash
+docker build -t pao-tools:latest . --platform linux/amd64
+
 docker run --rm -p 5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/pwno-io/pwno-mcp:latest
+  pao-tools:latest
 ```
 
-Default MCP endpoint:
+The default MCP endpoint is:
 
 ```text
 http://127.0.0.1:5500/mcp
 ```
 
-For stdio mode, client configs, health checks, and attach-helper details, use the docs site: [docs.pwno.io/quickstart](https://docs.pwno.io/quickstart).
+For stdio transport:
 
-## Development
+```bash
+python -m pwnomcp --stdio
+```
 
-For local development, architecture, and contributing guidance, see [docs.pwno.io/development](https://docs.pwno.io/development).
+## Local development
 
-## Usage
+Python 3.12 or newer is required. GDB and pwndbg must be available for debugger
+workflows.
 
-- non-profit: yes
-- commercial: `oss@pwno.io`
+```bash
+uv sync --extra dev
+uv run python -m pytest
+uv run black --check .
+uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped
+```
 
-## Future Enhancements
-- WebSocket endpoint for streaming I/O
-- Advanced memory analysis tools
-- Heap exploitation helpers
-- ROP chain generation
-- Symbolic execution integration
+Run the HTTP server locally:
+
+```bash
+uv run python -m pwnomcp
+```
+
+## Runtime layout
+
+- `/workspace`: target binaries, scripts, build output, and cloned repositories
+- `/tmp/pwno/sessions`: debugger and exploit-session runtime files
+- `/tmp/pwno/processes`: managed process logs
+- `/tmp/pwno/python`: shared Python virtual environment
+
+## Roadmap
+
+- Structured ELF and mitigation analysis
+- Complete breakpoint and watchpoint management
+- Crash triage and core-dump analysis
+- ROP gadget and libc workflows
+- Local, remote, SSH, and QEMU target providers
+- Persistent research artifacts and report generation
+
+## Credits
+
+Based on the original [pwno-mcp](https://github.com/pwno-io/pwno-mcp)
+project. Thanks to its authors and contributors for the initial foundation.
 
 ## License
 
-This project is licensed under CC BY-NC-ND 4.0.
-
-See `LICENSE` for details.
-
-## Contributing
-
-Issues and pull requests are welcome.
+This project retains the original CC BY-NC-ND 4.0 license. See
+[LICENSE](LICENSE) for details.
