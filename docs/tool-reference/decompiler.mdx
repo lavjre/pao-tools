@@ -1,0 +1,67 @@
+---
+title: "Local Decompiler"
+description: "Generate pseudo-C locally with the pinned Ghidra headless backend."
+---
+
+Pao Tools runs Ghidra inside the container. Binaries remain under `/workspace` and
+are never uploaded to a decompilation service.
+
+## Available tools
+
+| Tool | Main arguments | Purpose |
+| --- | --- | --- |
+| `get_decompiler_status` | none | report backend readiness, version, executable, script, memory, and concurrency limits |
+| `decompile_binary` | `binary_path`, optional `function`, `timeout`, `function_timeout` | decompile all discovered functions or one function selected by exact name/address |
+
+Check availability:
+
+```json
+{"tool":"get_decompiler_status","arguments":{}}
+```
+
+Decompile `main`:
+
+```json
+{
+  "tool": "decompile_binary",
+  "arguments": {
+    "binary_path": "/workspace/chal",
+    "function": "main",
+    "timeout": 300,
+    "function_timeout": 30
+  }
+}
+```
+
+An address inside a function is also accepted:
+
+```json
+{"tool":"decompile_binary","arguments":{"binary_path":"/workspace/chal","function":"0x4011a0"}}
+```
+
+Omit `function` to decompile every function Ghidra discovers.
+
+## Response data
+
+Successful results include:
+
+- `decompiled_code`: pseudo-C text or an artifact descriptor
+- `program`: executable format, language, and compiler specification
+- `manifest`: per-function name, entry address, status, and elapsed time
+- `function_count` and `failed_function_count`
+- complete Ghidra `stdout` and `stderr`
+- overall elapsed time and return code
+
+Pseudo-C, manifests, and logs larger than the inline threshold are copied directly
+to the artifact store. They are not truncated or loaded completely into server RAM.
+
+## Isolation and limits
+
+- every request uses a unique temporary Ghidra project
+- the temporary project is deleted after completion or failure
+- timeout cleanup terminates the complete Ghidra/Java process tree
+- concurrency defaults to one job to avoid several JVMs exhausting memory
+- Docker pins and SHA-256 verifies the Ghidra release during image build
+
+The backend is local-only. It does not accept service URLs and has no network path for
+submitting binaries.

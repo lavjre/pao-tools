@@ -5,7 +5,9 @@ Guide for agentic coding tools working in this repository.
 ## Repository facts
 - Language: Python (requires 3.12+; see `pyproject.toml`).
 - Packaging: `pyproject.toml` + `uv.lock` (uv is used in Docker).
-- Entry point: `python -m pwnomcp` (see `pwnomcp/__main__.py`).
+- Entry point: `python -m paomcp` (see `paomcp/__main__.py`).
+- Exploit CLI: vendored `paocli` package and `paocli` console entry point.
+- Local decompiler: pinned Ghidra headless runtime in Docker.
 - Runtime modes: HTTP (default path `/mcp`) and stdio (`--stdio`).
 - Docker-first workflow is supported (see `Dockerfile`, `docker-compose.yml`).
 
@@ -26,17 +28,17 @@ python -m pip install -e ".[dev]"
 
 ### Run locally
 ```bash
-python -m pwnomcp
+python -m paomcp
 ```
 
 stdio transport:
 ```bash
-python -m pwnomcp --stdio
+python -m paomcp --stdio
 ```
 
 ### Build Docker image
 ```bash
-docker build -t pwno-mcp:latest . --platform linux/amd64
+docker build -t pao-tools:latest . --platform linux/amd64
 ```
 
 Local helper script:
@@ -59,13 +61,13 @@ python -m black .
 
 Type-check (mypy defaults):
 ```bash
-python -m mypy pwnomcp
+python -m mypy paomcp
 ```
 
 ## Tests
-There are no tests in the repo right now, but pytest is in dev deps.
+Pytest coverage lives under `tests/`.
 
-Run all tests (if/when added):
+Run all tests:
 ```bash
 python -m pytest
 ```
@@ -100,7 +102,7 @@ python -m pytest -k "keyword"
 ### Types and data modeling
 - Use type hints on public functions and tool handlers.
 - Use `Optional[T]` for nullable values; avoid `None`-only sentinel logic.
-- Prefer `dataclasses` for lightweight state objects (see `pwnomcp/state/session.py`).
+- Prefer `dataclasses` for lightweight state objects (see `paomcp/state/session.py`).
 - Tool responses are structured dicts with `success`/`error` keys when failing.
 
 ### Naming
@@ -122,14 +124,14 @@ python -m pytest -k "keyword"
 
 ### Error handling
 - MCP tool handlers should not raise; return a structured error response.
-- Use `@catch_errors()` (or `tuple_on_error=True`) for tool endpoints
-  in `pwnomcp/router/mcp.py`.
+- Use `@catch_errors()` for tool endpoints.
 - Include `"type": type(e).__name__` when returning exceptions.
 - Keep error strings actionable and short.
 
 ### Tool and router structure
-- FastMCP tools live in `pwnomcp/router/mcp.py`.
-- Core logic belongs in `pwnomcp/tools/*` and is called by the router.
+- FastMCP tools live in `paomcp/tools/*` and are registered by
+  `paomcp/tools/__init__.py`.
+- Core logic belongs in `paomcp/tools/backends/*` and is called by tool handlers.
 - Update session state via `SessionState` when state changes.
 
 ### Files and paths

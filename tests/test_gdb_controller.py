@@ -1,4 +1,4 @@
-from pwnomcp.tools.backends.gdb import GdbController
+from paomcp.tools.backends.gdb import GdbController
 
 
 def bare_controller():

@@ -8,9 +8,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from pwnomcp.artifacts import ArtifactPinnedError, ArtifactStore
-from pwnomcp.tools.backends.subproc import SubprocessTools
-from pwnomcp.tools.common import build_tool_response
+from paomcp.artifacts import ArtifactPinnedError, ArtifactStore
+from paomcp.tools.backends.subproc import SubprocessTools
+from paomcp.tools.common import build_tool_response
 
 
 def test_large_response_is_preserved_as_artifact(tmp_path):

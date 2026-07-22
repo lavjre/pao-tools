@@ -1,9 +1,9 @@
 ---
 title: "Configuration"
-description: "CLI flags, runtime defaults, and environment variables that affect pwno-mcp."
+description: "CLI flags, runtime defaults, and environment variables that affect pao-tools."
 ---
 
-This page covers the main knobs exposed by `pwno-mcp` itself.
+This page covers the main knobs exposed by `pao-tools` itself.
 
 ## CLI flags
 
@@ -20,7 +20,7 @@ This page covers the main knobs exposed by `pwno-mcp` itself.
 
 | Variable | Purpose |
 | --- | --- |
-| `PWNO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
+| `PAO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
 | `PAO_INLINE_RESPONSE_BYTES` | inline payload threshold in bytes; defaults to `1048576` (1 MiB). Larger payloads use artifact delivery |
 | `PAO_ARTIFACT_CHUNK_BYTES` | default `read_artifact` range size; defaults to `262144` (256 KiB) |
 | `PAO_ARTIFACT_TTL_SECONDS` | retention time; defaults to `259200` (72 hours). Set `0` to disable expiry |
@@ -30,7 +30,10 @@ This page covers the main knobs exposed by `pwno-mcp` itself.
 | `PAO_ARTIFACT_MIN_FREE_BYTES` | free disk reserve enforced before writes; defaults to `2147483648` (2 GiB) |
 | `PAO_PWNDBG_EXPECTED_VERSION` | expected runtime pwndbg version; Docker sets this to its pinned release |
 | `PAO_PWNDBG_INSPECTION_TIMEOUT_SECONDS` | per-command timeout for typed ELF/runtime inspection; defaults to `60` and can be increased for very large binaries |
-| `BINARY_URL` | enables lazy RetDec analysis against an externally reachable binary URL |
+| `PAO_GHIDRA_HEADLESS` | local `analyzeHeadless` executable; Docker defaults to `/opt/ghidra/support/analyzeHeadless` |
+| `PAO_GHIDRA_VERSION` | informational pinned Ghidra version reported by `get_decompiler_status` |
+| `PAO_GHIDRA_MAXMEM` | maximum heap for each headless Ghidra process; defaults to `2G` |
+| `PAO_GHIDRA_MAX_CONCURRENT` | maximum simultaneous decompiler jobs; defaults to `1` |
 
 These values control delivery, not data retention: crossing the inline threshold does
 not truncate output. `read_artifact` also accepts an explicit `length` and does not
@@ -47,15 +50,15 @@ automatic cleanup.
 <CodeGroup>
 
 ```bash Default HTTP
-python -m pwnomcp
+python -m paomcp
 ```
 
 ```bash Custom ports
-python -m pwnomcp --host 0.0.0.0 --port 6600 --attach-port 6601 --http-path /mcp
+python -m paomcp --host 0.0.0.0 --port 6600 --attach-port 6601 --http-path /mcp
 ```
 
 ```bash stdio
-python -m pwnomcp --stdio
+python -m paomcp --stdio
 ```
 
 </CodeGroup>

@@ -473,6 +473,12 @@ wheels = [
 ]
 
 [[package]]
+name = "filebytes"
+version = "0.10.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/44/4ea92a74ca7d7940a29d6c437f62a91fd05d43bfa04fc8306b5dc541d01d/filebytes-0.10.2.tar.gz", hash = "sha256:764202f74d79e7587f04b6ad46f7c50485d8f32c4aeddd02200f1651a0892741", size = 20358, upload-time = "2020-02-09T22:38:36.711Z" }
+
+[[package]]
 name = "h11"
 version = "0.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -887,6 +893,54 @@ wheels = [
 ]
 
 [[package]]
+name = "pao-tools"
+version = "0.2.0"
+source = { editable = "." }
+dependencies = [
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "fastmcp" },
+    { name = "psutil" },
+    { name = "pwntools" },
+    { name = "pygdbmi" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "ropper" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "black" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "types-psutil" },
+    { name = "types-requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'" },
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "fastapi", specifier = ">=0.100.0" },
+    { name = "fastmcp", specifier = ">=3.1.0,<4" },
+    { name = "mypy", marker = "extra == 'dev'" },
+    { name = "psutil", specifier = ">=5.9.0" },
+    { name = "pwntools", specifier = ">=4.14.1" },
+    { name = "pygdbmi", specifier = ">=0.11.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "rich", specifier = ">=14.1.0" },
+    { name = "ropper", specifier = ">=1.13.13" },
+    { name = "types-psutil", marker = "extra == 'dev'" },
+    { name = "types-requests", marker = "extra == 'dev'" },
+    { name = "uvicorn", specifier = ">=0.23.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "paramiko"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -979,46 +1033,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/90/e2159492b5426be0c1fef7acba807a03511f97c5f86b3caeda6ad92351a7/psutil-7.2.2-cp37-abi3-win_amd64.whl", hash = "sha256:eb7e81434c8d223ec4a219b5fc1c47d0417b12be7ea866e24fb5ad6e84b3d988", size = 137737, upload-time = "2026-01-28T18:15:33.849Z" },
     { url = "https://files.pythonhosted.org/packages/8c/c7/7bb2e321574b10df20cbde462a94e2b71d05f9bbda251ef27d104668306a/psutil-7.2.2-cp37-abi3-win_arm64.whl", hash = "sha256:8c233660f575a5a89e6d4cb65d9f938126312bca76d8fe087b947b3a1aaac9ee", size = 134617, upload-time = "2026-01-28T18:15:36.514Z" },
 ]
-
-[[package]]
-name = "pwno-mcp"
-version = "0.2.0"
-source = { editable = "." }
-dependencies = [
-    { name = "fastapi" },
-    { name = "fastmcp" },
-    { name = "psutil" },
-    { name = "pwntools" },
-    { name = "pygdbmi" },
-    { name = "requests" },
-    { name = "rich" },
-    { name = "uvicorn" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "black" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "black", marker = "extra == 'dev'" },
-    { name = "fastapi", specifier = ">=0.100.0" },
-    { name = "fastmcp", specifier = ">=3.1.0,<4" },
-    { name = "mypy", marker = "extra == 'dev'" },
-    { name = "psutil", specifier = ">=5.9.0" },
-    { name = "pwntools", specifier = ">=4.14.1" },
-    { name = "pygdbmi", specifier = ">=0.11.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'" },
-    { name = "requests", specifier = ">=2.31.0" },
-    { name = "rich", specifier = ">=14.1.0" },
-    { name = "uvicorn", specifier = ">=0.23.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "pwntools"
@@ -1450,6 +1464,19 @@ wheels = [
 ]
 
 [[package]]
+name = "ropper"
+version = "1.13.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "capstone" },
+    { name = "filebytes" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/52/239eb5061cc05f41f71aaa31b3b2385dd7de64a26492199d9201c53ceb69/ropper-1.13.13.tar.gz", hash = "sha256:56c0975c245ec6df8497e63ca60a5c1b7d56f514da214e0fd807ec3ea3293424", size = 81288, upload-time = "2025-02-28T21:49:00.515Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/46/824aaa16b28d8967de556225deaa465774f999cbfc1b90f554a91b27a638/ropper-1.13.13-py3-none-any.whl", hash = "sha256:35b3dffa3490ddbb467cafb71f29d7fcb6620d946b7b401a54fa0614f63c0996", size = 117919, upload-time = "2025-02-28T21:48:57.139Z" },
+]
+
+[[package]]
 name = "rpds-py"
 version = "0.30.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1568,6 +1595,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702, upload-time = "2026-01-18T13:34:11.062Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272, upload-time = "2026-01-18T13:34:09.188Z" },
+]
+
+[[package]]
+name = "types-psutil"
+version = "7.2.2.20260518"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/cb/f1/6901857281d4e8d792492e1495eef6f4f01318a3b6a066486d81000a4511/types_psutil-7.2.2.20260518.tar.gz", hash = "sha256:9f825f631463a5b4d26f19f63aebc9ec25f01140d655026f3ad8a67841f9b331", size = 26660, upload-time = "2026-05-18T06:05:09.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/eb/f726339668879819599c74c2e1f0cab760912a4159046942bdae2ad37bd6/types_psutil-7.2.2.20260518-py3-none-any.whl", hash = "sha256:6a3d697665754a60d7b5a41d5a2cff12b53f5e0676d77810cd28ba5e14cb4049", size = 32820, upload-time = "2026-05-18T06:05:08.321Z" },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.33.0.20260712"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/db/51/703318f7b7be8bee126ec13bf615050f932d0179b8784420f3a0199cc769/types_requests-2.33.0.20260712.tar.gz", hash = "sha256:2141b67ab534a5c5cd2dac5034f2a35f42e699c5bf185eee608c5246a069d7fb", size = 25084, upload-time = "2026-07-12T05:14:20.455Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/62/e7/010c87f559e216d83f9dc51e939633fd0d0ead3377340181ab0e223cd3b5/types_requests-2.33.0.20260712-py3-none-any.whl", hash = "sha256:de027e28c171d3da529689cbfa023b0b4eab188c8dfa22fd834eebd2cee6e7bb", size = 21392, upload-time = "2026-07-12T05:14:19.616Z" },
 ]
 
 [[package]]

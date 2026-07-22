@@ -1,6 +1,6 @@
 import pytest
 
-from pwnomcp.tools.common import build_tool_response, catch_errors
+from paomcp.tools.common import build_tool_response, catch_errors
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,8 @@ import threading
 
 import pytest
 
-from pwnomcp.http.attach import run_attach_request
-from pwnomcp.http.models import AttachRequest
+from paomcp.http.attach import run_attach_request
+from paomcp.http.models import AttachRequest
 
 
 class FakePwndbgTools:

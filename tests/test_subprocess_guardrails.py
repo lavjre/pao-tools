@@ -1,4 +1,4 @@
-from pwnomcp.tools.backends.subproc import SubprocessTools
+from paomcp.tools.backends.subproc import SubprocessTools
 
 
 def test_run_command_blocks_inline_python_c():

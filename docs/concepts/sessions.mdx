@@ -1,9 +1,9 @@
 ---
 title: "Sessions"
-description: "Understand session_id, runtime directories, and how pwno-mcp keeps debugger state alive."
+description: "Understand session_id, runtime directories, and how pao-tools keeps debugger state alive."
 ---
 
-Every meaningful debugger workflow in `pwno-mcp` is scoped to a `session_id`.
+Every meaningful debugger workflow in `pao-tools` is scoped to a `session_id`.
 
 ## What a session contains
 
@@ -12,7 +12,7 @@ A debug session bundles together:
 - one GDB controller instance
 - one `SessionState` record for binary path, pid, state, and breakpoints
 - one session-specific `runtime_dir`
-- an optional `pwncli` driver PID tied to the same session
+- an optional `paocli` driver PID tied to the same session
 
 <Info>
   The server creates a default session at startup, but most real workflows should still use explicit session names so parallel tasks stay isolated and easy to reason about.
@@ -49,7 +49,7 @@ A debug session bundles together:
     {"tool":"close_debug_session","arguments":{"session_id":"chal-a"}}
     ```
 
-    Closing a session also stops any attached `pwncli` driver for that session.
+    Closing a session also stops any attached `paocli` driver for that session.
   </Step>
 </Steps>
 
@@ -57,7 +57,7 @@ A debug session bundles together:
 
 - They let you keep multiple binaries or exploit strategies active at the same time.
 - They prevent one agent thread from clobbering another thread's breakpoints or process state.
-- They give every session its own `runtime_dir`, which is where inline `pwncli` scripts are written.
+- They give every session its own `runtime_dir`, which is where inline `paocli` scripts are written.
 
 ## Multi-session pattern
 

@@ -6,16 +6,16 @@ description: "Stateful debugging, exploit I/O, and workspace automation for auto
 <img
   className="block dark:hidden"
   src="/images/banner-light.png"
-  alt="pwno-mcp banner"
+  alt="pao-tools banner"
 />
 <img
   className="hidden dark:block"
   src="/images/banner-dark.png"
-  alt="pwno-mcp banner"
+  alt="pao-tools banner"
 />
 
 
-`pwno-mcp` runs GDB + pwndbg in an isolated environment and exposes session-aware debugging, exploit-driver I/O, and helper tooling over MCP for agentic clients.
+`pao-tools` runs GDB + pwndbg in an isolated environment and exposes session-aware debugging, exploit-driver I/O, and helper tooling over MCP for agentic clients.
 
 <CardGroup cols={2}>
   <Card title="Quick Start" icon="rocket" href="/quickstart">
@@ -36,14 +36,12 @@ description: "Stateful debugging, exploit I/O, and workspace automation for auto
 
 The project is built for LLM-driven binary research workflows where a stateless shell is not enough. It keeps debugger state alive across calls, supports multiple parallel sessions, and pairs low-level debugging with helper tools for process management, Python execution, repo fetching, and exploit-driver flows.
 
-You can use `pwno-mcp` to participate in CTFs, research, and exploit development workflows.
-
-You can read the background story [here](/background-story).
+You can use `pao-tools` to participate in CTFs, research, and exploit development workflows.
 
 ## Typical workflow
 
 <Steps>
-  <Step title="Launch pwno-mcp">
+  <Step title="Launch pao-tools">
     Use the Docker flow in [Quick Start](/quickstart). Most users start with HTTP transport and the default `http://127.0.0.1:5500/mcp` endpoint.
   </Step>
   <Step title="Connect your client">
@@ -72,4 +70,4 @@ You can read the background story [here](/background-story).
 
 ## About
 
-This project is maintained by [Pwno](https://pwno.io), an AI cybersecurity startup founded by [Ruikai](https://ruik.ai) and [Evan Luo](https://evannotfound.com).
+`pao-tools` is maintained as an independent binary-research MCP.

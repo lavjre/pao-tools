@@ -1,6 +1,6 @@
 ---
 title: "Codex CLI"
-description: "Connect pwno-mcp to Codex CLI over HTTP or stdio."
+description: "Connect pao-tools to Codex CLI over HTTP or stdio."
 ---
 
 Codex CLI uses `~/.codex/config.toml` for MCP configuration.
@@ -8,12 +8,12 @@ Codex CLI uses `~/.codex/config.toml` for MCP configuration.
 <CodeGroup>
 
 ```toml HTTP
-[mcp_servers.pwno-mcp]
+[mcp_servers.pao-tools]
 url = "http://127.0.0.1:5500/mcp"
 ```
 
 ```toml stdio
-[mcp_servers.pwno-mcp]
+[mcp_servers.pao-tools]
 command = "docker"
 args = [
   "run",
@@ -27,7 +27,7 @@ args = [
   "apparmor=unconfined",
   "-v",
   "/ABSOLUTE/PATH/TO/YOUR/PROJECT/workspace:/workspace",
-  "ghcr.io/pwno-io/pwno-mcp:latest",
+  "ghcr.io/lavjre/pao-tools:edge",
   "--stdio"
 ]
 ```
@@ -41,5 +41,5 @@ codex mcp list
 ```
 
 <Check>
-  Once `pwno-mcp` appears in `codex mcp list`, you can start issuing normal agent prompts that reference the server by name.
+  Once `pao-tools` appears in `codex mcp list`, you can start issuing normal agent prompts that reference the server by name.
 </Check>

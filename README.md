@@ -15,14 +15,14 @@ analysis workflows.
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
-- Binary-safe interactive exploit workflows through `pwncli`
+- Binary-safe interactive exploit workflows through `paocli`
 - Managed helper processes with process-tree cleanup
 - Shared Python research environment with pwntools
 - Workspace-scoped command execution and repository fetching
 - Versioned structured responses shared by every MCP tool
 - Lossless artifact and chunk delivery for large tool/process output
 - HTTP and stdio MCP transports
-- Optional RetDec integration
+- Offline Ghidra headless decompilation by function name, address, or full binary
 
 ## Response API
 
@@ -106,7 +106,7 @@ http://127.0.0.1:5500/mcp
 For stdio transport:
 
 ```bash
-python -m pwnomcp --stdio
+python -m paomcp --stdio
 ```
 
 ## Local development
@@ -118,22 +118,22 @@ workflows.
 uv sync --extra dev
 uv run python -m pytest
 uv run black --check .
-uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped
+uv run mypy paomcp --ignore-missing-imports --disable-error-code=import-untyped
 ```
 
 Run the HTTP server locally:
 
 ```bash
-uv run python -m pwnomcp
+uv run python -m paomcp
 ```
 
 ## Runtime layout
 
 - `/workspace`: target binaries, scripts, build output, and cloned repositories
-- `/tmp/pwno/sessions`: debugger and exploit-session runtime files
-- `/tmp/pwno/processes`: managed process logs
-- `/tmp/pwno/python`: shared Python virtual environment
-- `/tmp/pwno/artifacts`: complete large-response payloads and metadata
+- `/tmp/pao/sessions`: debugger and exploit-session runtime files
+- `/tmp/pao/processes`: managed process logs
+- `/tmp/pao/python`: shared Python virtual environment
+- `/tmp/pao/artifacts`: complete large-response payloads and metadata
 
 ## Pwndbg compatibility
 
@@ -150,12 +150,9 @@ are installed in pao-tools.
 - Local, remote, SSH, and QEMU target providers
 - Research notes, snapshots, exports, and report generation
 
-## Credits
-
-Based on the original [pwno-mcp](https://github.com/pwno-io/pwno-mcp)
-project. Thanks to its authors and contributors for the initial foundation.
-
 ## License
 
 This project retains the original CC BY-NC-ND 4.0 license. See
 [LICENSE](LICENSE) for details.
+
+Credit: based on the original [pwno-mcp](https://github.com/pwno-io/pwno-mcp).

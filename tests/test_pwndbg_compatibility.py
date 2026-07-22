@@ -1,6 +1,6 @@
 import pytest
 
-from pwnomcp.tools.backends.compatibility import PwndbgCompatibility
+from paomcp.tools.backends.compatibility import PwndbgCompatibility
 
 
 class FakeGdb:

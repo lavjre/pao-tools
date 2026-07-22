@@ -1,6 +1,6 @@
 import pytest
 
-from pwnomcp.server import create_mcp
+from paomcp.server import create_mcp
 
 
 @pytest.mark.asyncio
@@ -28,7 +28,7 @@ async def test_python_execution_tool_guidance_in_descriptions():
     assert "stdout/stderr/exit code" in descriptions["run_command"]
     assert "under /workspace" in descriptions["run_command"]
     assert "execute_python_code" in descriptions["run_command"]
-    assert "pwncli" in descriptions["run_command"]
+    assert "paocli" in descriptions["run_command"]
     assert "use this for build and helper commands" in descriptions["run_command"]
 
     assert "under /workspace" in descriptions["spawn_process"]
@@ -42,10 +42,13 @@ async def test_python_execution_tool_guidance_in_descriptions():
     assert "does not append a newline" in descriptions["sendinput"]
     assert "0xdeadbeef" in descriptions["get_memory"]
 
-    assert "pwncli_attach_result" in descriptions["pwncli"]
-    assert "persistent" in descriptions["pwncli"]
-    assert "/workspace scripts" in descriptions["pwncli"]
-    assert "binary_path" in descriptions["pwncli"]
+    assert "paocli_attach_result" in descriptions["paocli"]
+    assert "persistent" in descriptions["paocli"]
+    assert "/workspace scripts" in descriptions["paocli"]
+    assert "binary_path" in descriptions["paocli"]
+    assert "locally with ghidra" in descriptions["decompile_binary"]
+    assert "no external" in descriptions["decompile_binary"]
+    assert "availability" in descriptions["get_decompiler_status"]
 
 
 @pytest.mark.asyncio
@@ -65,6 +68,12 @@ async def test_all_mcp_tools_publish_unified_response_schema():
 
     assert len(tools) == 66
     tool_names = {tool.name for tool in tools}
+    assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
+    assert {"decompile_binary", "get_decompiler_status"} <= tool_names
+    legacy_prefix = "".join(("pwn", "cli"))
+    assert all(legacy_prefix not in name for name in tool_names)
+    removed_backend = "".join(("ret", "dec"))
+    assert all(removed_backend not in name for name in tool_names)
     assert {
         "analyze_elf",
         "checksec",

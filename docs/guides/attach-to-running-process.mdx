@@ -3,7 +3,7 @@ title: "Attach to a Running Process"
 description: "Use the debugger attach tool or the attach sidecar API to join an existing process."
 ---
 
-Use attach flows when the target is already running and you want `pwno-mcp` to join that process instead of starting it with `run`.
+Use attach flows when the target is already running and you want `pao-tools` to join that process instead of starting it with `run`.
 
 ## Option 1: MCP tool attach
 
@@ -53,7 +53,7 @@ The local HTTP attach helper is useful for external scripts and wrappers. It is 
 ```
 
 ```python Python helper
-from pwnomcp.cli import attach
+from paomcp.cli import attach
 
 response = attach(
     pid=31337,

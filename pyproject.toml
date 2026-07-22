@@ -3,16 +3,18 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pwno-mcp"
+name = "pao-tools"
 version = "0.2.0"
 description = "MCP server for autonomous low-level security research with pwndbg"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
-license = {file = "LICENSE"}
+license = "CC-BY-NC-ND-4.0"
+license-files = ["LICENSE"]
 authors = [
-    {name = "Pwno Team"},
+    {name = "Pao Tools"},
 ]
 dependencies = [
+    "click>=8.1.0",
     "fastmcp>=3.1.0,<4",
     "pygdbmi>=0.11.0.0",
     "psutil>=5.9.0",
@@ -21,7 +23,11 @@ dependencies = [
     "uvicorn>=0.23.0",
     "pwntools>=4.14.1",
     "requests>=2.31.0",
+    "ropper>=1.13.13",
 ]
+
+[project.scripts]
+paocli = "paocli.cli:cli"
 
 [project.optional-dependencies]
 dev = [
@@ -29,8 +35,16 @@ dev = [
     "pytest-asyncio",
     "black",
     "mypy",
+    "types-psutil",
+    "types-requests",
 ]
 
 [tool.setuptools]
-# Automatically discover all packages and subpackages
-packages = { find = {} }
+# Package discovery is constrained below so tests are not shipped in wheels.
+
+[tool.setuptools.packages.find]
+include = ["paomcp*", "paocli*"]
+
+[tool.setuptools.package-data]
+paocli = ["conf/*", "conf/.*", "LICENSE"]
+paomcp = ["tools/backends/ghidra_scripts/*.java"]

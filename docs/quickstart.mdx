@@ -1,12 +1,12 @@
 ---
 title: "Quick Start"
-description: "Run pwno-mcp locally with Docker and connect an MCP client."
+description: "Run pao-tools locally with Docker and connect an MCP client."
 ---
 
-This is the fastest path to a working local `pwno-mcp` instance.
+This is the fastest path to a working local `pao-tools` instance.
 
 <Warning>
-  `pwno-mcp` needs `SYS_PTRACE`, `SYS_ADMIN`, and unconfined seccomp/apparmor settings so GDB and attach flows work correctly inside Docker.
+  `pao-tools` needs `SYS_PTRACE`, `SYS_ADMIN`, and unconfined seccomp/apparmor settings so GDB and attach flows work correctly inside Docker.
 </Warning>
 
 <Steps>
@@ -39,7 +39,7 @@ docker run --rm -p 5500:5500 \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/pwno-io/pwno-mcp:latest
+  ghcr.io/lavjre/pao-tools:edge
 ```
 
 ```bash stdio
@@ -49,7 +49,7 @@ docker run --rm -i \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/pwno-io/pwno-mcp:latest \
+  ghcr.io/lavjre/pao-tools:edge \
   --stdio
 ```
 

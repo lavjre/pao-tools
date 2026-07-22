@@ -1,9 +1,9 @@
 ---
 title: "Workspace Paths"
-description: "How pwno-mcp resolves file paths, working directories, and runtime artifacts."
+description: "How pao-tools resolves file paths, working directories, and runtime artifacts."
 ---
 
-`pwno-mcp` is designed around a container-visible workspace rooted at `/workspace`.
+`pao-tools` is designed around a container-visible workspace rooted at `/workspace`.
 
 ## The core rule
 
@@ -54,14 +54,14 @@ then a host file like `./workspace/chal` becomes `/workspace/chal` in tool calls
 Not everything lives in `/workspace`.
 
 - user-visible targets, source files, helper scripts, and cloned repos live in `/workspace`
-- server-managed runtime artifacts live under `PWNO_RUNTIME_ROOT`
+- server-managed runtime artifacts live under `PAO_RUNTIME_ROOT`
 - session runtime directories are created under that runtime root, not under `/workspace`
 
-By default, `PWNO_RUNTIME_ROOT` falls back to a temp directory similar to `/tmp/pwno`.
+By default, `PAO_RUNTIME_ROOT` falls back to a temp directory similar to `/tmp/pao`.
 
 ## Common path-sensitive tools
 
-- `set_file`, `pwncli`, and `execute_python_script` resolve binary or script paths under `/workspace`
+- `set_file`, `paocli`, and `execute_python_script` resolve binary or script paths under `/workspace`
 - `run_command`, `spawn_process`, and `execute_python_code` resolve `cwd` under `/workspace`
 - `fetch_repo` defaults to cloning into `/workspace/<repo-name>` when `target_dir` is omitted
 

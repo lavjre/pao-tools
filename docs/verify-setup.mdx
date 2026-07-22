@@ -1,6 +1,6 @@
 ---
 title: "Verify Setup"
-description: "Run a fast end-to-end check against a local pwno-mcp instance."
+description: "Run a fast end-to-end check against a local pao-tools instance."
 ---
 
 Most users can skip this page, but it is useful when you are validating a new client config or debugging a first-time setup issue.
@@ -9,7 +9,7 @@ Most users can skip this page, but it is useful when you are validating a new cl
   <Step title="Ask your agent to run a tiny debugger flow">
 
     ```text
-    Use pwno-mcp to create a debug session called chal-a, load /workspace/chal, set a breakpoint at main, run the program, show full context, then step once.
+    Use pao-tools to create a debug session called chal-a, load /workspace/chal, set a breakpoint at main, run the program, show full context, then step once.
     ```
   </Step>
   <Step title="Check the expected behavior">
@@ -23,7 +23,7 @@ Most users can skip this page, but it is useful when you are validating a new cl
 <CodeGroup>
 
 ```text Agent prompt
-Use pwno-mcp to create a debug session called chal-a, load /workspace/chal, set a breakpoint at main, run the program, show full context, then step once.
+Use pao-tools to create a debug session called chal-a, load /workspace/chal, set a breakpoint at main, run the program, show full context, then step once.
 ```
 
 ```json Manual tool calls

@@ -1,6 +1,6 @@
 ---
 title: "Troubleshooting"
-description: "Common pwno-mcp setup and runtime issues."
+description: "Common pao-tools setup and runtime issues."
 ---
 
 Start with the symptom that best matches what you are seeing.
@@ -24,8 +24,10 @@ Start with the symptom that best matches what you are seeing.
   <Accordion title="A helper tool returned a string instead of an object">
     Every MCP tool returns a structured object. See [Response API](/concepts/response-shapes).
   </Accordion>
-  <Accordion title="RetDec is unavailable">
-    Confirm `BINARY_URL` is set and points to a URL the external RetDec service can fetch.
+  <Accordion title="The local decompiler is unavailable">
+    Call `get_decompiler_status`. In Docker, verify the pinned Ghidra installation
+    exists at `/opt/ghidra/support/analyzeHeadless`. For a custom runtime, set
+    `PAO_GHIDRA_HEADLESS` to the local executable.
   </Accordion>
 </AccordionGroup>
 

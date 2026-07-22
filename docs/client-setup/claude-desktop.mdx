@@ -1,6 +1,6 @@
 ---
 title: "Claude Desktop"
-description: "Configure pwno-mcp for Claude Desktop over stdio."
+description: "Configure pao-tools for Claude Desktop over stdio."
 ---
 
 Claude Desktop uses a local stdio MCP server definition.
@@ -17,7 +17,7 @@ Claude Desktop uses a local stdio MCP server definition.
 ```json
 {
   "mcpServers": {
-    "pwno-mcp": {
+    "pao-tools": {
       "command": "docker",
       "args": [
         "run",
@@ -31,7 +31,7 @@ Claude Desktop uses a local stdio MCP server definition.
         "apparmor=unconfined",
         "-v",
         "/ABSOLUTE/PATH/TO/YOUR/PROJECT/workspace:/workspace",
-        "ghcr.io/pwno-io/pwno-mcp:latest",
+        "ghcr.io/lavjre/pao-tools:edge",
         "--stdio"
       ]
     }
@@ -40,5 +40,5 @@ Claude Desktop uses a local stdio MCP server definition.
 ```
 
 <Check>
-  Restart Claude Desktop after editing the config, then confirm `pwno-mcp` appears in the MCP server list.
+  Restart Claude Desktop after editing the config, then confirm `pao-tools` appears in the MCP server list.
 </Check>

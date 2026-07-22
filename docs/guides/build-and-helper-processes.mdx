@@ -3,7 +3,7 @@ title: "Build and Helper Processes"
 description: "Use run_command, spawn_process, Python helpers, and repo fetching without colliding with debugger flows."
 ---
 
-`pwno-mcp` includes automation tools for build steps and helper services, but they are intentionally separate from debugger control.
+`pao-tools` includes automation tools for build steps and helper services, but they are intentionally separate from debugger control.
 
 <CardGroup cols={2}>
   <Card title="run_command" icon="terminal">
@@ -48,7 +48,7 @@ description: "Use run_command, spawn_process, Python helpers, and repo fetching 
 
 - do not use `run_command` or `spawn_process` to start the target ELF you want to debug
 - do not use `python -c` inside `run_command`; use `execute_python_code` instead
-- use `pwncli` when you need interactive exploit-driver I/O instead of a generic subprocess
+- use `paocli` when you need interactive exploit-driver I/O instead of a generic subprocess
 
 <Warning>
   The subprocess backend actively rejects some unsafe usage patterns and returns a `ToolUsageError`-style payload with a recommended tool when you pick the wrong interface.

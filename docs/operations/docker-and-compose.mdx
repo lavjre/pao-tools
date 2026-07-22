@@ -1,9 +1,9 @@
 ---
 title: "Docker and Compose"
-description: "Container launch patterns, local image builds, and compose usage for pwno-mcp."
+description: "Container launch patterns, local image builds, and compose usage for pao-tools."
 ---
 
-`pwno-mcp` is designed for containerized usage first.
+`pao-tools` is designed for containerized usage first.
 
 <Warning>
   Keep the ptrace-related capabilities and unconfined seccomp/apparmor flags unless you have already proven that your environment supports a stricter configuration.
@@ -20,7 +20,7 @@ docker run --rm -p 5500:5500 \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/pwno-io/pwno-mcp:latest
+  ghcr.io/lavjre/pao-tools:edge
 ```
 
 ```bash stdio
@@ -30,7 +30,7 @@ docker run --rm -i \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
-  ghcr.io/pwno-io/pwno-mcp:latest \
+  ghcr.io/lavjre/pao-tools:edge \
   --stdio
 ```
 
@@ -39,7 +39,7 @@ docker run --rm -i \
 ## Build locally
 
 ```bash
-docker build -t pwno-mcp:latest . --platform linux/amd64
+docker build -t pao-tools:latest . --platform linux/amd64
 ```
 
 The published image targets `linux/amd64`. On Apple Silicon, keep the explicit platform flag unless you have built your own compatible variant.
@@ -49,7 +49,7 @@ The published image targets `linux/amd64`. On Apple Silicon, keep the explicit p
 ```bash
 docker-compose up -d
 docker-compose logs -f
-docker-compose exec pwno-mcp bash
+docker-compose exec pao-tools bash
 ```
 
 The repository `docker-compose.yml` exposes port `5500`, mounts `./workspace` to `/workspace`, and applies the required debugger capabilities.

@@ -4,7 +4,7 @@ description: "The versioned response envelope shared by every pao-tools MCP tool
 ---
 
 Every MCP tool returns the same structured response object. Clients no longer need to
-parse JSON strings or special-case debugger, process, Python, repository, or RetDec
+parse JSON strings or special-case debugger, process, Python, repository, or decompiler
 tools.
 
 ## Envelope
@@ -95,11 +95,11 @@ The envelope is identical for all tools; only `data` changes.
 | Debugger state | `set_breakpoint`, `list_breakpoints`, `delete_breakpoint`, `toggle_breakpoint`, `set_watchpoint`, `read_registers`, `write_register`, `evaluate_expression`, `select_thread` | Typed debugger state or mutation results plus raw MI evidence |
 | Memory/stepping | `search_memory`, `write_memory`, `disassemble`, `step_until_event` | Parsed matches/instructions, verified memory writes, and stop evidence |
 | Inspection | `get_context`, `get_memory` | Registers, frames, disassembly, or memory responses |
-| Exploit I/O | `pwncli`, `sendinput`, `checkoutput`, `checkevents`, `pwncli_stop`, `list_pwncli_sessions` | Driver state, output, structured events, and attach information |
+| Exploit I/O | `paocli`, `sendinput`, `checkoutput`, `checkevents`, `paocli_stop`, `list_paocli_sessions` | Driver state, output, structured events, and attach information |
 | Processes | `run_command`, `spawn_process`, `get_process`, `kill_process`, `list_processes` | Process metadata, complete stdout, and complete stderr |
 | Python | `execute_python_script`, `execute_python_code`, `install_python_packages`, `list_python_packages` | Execution or package-manager results |
 | Repositories | `fetch_repo` | Clone path, revision, branch, and checkout information |
-| RetDec | `get_retdec_status`, `get_decompiled_code` | Analysis status or complete decompiled source |
+| Local decompiler | `get_decompiler_status`, `decompile_binary` | Ghidra availability, pseudo-C, function manifest, and analysis logs |
 | Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact`, `get_artifact_store_status`, `set_artifact_pinned`, `delete_artifact`, `cleanup_artifacts` | Storage lifecycle metadata, cleanup controls, or a lossless byte range |
 
 ## Attach result example

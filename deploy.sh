@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CLUSTER=pwno-cluster
-REGION=us-central1
-PROJECT=pwno-io
-IMAGE=us-central1-docker.pkg.dev/pwno-io/pwno-vm-images/research-container
-DEPLOY=research-container
-SERVICE=research-container-lb
+CLUSTER=${PAO_CLUSTER:-pao-cluster}
+REGION=${PAO_REGION:-us-central1}
+PROJECT=${PAO_GCP_PROJECT:?Set PAO_GCP_PROJECT to your Google Cloud project id}
+IMAGE=${PAO_IMAGE:?Set PAO_IMAGE to the container image to deploy}
+DEPLOY=${PAO_DEPLOYMENT:-pao-tools}
+SERVICE=${PAO_SERVICE:-pao-tools-lb}
 
 echo "Fetching credentials for $CLUSTER"
 gcloud container clusters get-credentials "$CLUSTER" \

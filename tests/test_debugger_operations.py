@@ -1,6 +1,6 @@
 import pytest
 
-from pwnomcp.tools.backends.debugger import DebuggerOperations
+from paomcp.tools.backends.debugger import DebuggerOperations
 
 
 def response(payload=None, *, success=True, state="stopped", console=False):

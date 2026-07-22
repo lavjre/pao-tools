@@ -1,4 +1,4 @@
-from pwnomcp.state import SessionState
+from paomcp.state import SessionState
 
 
 def test_breakpoint_lifecycle():

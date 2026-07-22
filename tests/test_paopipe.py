@@ -1,0 +1,78 @@
+import sys
+import json
+
+from paomcp.paopipe import PaoPipe
+
+
+def test_paopipe_parses_paocli_attach_marker():
+    expected = {"successful": True, "attach": {"pid": 31337}}
+    payload = json.dumps(expected)
+    pipe = PaoPipe(
+        [
+            sys.executable,
+            "-c",
+            f"print('PAOCLI_ATTACH_RESULT:' + {payload!r})",
+        ]
+    )
+    try:
+        ready = pipe.wait_ready(timeout=2)
+        pipe.proc.wait(timeout=2)
+
+        assert ready["ready"] is True
+        assert pipe.get_attach_result() == expected
+        assert "PAOCLI_ATTACH_RESULT" not in pipe.release()
+    finally:
+        pipe.kill()
+
+
+def test_paopipe_releases_prompt_without_newline():
+    pipe = PaoPipe(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('prompt: '); sys.stdout.flush(); time.sleep(5)",
+        ]
+    )
+    try:
+        ready = pipe.wait_ready(timeout=2)
+        output = pipe.release()
+
+        assert ready["ready"] is True
+        assert "prompt: " in output
+    finally:
+        pipe.kill()
+
+
+def test_paopipe_releases_fragmented_prompt_without_newline():
+    pipe = PaoPipe(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys,time; sys.stdout.write('P'); sys.stdout.flush(); "
+                "time.sleep(.2); sys.stdout.write('rompt: '); sys.stdout.flush(); "
+                "time.sleep(5)"
+            ),
+        ]
+    )
+    try:
+        ready = pipe.wait_ready(timeout=2)
+        output = pipe.release()
+
+        assert ready["ready"] is True
+        assert "Prompt: " in output
+    finally:
+        pipe.kill()
+
+
+def test_paopipe_replaces_invalid_utf8():
+    pipe = PaoPipe([sys.executable, "-c", "import os; os.write(1, b'bad: \\xff\\n')"])
+    try:
+        pipe.wait_ready(timeout=2)
+        pipe.proc.wait(timeout=2)
+        output = pipe.release()
+
+        assert "bad: " in output
+        assert "\ufffd" in output
+    finally:
+        pipe.kill()

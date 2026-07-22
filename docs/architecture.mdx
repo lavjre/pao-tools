@@ -1,9 +1,9 @@
 ---
 title: "Architecture"
-description: "Project structure and runtime design decisions behind pwno-mcp."
+description: "Project structure and runtime design decisions behind pao-tools."
 ---
 
-`pwno-mcp` combines a FastMCP server, a session registry, debugger backends, and helper tool families into a single stateful runtime.
+`pao-tools` combines a FastMCP server, a session registry, debugger backends, and helper tool families into a single stateful runtime.
 
 ## Main runtime surfaces
 
@@ -24,18 +24,18 @@ description: "Project structure and runtime design decisions behind pwno-mcp."
 
 ## Tool families
 
-- debugger control in `pwnomcp/tools/debug.py`
-- inspection in `pwnomcp/tools/inspect.py`
-- process helpers in `pwnomcp/tools/processes.py`
-- managed Python helpers in `pwnomcp/tools/python_env.py`
-- interactive exploit-driver flows in `pwnomcp/tools/pwncli.py`
-- repo acquisition in `pwnomcp/tools/repos.py`
-- RetDec integration in `pwnomcp/tools/retdec.py`
+- debugger control in `paomcp/tools/debug.py`
+- inspection in `paomcp/tools/inspect.py`
+- process helpers in `paomcp/tools/processes.py`
+- managed Python helpers in `paomcp/tools/python_env.py`
+- interactive exploit-driver flows in `paomcp/tools/paocli.py`
+- repo acquisition in `paomcp/tools/repos.py`
+- local Ghidra decompilation in `paomcp/tools/decompiler.py`
 
 ## Project structure
 
 <Tree>
-  <Tree.Folder name="pwnomcp" defaultOpen>
+  <Tree.Folder name="paomcp" defaultOpen>
     <Tree.File name="__main__.py" />
     <Tree.File name="server.py" />
     <Tree.File name="runtime.py" />
@@ -57,16 +57,17 @@ description: "Project structure and runtime design decisions behind pwno-mcp."
       <Tree.File name="inspect.py" />
       <Tree.File name="processes.py" />
       <Tree.File name="python_env.py" />
-      <Tree.File name="pwncli.py" />
+      <Tree.File name="paocli.py" />
       <Tree.File name="repos.py" />
-      <Tree.File name="retdec.py" />
+      <Tree.File name="decompiler.py" />
       <Tree.Folder name="backends">
         <Tree.File name="gdb.py" />
         <Tree.File name="pwndbg.py" />
         <Tree.File name="subproc.py" />
         <Tree.File name="python.py" />
         <Tree.File name="git.py" />
-        <Tree.File name="retdec.py" />
+        <Tree.File name="decompiler.py" />
+        <Tree.Folder name="ghidra_scripts" />
       </Tree.Folder>
     </Tree.Folder>
   </Tree.Folder>

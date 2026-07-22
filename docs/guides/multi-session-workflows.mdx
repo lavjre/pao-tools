@@ -3,7 +3,7 @@ title: "Multi-Session Workflows"
 description: "Run multiple debugger or exploit sessions in parallel without state collisions."
 ---
 
-`pwno-mcp` is built for concurrent workflows. You can keep more than one binary, attach target, or exploit driver active by assigning stable `session_id` values.
+`pao-tools` is built for concurrent workflows. You can keep more than one binary, attach target, or exploit driver active by assigning stable `session_id` values.
 
 ## Example pattern
 
@@ -20,8 +20,8 @@ description: "Run multiple debugger or exploit sessions in parallel without stat
 
 - use one session per target binary or scenario
 - keep session names semantic: `patched`, `remote`, `local`, `heap`, `rop`, `stage2`
-- pass `session_id` explicitly on every debugger and `pwncli` call
-- use `list_debug_sessions` and `list_pwncli_sessions` to keep track of what is still alive
+- pass `session_id` explicitly on every debugger and `paocli` call
+- use `list_debug_sessions` and `list_paocli_sessions` to keep track of what is still alive
 
 ## Cleanup
 

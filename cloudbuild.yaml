@@ -4,20 +4,20 @@ steps:
     args:
       - '-c'
       - |
-        docker pull us-central1-docker.pkg.dev/pwno-io/pwno-vm-images/research-container || true
+        docker pull us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools || true
 
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
         'build',
-        '--cache-from=us-central1-docker.pkg.dev/pwno-io/pwno-vm-images/research-container',
+        '--cache-from=us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools',
         '-t',
-        'us-central1-docker.pkg.dev/pwno-io/pwno-vm-images/research-container',
+        'us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools',
         '.'
       ]
 
 images:
-  - 'us-central1-docker.pkg.dev/pwno-io/pwno-vm-images/research-container'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools'
 
 options:
   logging: CLOUD_LOGGING_ONLY

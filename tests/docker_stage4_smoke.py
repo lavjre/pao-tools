@@ -2,10 +2,10 @@
 
 import json
 
-from pwnomcp.state.session import SessionState
-from pwnomcp.tools.backends.debugger import DebuggerOperations
-from pwnomcp.tools.backends.gdb import GdbController
-from pwnomcp.tools.backends.pwndbg import PwndbgTools
+from paomcp.state.session import SessionState
+from paomcp.tools.backends.debugger import DebuggerOperations
+from paomcp.tools.backends.gdb import GdbController
+from paomcp.tools.backends.pwndbg import PwndbgTools
 
 
 def require_success(name, result):

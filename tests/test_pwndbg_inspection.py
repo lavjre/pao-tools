@@ -1,6 +1,6 @@
 import pytest
 
-from pwnomcp.tools.backends.inspection import PwndbgInspection
+from paomcp.tools.backends.inspection import PwndbgInspection
 
 CHECKSEC_OUTPUT = """\
 File:     /workspace/chal

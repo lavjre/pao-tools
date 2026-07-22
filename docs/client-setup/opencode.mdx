@@ -1,6 +1,6 @@
 ---
 title: "OpenCode"
-description: "Configure pwno-mcp for OpenCode with remote HTTP or local stdio."
+description: "Configure pao-tools for OpenCode with remote HTTP or local stdio."
 ---
 
 OpenCode supports remote HTTP MCP servers and local stdio commands.
@@ -16,7 +16,7 @@ OpenCode supports remote HTTP MCP servers and local stdio commands.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "pwno-mcp": {
+    "pao-tools": {
       "type": "remote",
       "url": "http://127.0.0.1:5500/mcp",
       "enabled": true
@@ -29,7 +29,7 @@ OpenCode supports remote HTTP MCP servers and local stdio commands.
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "pwno-mcp": {
+    "pao-tools": {
       "type": "local",
       "command": [
         "docker",
@@ -44,7 +44,7 @@ OpenCode supports remote HTTP MCP servers and local stdio commands.
         "apparmor=unconfined",
         "-v",
         "/ABSOLUTE/PATH/TO/YOUR/PROJECT/workspace:/workspace",
-        "ghcr.io/pwno-io/pwno-mcp:latest",
+        "ghcr.io/lavjre/pao-tools:edge",
         "--stdio"
       ],
       "enabled": true
@@ -61,5 +61,5 @@ OpenCode supports remote HTTP MCP servers and local stdio commands.
 - `opencode mcp list`
 
 <Check>
-  After setup, run `opencode mcp list` and confirm `pwno-mcp` is enabled before opening your target project.
+  After setup, run `opencode mcp list` and confirm `pao-tools` is enabled before opening your target project.
 </Check>

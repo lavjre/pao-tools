@@ -1,4 +1,4 @@
-from pwnomcp.tools.backends.git import GitTools
+from paomcp.tools.backends.git import GitTools
 
 
 def test_fetch_repo_does_not_delete_existing_target(tmp_path):

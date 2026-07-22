@@ -3,7 +3,7 @@ title: "Transports and Runtime"
 description: "HTTP, stdio, health checks, attach sidecar behavior, and runtime defaults."
 ---
 
-`pwno-mcp` supports two main runtime modes.
+`pao-tools` supports two main runtime modes.
 
 <Tabs>
   <Tab title="HTTP">
@@ -13,7 +13,7 @@ description: "HTTP, stdio, health checks, attach sidecar behavior, and runtime d
     - Best when your client wants a `url` or you want the server process to stay alive outside the client
   </Tab>
   <Tab title="stdio">
-    - The client launches `python -m pwnomcp --stdio` or the equivalent Docker command
+    - The client launches `python -m paomcp --stdio` or the equivalent Docker command
     - No HTTP endpoint is involved
     - Best when your client expects a local `command` and `args`
     - The attach sidecar is not started in stdio mode
@@ -36,15 +36,15 @@ description: "HTTP, stdio, health checks, attach sidecar behavior, and runtime d
 <CodeGroup>
 
 ```bash HTTP
-python -m pwnomcp
+python -m paomcp
 ```
 
 ```bash Custom HTTP
-python -m pwnomcp --host 0.0.0.0 --port 6600 --http-path /mcp
+python -m paomcp --host 0.0.0.0 --port 6600 --http-path /mcp
 ```
 
 ```bash stdio
-python -m pwnomcp --stdio
+python -m paomcp --stdio
 ```
 
 </CodeGroup>

@@ -109,10 +109,10 @@ POST http://127.0.0.1:5501/attach
 
 ## Python helper
 
-`pwnomcp.cli.attach()` wraps the same API.
+`paomcp.cli.attach()` wraps the same API.
 
 ```python
-from pwnomcp.cli import attach
+from paomcp.cli import attach
 
 response = attach(
     pid=31337,
@@ -127,4 +127,4 @@ print(response.model_dump())
 ## When to use it
 
 - use the MCP `attach` tool for normal in-client workflows
-- use `/attach` or `pwnomcp.cli.attach()` when you already have a local Python helper or external integration that wants a small HTTP contract
+- use `/attach` or `paomcp.cli.attach()` when you already have a local Python helper or external integration that wants a small HTTP contract

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from pwnomcp.asgi import app
+from paomcp.asgi import app
 
 
 def test_healthz_route_registered():

@@ -1,4 +1,4 @@
-from pwnomcp.cli import _normalize_script_lines
+from paomcp.cli import _normalize_script_lines
 
 
 def test_normalize_script_lines_strips_and_dedents():

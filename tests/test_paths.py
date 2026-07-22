@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from pwnomcp.utils.paths import (
+from paomcp.utils.paths import (
     build_runtime_paths,
     resolve_workspace_path,
     validate_session_id,

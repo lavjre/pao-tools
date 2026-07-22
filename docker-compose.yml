@@ -1,13 +1,13 @@
 version: '3.8'
 
 services:
-  pwno-mcp:
+  pao-tools:
     build:
       context: .
       dockerfile: Dockerfile
       # platform: linux/amd64
-    image: pwno-mcp:latest
-    container_name: pwno-mcp-server
+    image: pao-tools:latest
+    container_name: pao-tools-server
     
     # Required for GDB to work properly
     cap_add:
@@ -57,7 +57,7 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "pwnomcp"]
+      test: ["CMD", "pgrep", "-f", "paomcp"]
       interval: 30s
       timeout: 10s
       retries: 3

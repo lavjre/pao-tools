@@ -3,7 +3,7 @@ title: "Development"
 description: "Local development, verification commands, and docs preview for maintainers."
 ---
 
-This page is for working on `pwno-mcp` itself, not for debugging a target binary.
+This page is for working on `pao-tools` itself, not for debugging a target binary.
 
 ## Local development
 
@@ -13,14 +13,14 @@ Prerequisites on the host are Python 3.12+, GDB with Python support, and a worki
 
 ```bash uv
 uv sync --extra dev
-uv run python -m pwnomcp
-uv run python -m pwnomcp --stdio
+uv run python -m paomcp
+uv run python -m paomcp --stdio
 ```
 
 ```bash pip
 python -m pip install -e ".[dev]"
-python -m pwnomcp
-python -m pwnomcp --stdio
+python -m paomcp
+python -m paomcp --stdio
 ```
 
 </CodeGroup>
@@ -29,7 +29,7 @@ python -m pwnomcp --stdio
 
 ```bash
 uv run black --check .
-uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped
+uv run mypy paomcp --ignore-missing-imports --disable-error-code=import-untyped
 uv run pytest -v
 ```
 
@@ -45,5 +45,5 @@ Current GitHub Actions run these verification steps before build or publish:
 
 - `uv sync --locked --extra dev`
 - `uv run black --check .`
-- `uv run mypy pwnomcp --ignore-missing-imports --disable-error-code=import-untyped`
+- `uv run mypy paomcp --ignore-missing-imports --disable-error-code=import-untyped`
 - `uv run pytest -v`

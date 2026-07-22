@@ -1,6 +1,6 @@
 ---
 title: "Cursor"
-description: "Configure pwno-mcp for Cursor using HTTP or stdio transport."
+description: "Configure pao-tools for Cursor using HTTP or stdio transport."
 ---
 
 Cursor MCP configuration can live in either of these files:
@@ -15,7 +15,7 @@ If you use project config, keep your target binary under `PROJECT_ROOT/workspace
 ```json HTTP
 {
   "mcpServers": {
-    "pwno-mcp": {
+    "pao-tools": {
       "url": "http://127.0.0.1:5500/mcp"
     }
   }
@@ -25,7 +25,7 @@ If you use project config, keep your target binary under `PROJECT_ROOT/workspace
 ```json stdio
 {
   "mcpServers": {
-    "pwno-mcp": {
+    "pao-tools": {
       "type": "stdio",
       "command": "docker",
       "args": [
@@ -40,7 +40,7 @@ If you use project config, keep your target binary under `PROJECT_ROOT/workspace
         "apparmor=unconfined",
         "-v",
         "${workspaceFolder}/workspace:/workspace",
-        "ghcr.io/pwno-io/pwno-mcp:latest",
+        "ghcr.io/lavjre/pao-tools:edge",
         "--stdio"
       ]
     }

@@ -1,5 +1,5 @@
 {
-  "name": "pwno-mcp-docs",
+  "name": "pao-tools-docs",
   "private": true,
   "scripts": {
     "dev": "npx mint dev",

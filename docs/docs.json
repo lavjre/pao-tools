@@ -83,12 +83,12 @@
 					{
 						"group": "Automation and Exploit I/O",
 						"pages": [
-							"tool-reference/pwncli",
+							"tool-reference/paocli",
 							"tool-reference/processes",
 							"tool-reference/artifacts",
 							"tool-reference/python",
 							"tool-reference/repositories",
-							"tool-reference/retdec"
+							"tool-reference/decompiler"
 						]
 					}
 				]
@@ -108,7 +108,6 @@
 				"pages": [
 					"development",
 					"architecture",
-					"background-story",
 					"license",
 					"contributing"
 				]
@@ -165,10 +164,6 @@
 					{
 						"label": "License",
 						"href": "/license"
-					},
-					{
-						"label": "Commercial Use",
-						"href": "mailto:oss@pwno.io"
 					}
 				]
 			}
