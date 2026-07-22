@@ -15,7 +15,7 @@ Most debugger operations are scoped by `session_id`. Create or pick a session fi
 | --- | --- | --- |
 | `create_debug_session` | create or return a session by id | safe to call repeatedly |
 | `list_debug_sessions` | inspect active sessions | returns metadata for all sessions |
-| `close_debug_session` | close a session and stop its `paocli` driver | releases GDB resources |
+| `close_debug_session` | close a session, its `paocli` driver, and owned helpers | releases GDB and managed-process resources |
 | `get_session_info` | inspect cached state without issuing a new GDB command | includes `runtime_dir` |
 
 ```json

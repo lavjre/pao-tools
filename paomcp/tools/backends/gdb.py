@@ -11,6 +11,7 @@ import time
 from typing import List, Dict, Optional, Any, Tuple
 from pathlib import Path
 from pygdbmi import gdbcontroller
+from pygdbmi.constants import GdbTimeoutError
 import os
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class GdbController:
         )
         self._initialized = False
         self._inferior_pid: Optional[int] = None
+        self._inferior_epoch = 0
         self._state = "idle"  # idle, running, stopped, exited
 
     def initialize(self) -> Dict[str, Any]:
@@ -72,12 +74,32 @@ class GdbController:
         self._initialized = True
         return {"status": "initialized", "messages": results}
 
+    @staticmethod
+    def quote_mi_argument(value: str) -> str:
+        """Encode one GDB/MI C-string argument without changing its expression."""
+        if any(character in value for character in ("\x00", "\r", "\n")):
+            raise ValueError("MI argument contains a forbidden control character")
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+
     def execute_mi_command(
         self, command: str, timeout_sec: float = 7.0
     ) -> Dict[str, Any]:
         """Execute a GDB/MI command and return raw MI responses."""
         logger.debug(f"Executing MI command: {command}")
-        responses = self.controller.write(command, timeout_sec=timeout_sec)
+        try:
+            responses = self.controller.write(command, timeout_sec=timeout_sec)
+        except (GdbTimeoutError, TimeoutError) as exc:
+            return {
+                "command": command,
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "error": str(exc) or f"GDB command timed out after {timeout_sec}s",
+                "type": "TimeoutError",
+                "timed_out": True,
+                "timeout_seconds": timeout_sec,
+            }
         # Update internal state from notify messages and detect errors
         error_found = False
         for response in responses:
@@ -97,7 +119,19 @@ class GdbController:
     def execute_command(self, command: str, timeout_sec: float = 7.0) -> Dict[str, Any]:
         """Execute a classic GDB command (non-MI) and return raw responses."""
         logger.debug(f"Executing command: {command}")
-        responses = self.controller.write(command, timeout_sec=timeout_sec)
+        try:
+            responses = self.controller.write(command, timeout_sec=timeout_sec)
+        except (GdbTimeoutError, TimeoutError) as exc:
+            return {
+                "command": command,
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "error": str(exc) or f"GDB command timed out after {timeout_sec}s",
+                "type": "TimeoutError",
+                "timed_out": True,
+                "timeout_seconds": timeout_sec,
+            }
         error_found = False
         for response in responses:
             if response.get("type") == "notify":
@@ -133,6 +167,7 @@ class GdbController:
         elif message == "thread-group-exited":
             self._state = "exited"
             self._inferior_pid = None
+            self._inferior_epoch += 1
             logger.debug("Inferior state: EXITED")
 
         elif message == "thread-group-started":
@@ -141,6 +176,7 @@ class GdbController:
             if not isinstance(payload, dict):
                 payload = {}
             self._inferior_pid = payload.get("pid")
+            self._inferior_epoch += 1
             logger.debug(f"Thread group started, PID: {self._inferior_pid}")
 
     def _get_async_responses(self, timeout_sec: float) -> List[Dict[str, Any]]:
@@ -349,7 +385,7 @@ class GdbController:
 
     def jump(self, locspec: str) -> Dict[str, Any]:
         """Jump to a specific location using MI command (-exec-jump)"""
-        return self.execute_mi_command(f"-exec-jump {locspec}")
+        return self.execute_mi_command(f"-exec-jump {self.quote_mi_argument(locspec)}")
 
     def return_from_function(self) -> Dict[str, Any]:
         """Force return from current function using MI command (-exec-return)"""
@@ -357,41 +393,95 @@ class GdbController:
 
     def until(self, locspec: Optional[str] = None) -> Dict[str, Any]:
         """Run until a specific location or next line using MI command (-exec-until)"""
-        mi_cmd = "-exec-until" if not locspec else f"-exec-until {locspec}"
+        mi_cmd = (
+            "-exec-until"
+            if not locspec
+            else f"-exec-until {self.quote_mi_argument(locspec)}"
+        )
         return self.execute_mi_command(mi_cmd)
 
     def set_breakpoint(
-        self, location: str, condition: Optional[str] = None
+        self,
+        location: str,
+        condition: Optional[str] = None,
+        temporary: bool = False,
     ) -> Dict[str, Any]:
-        """Set a breakpoint using MI command"""
-        mi_command = f"-break-insert {location}"
+        """Set a persistent or temporary breakpoint using GDB/MI."""
+        parts = ["-break-insert"]
+        if temporary:
+            parts.append("-t")
         if condition:
-            mi_command = f'-break-insert -c "{condition}" {location}'
+            escaped_condition = condition.replace("\\", "\\\\").replace('"', '\\"')
+            parts.extend(["-c", f'"{escaped_condition}"'])
+        parts.append("--")
+        parts.append(self.quote_mi_argument(location))
+        mi_command = " ".join(parts)
         return self.execute_mi_command(mi_command)
 
     def evaluate_expression(self, expression: str) -> Dict[str, Any]:
         """Evaluate an expression using MI command"""
-        return self.execute_mi_command(f'-data-evaluate-expression "{expression}"')
+        return self.execute_mi_command(
+            f"-data-evaluate-expression {self.quote_mi_argument(expression)}"
+        )
 
     def select_thread(self, thread_id: int) -> Dict[str, Any]:
         """Select a GDB thread by global thread id."""
         return self.execute_mi_command(f"-thread-select {thread_id}")
 
+    def list_threads_mi(self, timeout_sec: float = 7.0) -> Dict[str, Any]:
+        """List threads using the stable GDB/MI thread schema."""
+        return self.execute_mi_command("-thread-info", timeout_sec=timeout_sec)
+
+    def list_thread_groups_mi(
+        self, recurse: int = 1, timeout_sec: float = 7.0
+    ) -> Dict[str, Any]:
+        """List inferiors/thread groups and their child groups using GDB/MI."""
+        return self.execute_mi_command(
+            f"-list-thread-groups --recurse {recurse}", timeout_sec=timeout_sec
+        )
+
+    def list_stack_frames_mi(
+        self,
+        low: int = 0,
+        high: Optional[int] = None,
+        timeout_sec: float = 7.0,
+    ) -> Dict[str, Any]:
+        """List stack frames, optionally bounded by inclusive frame levels."""
+        suffix = "" if high is None else f" {low} {high}"
+        return self.execute_mi_command(
+            f"-stack-list-frames{suffix}", timeout_sec=timeout_sec
+        )
+
+    def select_frame(self, level: int, timeout_sec: float = 7.0) -> Dict[str, Any]:
+        """Select a stack frame by zero-based level."""
+        return self.execute_mi_command(
+            f"-stack-select-frame {level}", timeout_sec=timeout_sec
+        )
+
+    def get_selected_frame_mi(self, timeout_sec: float = 7.0) -> Dict[str, Any]:
+        """Return the currently selected frame through GDB/MI."""
+        return self.execute_mi_command("-stack-info-frame", timeout_sec=timeout_sec)
+
     def set_watchpoint(self, expression: str, access: str = "write") -> Dict[str, Any]:
         """Set a write, read, or access hardware watchpoint."""
         option = {"write": "", "read": "-r ", "access": "-a "}[access]
-        return self.execute_mi_command(f"-break-watch {option}{expression}")
+        return self.execute_mi_command(
+            f"-break-watch {option}{self.quote_mi_argument(expression)}"
+        )
 
     def write_memory_bytes(self, address: str, data_hex: str) -> Dict[str, Any]:
         """Write raw bytes expressed as an even-length hexadecimal string."""
-        return self.execute_mi_command(f"-data-write-memory-bytes {address} {data_hex}")
+        return self.execute_mi_command(
+            f"-data-write-memory-bytes {self.quote_mi_argument(address)} {data_hex}"
+        )
 
     def disassemble_range(
         self, start: str, byte_count: int, timeout_sec: float = 7.0
     ) -> Dict[str, Any]:
         """Disassemble a byte range without source interleaving."""
         return self.execute_mi_command(
-            f"-data-disassemble -s {start} -e {start}+{byte_count} -- 0",
+            f"-data-disassemble -s {self.quote_mi_argument(start)} "
+            f"-e {self.quote_mi_argument(f'{start}+{byte_count}')} -- 0",
             timeout_sec=timeout_sec,
         )
 
@@ -400,13 +490,16 @@ class GdbController:
     ) -> Dict[str, Any]:
         """Read memory using MI command"""
         mi_command = (
-            f"-data-read-memory {address} {word_format} {word_size} {nr_rows} {nr_cols}"
+            f"-data-read-memory {self.quote_mi_argument(address)} "
+            f"{word_format} {word_size} {nr_rows} {nr_cols}"
         )
         return self.execute_mi_command(mi_command)
 
     def read_memory_bytes(self, address: str, num_bytes: int) -> Dict[str, Any]:
         """Read raw memory bytes using MI (fast path)."""
-        mi_command = f"-data-read-memory-bytes {address} {num_bytes}"
+        mi_command = (
+            f"-data-read-memory-bytes {self.quote_mi_argument(address)} {num_bytes}"
+        )
         return self.execute_mi_command(mi_command)
 
     def list_breakpoints(self) -> Dict[str, Any]:
@@ -432,6 +525,10 @@ class GdbController:
     def get_inferior_pid(self) -> Optional[int]:
         """Get currently tracked inferior PID, if known."""
         return self._inferior_pid
+
+    def get_inferior_epoch(self) -> int:
+        """Return a monotonic counter for observed inferior start/exit events."""
+        return self._inferior_epoch
 
     def close(self):
         """Clean up GDB controller"""

@@ -16,6 +16,31 @@ from paomcp.tools.common import (
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
     @catch_errors()
+    async def create_breakpoint(
+        location: str,
+        session_id: str,
+        condition: Optional[str] = None,
+        temporary: bool = False,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Create a typed persistent/temporary breakpoint with an optional condition."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.set_breakpoint(
+                location=location,
+                condition=condition,
+                temporary=temporary,
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
     async def list_breakpoints(
         session_id: str,
         ctx: Context = CurrentContext(),
@@ -35,6 +60,7 @@ def register(mcp: FastMCP) -> None:
     async def delete_breakpoint(
         number: int,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Delete a GDB breakpoint by its positive numeric id."""
@@ -53,6 +79,7 @@ def register(mcp: FastMCP) -> None:
         number: int,
         enable: bool,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Enable or disable a GDB breakpoint by numeric id."""
@@ -71,6 +98,7 @@ def register(mcp: FastMCP) -> None:
         expression: str,
         session_id: str,
         access: str = "write",
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Set a hardware watchpoint for a validated GDB expression.
@@ -85,6 +113,59 @@ def register(mcp: FastMCP) -> None:
         )
         result = await run_session_action(
             session, lambda: session.tools.set_watchpoint(expression, access)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_watchpoints(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List watchpoints separately from code and catch breakpoints."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.list_watchpoints()
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def delete_watchpoint(
+        number: int,
+        session_id: str,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Delete a watchpoint after verifying the id is not a code breakpoint."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.delete_watchpoint(number)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def toggle_watchpoint(
+        number: int,
+        enable: bool,
+        session_id: str,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Enable or disable a verified watchpoint by numeric id."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.toggle_watchpoint(number, enable)
         )
         result["session_id"] = session.session_id
         return result
@@ -116,6 +197,7 @@ def register(mcp: FastMCP) -> None:
         name: str,
         value: str,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Write one register and return before/after values plus raw MI evidence."""
@@ -150,6 +232,7 @@ def register(mcp: FastMCP) -> None:
     async def select_thread(
         thread_id: int,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Select the active inferior thread by GDB's positive global thread id."""
@@ -158,6 +241,96 @@ def register(mcp: FastMCP) -> None:
         )
         result = await run_session_action(
             session, lambda: session.tools.select_thread(thread_id)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def stack_frames(
+        session_id: str,
+        low: int = 0,
+        high: Optional[int] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Return typed stack frames; omit `high` to request the full backtrace."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.stack_frames(low=low, high=high)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def select_frame(
+        level: int,
+        session_id: str,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Select a zero-based stack frame and return its read-back record."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.select_frame(level)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_debugger_threads(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List GDB/MI threads with current-thread and frame metadata."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.list_debugger_threads()
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_inferiors(
+        session_id: str,
+        recurse: int = 1,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List typed GDB inferiors/thread groups and optional child groups."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.list_inferiors(recurse=recurse)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def read_register_group(
+        group: str,
+        session_id: str,
+        refresh_names: bool = False,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Read `general`, `vector`, `float`, `system`, or `all` registers."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.read_register_group(
+                group=group, refresh_names=refresh_names
+            ),
         )
         result["session_id"] = session.session_id
         return result
@@ -209,15 +382,110 @@ def register(mcp: FastMCP) -> None:
         data_hex: str,
         session_id: str,
         verify: bool = True,
+        allow_unsafe: bool = False,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Write raw hex bytes to inferior memory and optionally verify read-back."""
+        """Write bytes with writable-map validation and tracked revert history.
+
+        `allow_unsafe` must be explicit to write an unmapped, non-writable, or
+        unverifiable region. Successful revertible writes receive a `patch_id`.
+        """
         session = resolve_debug_session(
             get_services(ctx), session_id=session_id, create_if_missing=False
         )
         result = await run_session_action(
             session,
-            lambda: session.tools.write_memory(address, data_hex, verify=verify),
+            lambda: session.tools.write_memory(
+                address,
+                data_hex,
+                verify=verify,
+                allow_unsafe=allow_unsafe,
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_memory_patches(
+        session_id: str,
+        active_only: bool = False,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List memory patch history isolated to this debugger session."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.list_memory_patches(active_only)
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def revert_memory_patch(
+        patch_id: str,
+        session_id: str,
+        verify: bool = True,
+        force: bool = False,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Restore original bytes after generation, overlap, and conflict checks."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.revert_memory_patch(
+                patch_id, verify=verify, force=force
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def capture_debugger_snapshot(
+        session_id: str,
+        register_names: Optional[List[str]] = None,
+        disassembly_bytes: int = 64,
+        include_mappings: bool = True,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Capture typed registers, frames, instructions, threads, inferiors, and maps."""
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.capture_debugger_snapshot(
+                register_names=register_names,
+                disassembly_bytes=disassembly_bytes,
+                include_mappings=include_mappings,
+                cancellation_check=services.operation_registry.raise_if_cancelled,
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def diff_debugger_snapshots(
+        before: Dict[str, Any],
+        after: Dict[str, Any],
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Diff two caller-supplied snapshots, including registers, frames, and maps."""
+        session = resolve_debug_session(
+            get_services(ctx), session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session, lambda: session.tools.diff_debugger_snapshots(before, after)
         )
         result["session_id"] = session.session_id
         return result
@@ -250,6 +518,7 @@ def register(mcp: FastMCP) -> None:
         mnemonic: Optional[str] = None,
         operands: Optional[str] = None,
         target: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Step until a call, jump, return, syscall, instruction, or address.

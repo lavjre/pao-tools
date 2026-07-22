@@ -73,6 +73,9 @@ def test_local_decompiler_returns_inline_code_and_manifest(tmp_path, monkeypatch
     assert result["function_count"] == 1
     assert result["decompiled_code"] == "int main(void) {}\n"
     assert result["program"]["language"] == "x86:LE:64:default"
+    assert result["model"]["schema_version"] == "1"
+    assert result["model"]["functions"][0]["name"] == "main"
+    assert result["cache"]["hit"] is False
     post_script = captured["command"].index("-postScript")
     assert captured["command"][post_script + 4] == "main"
     assert "http" not in " ".join(captured["command"])
@@ -95,6 +98,12 @@ def test_local_decompiler_spools_large_output_to_artifacts(tmp_path, monkeypatch
     assert code["stream"] == "decompiled_code"
     assert store.get(code["artifact_id"]).size_bytes == 4096
     assert result["manifest"]["delivery"] == "artifact"
+    assert result["model"]["delivery"] == "artifact"
+    assert result["model"]["stream"] == "structured_model"
+    model_payload = store.read(result["model"]["artifact_id"])["content"]
+    model = json.loads(model_payload)
+    assert model["schema_version"] == "1"
+    assert model["functions"][0]["name"] == "main"
 
 
 def test_local_decompiler_timeout_returns_structured_failure(tmp_path, monkeypatch):
@@ -128,3 +137,28 @@ def test_local_decompiler_status_reports_missing_executable(tmp_path):
 
     assert status["ready"] is False
     assert any("executable not found" in reason for reason in status["reasons"])
+
+
+def test_local_decompiler_replays_content_addressed_cache(tmp_path, monkeypatch):
+    backend, _ = _make_backend(tmp_path)
+    binary = tmp_path / "chal"
+    binary.write_bytes(b"\x7fELF-cache")
+    calls = 0
+
+    def fake_run(command, *, stdout_path, stderr_path, timeout):
+        nonlocal calls
+        calls += 1
+        _write_success_outputs(command, stdout_path, stderr_path, "int main(void) {}\n")
+        return 0, False, 5
+
+    monkeypatch.setattr(backend, "_run_process", fake_run)
+
+    first = backend.decompile(str(binary), function="main")
+    second = backend.decompile(str(binary), function="main")
+    refreshed = backend.decompile(str(binary), function="main", refresh=True)
+
+    assert first["cache"]["hit"] is False
+    assert second["cache"]["hit"] is True
+    assert second["fingerprint"] == first["fingerprint"]
+    assert refreshed["cache"]["refreshed"] is True
+    assert calls == 2

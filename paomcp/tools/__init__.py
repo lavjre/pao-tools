@@ -12,10 +12,13 @@ def register_all_tools(mcp: FastMCP) -> None:
         debugger_memory,
         elf_runtime,
         inspect,
+        operations,
+        platform,
         processes,
         paocli,
         python_env,
         repos,
+        static_analysis,
     )
 
     artifacts.register(mcp)
@@ -25,10 +28,13 @@ def register_all_tools(mcp: FastMCP) -> None:
     debugger_memory.register(mcp)
     elf_runtime.register(mcp)
     inspect.register(mcp)
+    operations.register(mcp)
+    platform.register(mcp)
     processes.register(mcp)
     repos.register(mcp)
     python_env.register(mcp)
     paocli.register(mcp)
+    static_analysis.register(mcp)
 
 
 __all__ = ["register_all_tools"]

@@ -12,8 +12,24 @@ These tools are for helper services, build steps, and supporting automation. The
 ## Returned shape
 
 All tools on this page return the shared structured [Response API](/concepts/response-shapes).
-Complete stdout and stderr are preserved. Large streams are spooled to disk and their
-fields contain an artifact descriptor instead of an oversized inline string.
+Stdout and stderr are drained through bounded pipes rather than written directly by
+the child. Their combined storage has a hard per-process limit. Within that limit,
+large streams are spooled to disk and their fields contain an artifact descriptor
+instead of an oversized inline string.
+
+The default combined limit is 256 MiB and is configurable with
+`PAO_MAX_PROCESS_OUTPUT_BYTES`. When a process emits one byte beyond the limit,
+pao-tools stores exactly the allowed prefix, discards only bytes already observed
+beyond it, kills the complete process tree, and returns:
+
+- `success: false`
+- `code: "RESOURCE_EXHAUSTED"`
+- `type: "ProcessOutputLimitError"`
+- `output_limit` with exact per-stream and combined `observed_bytes`, `stored_bytes`,
+  and `dropped_bytes`
+
+`measurement_complete` tells callers whether both pipes reached EOF. Output loss is
+therefore explicit; the API never presents a quota-limited result as complete.
 
 ## `run_command`
 
@@ -47,7 +63,8 @@ Large-output response excerpt:
 ```
 
 Read the output with [artifact tools](/tool-reference/artifacts). The original bytes
-are available through `content_base64`, including chunks that split a UTF-8 character.
+stored within the process budget are available through `content_base64`, including
+chunks that split a UTF-8 character.
 
 ## Background helpers
 
@@ -69,6 +86,17 @@ are available through `content_base64`, including chunks that split a UTF-8 char
 
 - stdout and stderr are written to log files under a server-managed process directory
 - `get_process` returns live output for tracked running processes when available
-- `kill_process` keeps the entry cached long enough for `get_process` to read outputs afterward
+- `list_processes` reports the per-process output budget in `capacity` and retains a
+  bounded summary for recently terminated helpers
+- when `get_process` or `kill_process` collects a terminal process, final output is
+  returned inline or persisted as an artifact, then its temporary log directory is
+  removed
+- closing a debug session stops every managed helper process owned by that session;
+  its response reports cleanup and failure counts
+
+The paths returned by `spawn_process` are live-tail paths only while the process is
+running. Terminal responses set those paths to `null` after lossless output delivery.
+Only the prefix covered by `output_limit.limit_bytes` is lossless after a quota error;
+the response accounts for every additional byte drained before termination.
 
 Use [Build and Helper Processes](/guides/build-and-helper-processes) for workflow guidance.

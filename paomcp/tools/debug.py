@@ -18,6 +18,7 @@ def register(mcp: FastMCP) -> None:
     @catch_errors()
     async def create_debug_session(
         session_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Create or return a debug session by id."""
@@ -34,13 +35,20 @@ def register(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """List all active debug sessions and metadata."""
         services = get_services(ctx)
-        sessions = require_session_registry(services).list_sessions()
-        return {"success": True, "count": len(sessions), "sessions": sessions}
+        registry = require_session_registry(services)
+        sessions = registry.list_sessions()
+        return {
+            "success": True,
+            "count": len(sessions),
+            "sessions": sessions,
+            "capacity": registry.status(),
+        }
 
     @mcp.tool()
     @catch_errors()
     async def close_debug_session(
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Close an active debug session and stop any attached paocli driver."""
@@ -54,13 +62,22 @@ def register(mcp: FastMCP) -> None:
         if pipe:
             pipe.kill()
 
-        return registry.close_session(session_id)
+        result = registry.close_session(
+            session_id,
+            on_closing=lambda _session: (
+                services.subprocess_tools.close_session_processes(resolved_session_id)
+            ),
+        )
+        if "cleanup" in result:
+            result["managed_processes"] = result.pop("cleanup")
+        return result
 
     @mcp.tool()
     @catch_errors()
     async def execute(
         command: str,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Execute an arbitrary GDB/pwndbg command.
@@ -86,6 +103,7 @@ def register(mcp: FastMCP) -> None:
     async def set_file(
         binary_path: str,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Load an executable file into GDB/pwndbg for debugging.
@@ -120,6 +138,7 @@ def register(mcp: FastMCP) -> None:
     async def attach(
         pid: int,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Attach to an existing process by PID using GDB/MI.
@@ -156,6 +175,7 @@ def register(mcp: FastMCP) -> None:
         session_id: str,
         args: str = "",
         start: bool = False,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Run the loaded program under GDB control.
@@ -182,6 +202,7 @@ def register(mcp: FastMCP) -> None:
     async def step_control(
         command: str,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Execute a stepping command (c, n, s, ni, si).
@@ -229,6 +250,7 @@ def register(mcp: FastMCP) -> None:
     async def gdb_interrupt(
         session_id: str,
         timeout: float = 1.0,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Interrupt the inferior and drain async notifications.
@@ -250,6 +272,7 @@ def register(mcp: FastMCP) -> None:
     @catch_errors()
     async def finish(
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Run until the current function returns (MI -exec-finish)."""
@@ -266,6 +289,7 @@ def register(mcp: FastMCP) -> None:
     async def jump(
         locspec: str,
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Resume execution at a specified location (MI -exec-jump).
@@ -285,6 +309,7 @@ def register(mcp: FastMCP) -> None:
     @catch_errors()
     async def return_from_function(
         session_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Force the current function to return immediately (MI -exec-return)."""
@@ -303,6 +328,7 @@ def register(mcp: FastMCP) -> None:
     async def until(
         session_id: str,
         locspec: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Run until a specified location or next source line (MI -exec-until)."""
@@ -320,6 +346,7 @@ def register(mcp: FastMCP) -> None:
         location: str,
         session_id: str,
         condition: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Set a breakpoint using MI (-break-insert).

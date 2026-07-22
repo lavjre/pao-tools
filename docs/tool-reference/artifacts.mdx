@@ -12,11 +12,12 @@ and returns metadata containing an `artifact_id`, byte size, and SHA-256 digest.
 | Tool | Arguments | Result |
 | --- | --- | --- |
 | `list_artifacts` | optional `session_id` | newest-first artifact metadata list |
-| `get_artifact_info` | `artifact_id` | size, hash, source tool, content type, and creation time |
-| `read_artifact` | `artifact_id`, optional `offset`, optional `length` | one byte range plus the next offset and EOF state |
+| `get_artifact_info` | `artifact_id`, optional `session_id` | size, hash, source tool, content type, and creation time |
+| `read_artifact` | `artifact_id`, optional `session_id`, `offset`, `length` | one byte range plus the next offset and EOF state |
+| `verify_artifact` | `artifact_id`, optional `session_id` | recomputed size and SHA-256 integrity result |
 | `get_artifact_store_status` | none | usage, free disk, worker state, and effective retention policy |
-| `set_artifact_pinned` | `artifact_id`, optional `pinned` | protect or release an artifact from automatic cleanup |
-| `delete_artifact` | `artifact_id`, optional `force` | delete one artifact; pinned artifacts require `force=true` |
+| `set_artifact_pinned` | `artifact_id`, optional `session_id`, `pinned` | protect or release an artifact from automatic cleanup |
+| `delete_artifact` | `artifact_id`, optional `session_id`, `force` | delete one artifact; pinned artifacts require `force=true` |
 | `cleanup_artifacts` | optional `dry_run` | preview or apply TTL, quota, and disk cleanup; defaults to preview |
 
 ## Read a chunk
@@ -72,15 +73,31 @@ concatenate `content_base64` for lossless reconstruction. `content` is convenien
 text display but can contain a replacement character when a byte range ends inside a
 multi-byte UTF-8 character.
 
-If `length` is omitted, the configured default is 256 KiB. The API does not impose a
-maximum explicit `length`; smaller repeated reads are recommended for bounded client
-memory and MCP message size.
+If `length` is omitted, the configured default is 256 KiB. One call is capped at
+`PAO_ARTIFACT_MAX_READ_BYTES` (4 MiB by default); use `next_offset` for complete,
+lossless retrieval with bounded server and client memory.
+
+## Session ownership and integrity
+
+Artifacts produced by a debugger call inherit that call's `session_id`. Reading,
+pinning, deleting, verifying, or inspecting such an artifact requires the same
+session. Omitting `session_id` lists only unscoped artifacts. This prevents one
+parallel exploitation session from discovering or mutating another session's output.
+
+`verify_artifact` streams the stored payload through SHA-256 and compares both the
+digest and byte count with the immutable metadata manifest. It reports `valid=false`
+for corruption or an incomplete file without loading the full payload into memory.
 
 ## Retention and cleanup
 
 The default policy expires artifacts after 72 hours, applies a 10 GiB soft quota,
 cleans back to 80%, checks every 15 minutes, and preserves 2 GiB of filesystem free
 space. Cleanup also runs at server startup and before storing a new artifact.
+
+Startup reconciliation removes incomplete payload/metadata pairs and temporary files
+left by an interrupted server. Periodic reconciliation applies the configured orphan
+grace period so an active atomic write is not mistaken for crash debris.
+`get_artifact_store_status` reports the latest reconciliation summary.
 
 ```json
 {"tool":"cleanup_artifacts","arguments":{"dry_run":true}}

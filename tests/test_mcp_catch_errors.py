@@ -17,7 +17,7 @@ async def test_catch_errors_returns_unified_error_response():
     assert result["session_id"] == "chal-a"
     assert result["data"] is None
     assert result["error"] == {
-        "code": "VALUE_ERROR",
+        "code": "INVALID_ARGUMENT",
         "message": "boom",
         "type": "ValueError",
         "details": None,

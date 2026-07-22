@@ -9,9 +9,13 @@ analysis workflows.
 
 - Independent GDB/pwndbg sessions for parallel research
 - Runtime-verified GDB/pwndbg versions, commands, categories, and feature groups
+- Unified platform manifest for debugger, decompiler, helper, architecture,
+  allocator, emulator, and provider readiness
 - Typed ELF mitigations, sections, GOT/PLT, mappings, threads, libc, and address data
+- Complete cached static ELF models, strings, fingerprints, and binary comparison
 - Typed breakpoint/watchpoint CRUD, registers, expressions, memory search/write,
   disassembly, thread selection, and event-oriented stepping
+- Typed frames/inferiors, register groups, debugger snapshots, and reversible patches
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
@@ -20,16 +24,19 @@ analysis workflows.
 - Shared Python research environment with pwntools
 - Workspace-scoped command execution and repository fetching
 - Versioned structured responses shared by every MCP tool
-- Lossless artifact and chunk delivery for large tool/process output
+- Pollable operation IDs, progress, cooperative cancellation, and resource caps
+- Session-owned lossless artifacts with chunk delivery and integrity verification
 - HTTP and stdio MCP transports
 - Offline Ghidra headless decompilation by function name, address, or full binary
 
 ## Response API
 
-Every MCP tool returns the same `api_version: "1.0"` envelope. Payloads are
-preserved in full; the server does not truncate stdout, stderr, GDB responses,
-events, or decompiled code. Small results stay inline. Large results are stored
-as artifacts and retrieved losslessly with `read_artifact` byte ranges.
+Every MCP tool returns the same `api_version: "1.0"` envelope. Primary tool
+payloads spill to artifacts instead of being silently truncated. Small results stay
+inline. Safety-bounded capability probes report original byte counts and explicit
+truncation flags. Managed process output has a hard combined stdout+stderr budget;
+crossing it kills the process tree and reports exact observed, stored, and dropped
+bytes. Artifacts are retrieved losslessly with `read_artifact` byte ranges.
 
 ```json
 {
@@ -45,7 +52,10 @@ as artifacts and retrieved losslessly with `read_artifact` byte ranges.
   "error": null,
   "warnings": [],
   "meta": {
-    "duration_ms": 3
+    "duration_ms": 3,
+    "operation_id": "d93a1a07510149d38702051d2dafd818",
+    "idempotency_key": null,
+    "idempotency_replayed": false
   }
 }
 ```
@@ -67,10 +77,12 @@ an artifact descriptor:
 }
 ```
 
-Use the artifact tools to inspect, stream, pin, delete, or clean stored output.
-`read_artifact` defaults to 256 KiB per call and returns exact bytes as Base64
-plus a decoded text convenience field. By default artifacts expire after 72
-hours; the store uses a 10 GiB soft quota and preserves 2 GiB of free disk.
+Use the artifact tools to inspect, verify, stream, pin, delete, or clean stored output.
+`read_artifact` defaults to 256 KiB per call, allows at most 4 MiB per call, and
+returns exact bytes as Base64 plus a decoded text convenience field. By default
+artifacts expire after 72 hours; the store uses a 10 GiB soft quota and preserves
+2 GiB of free disk. Session-owned artifacts require the exact same `session_id`;
+unscoped artifacts can only be accessed with `session_id` omitted.
 
 ## Quick start
 
@@ -118,7 +130,7 @@ workflows.
 uv sync --extra dev
 uv run python -m pytest
 uv run black --check .
-uv run mypy paomcp --ignore-missing-imports --disable-error-code=import-untyped
+uv run mypy paomcp
 ```
 
 Run the HTTP server locally:

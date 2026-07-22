@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import inspect
+import json
 import logging
 import os
 import re
@@ -11,9 +13,15 @@ from fastmcp import Context
 
 from paomcp.api import ToolError, ToolMeta, ToolResponse
 from paomcp.artifacts import ArtifactStore
+from paomcp.operations import bind_operation, reset_operation
 from paomcp.paopipe import PaoPipe
 from paomcp.services import AppServices
-from paomcp.state import DebugSession, DebugSessionRegistry
+from paomcp.state import (
+    DebugSession,
+    DebugSessionRegistry,
+    SessionClosedError,
+    SessionNotFoundError,
+)
 from paomcp.utils.paths import DEFAULT_WORKSPACE, resolve_workspace_path
 
 logger = logging.getLogger(__name__)
@@ -23,8 +31,76 @@ T = TypeVar("T")
 def _error_code(error_type: Optional[str]) -> str:
     if not error_type:
         return "TOOL_ERROR"
+    taxonomy = {
+        "ValueError": "INVALID_ARGUMENT",
+        "TypeError": "INVALID_ARGUMENT",
+        "KeyError": "NOT_FOUND",
+        "LookupError": "NOT_FOUND",
+        "FileNotFoundError": "NOT_FOUND",
+        "PermissionError": "PERMISSION_DENIED",
+        "TimeoutError": "TIMEOUT",
+        "TimeoutExpired": "TIMEOUT",
+        "OperationCancelledError": "OPERATION_CANCELLED",
+        "OperationOwnershipError": "OPERATION_ACCESS_DENIED",
+        "OperationLimitError": "RESOURCE_EXHAUSTED",
+        "IdempotencyConflictError": "IDEMPOTENCY_CONFLICT",
+        "SessionLimitError": "RESOURCE_EXHAUSTED",
+        "SessionNotFoundError": "NOT_FOUND",
+        "SessionClosedError": "SESSION_CLOSED",
+        "ArtifactStorageFullError": "RESOURCE_EXHAUSTED",
+        "ArtifactOwnershipError": "ARTIFACT_ACCESS_DENIED",
+        "UnmanagedProcessError": "PROCESS_NOT_MANAGED",
+    }
+    if error_type in taxonomy:
+        return taxonomy[error_type]
     snake_case = re.sub(r"(?<!^)(?=[A-Z])", "_", error_type).upper()
     return snake_case or "TOOL_ERROR"
+
+
+def _argument_fingerprint(arguments: Dict[str, Any]) -> str:
+    """Hash public tool arguments without retaining their potentially sensitive data."""
+    public_arguments = {
+        key: value
+        for key, value in arguments.items()
+        if key not in {"ctx", "idempotency_key"}
+    }
+    serialized = json.dumps(
+        public_arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=lambda value: repr(value),
+    ).encode("utf-8")
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _missing_artifact_ids(
+    value: Any, artifact_store: Optional[ArtifactStore]
+) -> list[str]:
+    """Return artifact references that can no longer satisfy a cached replay."""
+    if artifact_store is None:
+        return []
+    discovered: set[str] = set()
+    missing: set[str] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            artifact_id = item.get("artifact_id")
+            if item.get("delivery") == "artifact" and artifact_id is not None:
+                normalized = str(artifact_id)
+                if normalized not in discovered:
+                    discovered.add(normalized)
+                    try:
+                        artifact_store.get(normalized)
+                    except Exception:
+                        missing.add(normalized)
+            for nested in item.values():
+                visit(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                visit(nested)
+
+    visit(value)
+    return sorted(missing)
 
 
 def build_tool_response(
@@ -35,6 +111,9 @@ def build_tool_response(
     session_id: Optional[str] = None,
     artifact_store: Optional[ArtifactStore] = None,
     auto_artifact: bool = True,
+    operation_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
+    idempotency_replayed: bool = False,
 ) -> Dict[str, Any]:
     """Normalize a tool result into the versioned public response envelope.
 
@@ -44,6 +123,9 @@ def build_tool_response(
     if isinstance(result, ToolResponse):
         response = result
         response.meta.duration_ms = duration_ms
+        response.meta.operation_id = operation_id
+        response.meta.idempotency_key = idempotency_key
+        response.meta.idempotency_replayed = idempotency_replayed
         return response.as_dict()
 
     success = True
@@ -93,7 +175,12 @@ def build_tool_response(
         data=data,
         error=error,
         warnings=warnings,
-        meta=ToolMeta(duration_ms=duration_ms),
+        meta=ToolMeta(
+            duration_ms=duration_ms,
+            operation_id=operation_id,
+            idempotency_key=idempotency_key,
+            idempotency_replayed=idempotency_replayed,
+        ),
     )
 
     if auto_artifact and artifact_store is not None and response.data is not None:
@@ -108,7 +195,9 @@ def build_tool_response(
     return response.as_dict()
 
 
-def catch_errors(*, auto_artifact: bool = True) -> Callable[[Callable[..., Any]], Any]:
+def catch_errors(
+    *, auto_artifact: bool = True, track_operation: bool = True
+) -> Callable[[Callable[..., Any]], Any]:
     """Wrap an MCP tool with the shared response envelope and error handling."""
 
     def decorator(fn: Callable[..., Any]) -> Any:
@@ -118,8 +207,23 @@ def catch_errors(*, auto_artifact: bool = True) -> Callable[[Callable[..., Any]]
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             started_at = time.monotonic()
             bound_arguments = fn_signature.bind_partial(*args, **kwargs)
+            bound_arguments.apply_defaults()
             requested_session_id = bound_arguments.arguments.get("session_id")
+            operation_session_id = (
+                str(requested_session_id) if requested_session_id is not None else None
+            )
+            raw_idempotency_key = bound_arguments.arguments.get("idempotency_key")
+            idempotency_key = (
+                str(raw_idempotency_key) if raw_idempotency_key is not None else None
+            )
+            argument_fingerprint = _argument_fingerprint(
+                dict(bound_arguments.arguments)
+            )
+            idempotency_claimed = False
             artifact_store = None
+            services = None
+            operation = None
+            operation_token = None
             context = bound_arguments.arguments.get("ctx")
             if context is not None:
                 try:
@@ -127,9 +231,134 @@ def catch_errors(*, auto_artifact: bool = True) -> Callable[[Callable[..., Any]]
                     if services is not None:
                         artifact_store = services.artifact_store
                 except (AttributeError, RuntimeError):
+                    services = None
                     artifact_store = None
+
+            if services is not None and idempotency_key is not None:
+                try:
+                    claimed_state, cached_response = (
+                        services.operation_registry.claim_idempotency(
+                            fn.__name__,
+                            operation_session_id,
+                            idempotency_key,
+                            argument_fingerprint,
+                        )
+                    )
+                except Exception as exc:
+                    duration_ms = int((time.monotonic() - started_at) * 1000)
+                    return build_tool_response(
+                        fn.__name__,
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "type": type(exc).__name__,
+                        },
+                        duration_ms=duration_ms,
+                        session_id=operation_session_id,
+                        auto_artifact=False,
+                        idempotency_key=idempotency_key,
+                    )
+                if claimed_state == "replay" and cached_response is not None:
+                    missing_artifacts = _missing_artifact_ids(
+                        cached_response, artifact_store
+                    )
+                    if missing_artifacts:
+                        duration_ms = int((time.monotonic() - started_at) * 1000)
+                        return build_tool_response(
+                            fn.__name__,
+                            {
+                                "success": False,
+                                "error": {
+                                    "code": "IDEMPOTENCY_RESULT_EXPIRED",
+                                    "message": (
+                                        "The idempotent result references artifacts "
+                                        "that are no longer retained"
+                                    ),
+                                    "type": "IdempotencyResultExpiredError",
+                                    "details": {
+                                        "missing_artifact_ids": missing_artifacts
+                                    },
+                                },
+                            },
+                            duration_ms=duration_ms,
+                            session_id=operation_session_id,
+                            auto_artifact=False,
+                            idempotency_key=idempotency_key,
+                            idempotency_replayed=True,
+                        )
+                    cached_response.setdefault("meta", {})[
+                        "idempotency_replayed"
+                    ] = True
+                    return cached_response
+                if claimed_state == "in_progress":
+                    duration_ms = int((time.monotonic() - started_at) * 1000)
+                    return build_tool_response(
+                        fn.__name__,
+                        {
+                            "success": False,
+                            "code": "IDEMPOTENCY_IN_PROGRESS",
+                            "error": "An operation with this idempotency key is running",
+                            "type": "IdempotencyInProgressError",
+                        },
+                        duration_ms=duration_ms,
+                        session_id=operation_session_id,
+                        auto_artifact=False,
+                        idempotency_key=idempotency_key,
+                    )
+                idempotency_claimed = True
+
+            if services is not None and track_operation:
+                try:
+                    operation = services.operation_registry.begin(
+                        fn.__name__,
+                        session_id=operation_session_id,
+                    )
+                    operation_token = bind_operation(operation.operation_id)
+                except Exception as exc:
+                    logger.exception("could not start operation for %s", fn.__name__)
+                    if idempotency_claimed and idempotency_key is not None:
+                        services.operation_registry.abort_idempotency(
+                            fn.__name__, operation_session_id, idempotency_key
+                        )
+                    duration_ms = int((time.monotonic() - started_at) * 1000)
+                    return build_tool_response(
+                        fn.__name__,
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "type": type(exc).__name__,
+                        },
+                        duration_ms=duration_ms,
+                        session_id=operation_session_id,
+                        artifact_store=artifact_store,
+                        auto_artifact=False,
+                        idempotency_key=idempotency_key,
+                    )
             try:
                 result = await fn(*args, **kwargs)
+            except asyncio.CancelledError:
+                logger.warning("tool task cancelled in %s", fn.__name__)
+                if services is not None and operation is not None:
+                    services.operation_registry.request_cancel(operation.operation_id)
+                    services.operation_registry.complete(
+                        operation.operation_id,
+                        success=False,
+                        session_id=operation_session_id,
+                        error_code="OPERATION_CANCELLED",
+                        error_message="Client cancelled the tool request",
+                    )
+                if (
+                    services is not None
+                    and idempotency_claimed
+                    and idempotency_key is not None
+                ):
+                    services.operation_registry.abort_idempotency(
+                        fn.__name__, operation_session_id, idempotency_key
+                    )
+                if operation_token is not None:
+                    reset_operation(operation_token)
+                    operation_token = None
+                raise
             except Exception as e:
                 logger.exception("tool error in %s", fn.__name__)
                 result = {
@@ -138,18 +367,69 @@ def catch_errors(*, auto_artifact: bool = True) -> Callable[[Callable[..., Any]]
                     "type": type(e).__name__,
                 }
             duration_ms = int((time.monotonic() - started_at) * 1000)
-            return build_tool_response(
-                fn.__name__,
-                result,
-                duration_ms=duration_ms,
-                session_id=(
-                    str(requested_session_id)
-                    if requested_session_id is not None
-                    else None
-                ),
-                artifact_store=artifact_store,
-                auto_artifact=auto_artifact,
-            )
+            try:
+                response = build_tool_response(
+                    fn.__name__,
+                    result,
+                    duration_ms=duration_ms,
+                    session_id=operation_session_id,
+                    artifact_store=artifact_store,
+                    auto_artifact=auto_artifact,
+                    operation_id=(operation.operation_id if operation else None),
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                logger.exception("response handling failed in %s", fn.__name__)
+                response = build_tool_response(
+                    fn.__name__,
+                    {
+                        "success": False,
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                    },
+                    duration_ms=duration_ms,
+                    session_id=operation_session_id,
+                    auto_artifact=False,
+                    operation_id=(operation.operation_id if operation else None),
+                    idempotency_key=idempotency_key,
+                )
+            finally:
+                if operation_token is not None:
+                    reset_operation(operation_token)
+
+            if services is not None and operation is not None:
+                normalized_error = response.get("error") or {}
+                completed_operation = services.operation_registry.complete(
+                    operation.operation_id,
+                    success=bool(response.get("success")),
+                    session_id=response.get("session_id"),
+                    error_code=normalized_error.get("code"),
+                    error_message=normalized_error.get("message"),
+                )
+                if completed_operation.state == "cancelled" and response.get("success"):
+                    response["success"] = False
+                    response["error"] = {
+                        "code": "OPERATION_CANCELLED",
+                        "message": "Operation cancellation was requested",
+                        "type": "OperationCancelledError",
+                        "details": None,
+                    }
+                    response.setdefault("warnings", []).append(
+                        "Backend output is preserved in data because cancellation raced completion"
+                    )
+            if (
+                services is not None
+                and idempotency_claimed
+                and idempotency_key is not None
+            ):
+                services.operation_registry.complete_idempotency(
+                    fn.__name__,
+                    operation_session_id,
+                    idempotency_key,
+                    argument_fingerprint,
+                    response,
+                )
+            return response
 
         wrapper.__annotations__ = dict(wrapper.__annotations__)
         wrapper.__annotations__["return"] = ToolResponse
@@ -190,11 +470,11 @@ def resolve_debug_session(
         if existing:
             return existing
         if not create_if_missing:
-            raise RuntimeError(f"Debug session '{session_id}' not found")
+            raise SessionNotFoundError(f"Debug session '{session_id}' not found")
         return registry.create_session(session_id)
 
     if not create_if_missing:
-        raise RuntimeError("session_id is required")
+        raise SessionNotFoundError("session_id is required")
     return registry.ensure_session()
 
 
@@ -210,6 +490,8 @@ def run_session_locked(
     sync_pid: bool = True,
 ) -> T:
     with session.lock:
+        if session.closing or session.closed:
+            raise SessionClosedError(f"Debug session '{session.session_id}' is closed")
         result = action()
         if sync_pid:
             sync_session_pid(session)

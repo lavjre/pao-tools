@@ -18,6 +18,9 @@ class ToolMeta(BaseModel):
     """Metadata recorded for every tool invocation."""
 
     duration_ms: int = 0
+    operation_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    idempotency_replayed: bool = False
 
 
 class ToolResponse(BaseModel):

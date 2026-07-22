@@ -1,0 +1,152 @@
+---
+title: "Platform Capabilities"
+description: "Inspect the complete pao-tools runtime before selecting an analysis workflow."
+---
+
+`get_platform_capabilities` returns one typed manifest for the server operating
+system, Python/package environment, debugger, decompiler, exploit CLI, helper
+executables, emulators, providers, and allocator primitives.
+
+## Tool
+
+| Argument | Default | Purpose |
+| --- | --- | --- |
+| `session_id` | omitted | Use one existing debugger session instead of the startup compatibility cache |
+| `refresh` | `false` | Re-query GDB/pwndbg and rebuild the manifest |
+| `probe` | `false` | Run non-interactive version commands for installed helper executables |
+| `probe_timeout` | `2.0` | Per-command timeout; must be greater than zero and at most 10 seconds |
+| `probe_total_timeout` | `15.0` | Deadline for the whole parallel probe set; at most 60 seconds |
+
+The normal, side-effect-free request is:
+
+```json
+{"tool":"get_platform_capabilities","arguments":{}}
+```
+
+Use active probing only when exact helper versions are needed:
+
+```json
+{
+  "tool": "get_platform_capabilities",
+  "arguments": {
+    "session_id": "chal-a",
+    "refresh": true,
+    "probe": true,
+    "probe_timeout": 2.0,
+    "probe_total_timeout": 15.0
+  }
+}
+```
+
+## Response data
+
+```json
+{
+  "ready": true,
+  "parser_version": "1",
+  "platform": {
+    "os": {"system": "Linux", "release": "...", "version": "..."},
+    "architecture": {
+      "machine": "x86_64",
+      "normalized": "amd64",
+      "pointer_bits": 64,
+      "byteorder": "little"
+    },
+    "python": {"version": "3.12.9", "implementation": "CPython"}
+  },
+  "runtimes": {
+    "debugger": {"ready": true, "versions": {"gdb": "17.1", "pwndbg": "2026.02.18"}},
+    "decompiler": {"ready": true, "backend": "ghidra", "version": "11.4.2"},
+    "paocli": {"ready": true, "version": "1.6-pao"}
+  },
+  "feature_groups": {
+    "architectures": {"native": "amd64", "qemu_user": ["aarch64", "arm"]},
+    "providers": {
+      "local_process": {
+        "available": true,
+        "typed_api": true,
+        "status": "ready",
+        "ready": true
+      },
+      "remote_tcp": {
+        "available": true,
+        "typed_api": false,
+        "status": "partial",
+        "ready": false
+      }
+    },
+    "allocators": {
+      "glibc_ptmalloc": {
+        "available": true,
+        "typed_api": false,
+        "primitive_status": "ready",
+        "status": "partial",
+        "ready": false,
+        "runtime_primitives": ["arena", "bins", "heap"]
+      }
+    }
+  },
+  "versions": {
+    "public_api": "1.0",
+    "platform_parser": "1",
+    "pwndbg_parser": "1"
+  },
+  "warnings": []
+}
+```
+
+`success=true` means discovery completed. `ready=false` means at least one core
+component (package metadata, debugger, Ghidra, or paocli) is unavailable; the report
+still describes usable partial capabilities and provides actionable `warnings`.
+
+Provider entries distinguish an installed runtime primitive from a typed provider
+API. For example, `remote_tcp.available=true` with `typed_api=false` means paocli can
+perform the primitive, but the target-provider abstraction has not been implemented.
+Allocator entries make the same distinction so agents do not mistake raw pwndbg
+commands for the later typed heap workflow.
+
+Every provider and allocator has a stable `status`:
+
+- `unavailable`: its runtime dependency or primitive is missing;
+- `partial`: at least one primitive exists, but the complete typed API is not ready;
+- `ready`: the required runtime and typed API are both available.
+
+Allocator `primitive_status` separately reports whether the expected pwndbg command
+set is unavailable, partial, or complete. For example, all ptmalloc commands may be
+present while the allocator remains `status=partial` until its typed heap API exists.
+`existing_pid` is only ready when the debugger compatibility gate is ready.
+
+## Probe safety and evidence
+
+No subprocess is launched unless `probe=true`. A probe:
+
+- resolves a fixed executable name with `PATH`
+- passes a fixed version argument list
+- uses `shell=false` and closed stdin
+- has a bounded per-executable timeout
+- runs in a bounded worker pool with a total deadline
+- responds to `cancel_operation` and kills the complete probe process tree
+- records stdout, stderr, their original byte counts, explicit truncation flags,
+  return code, cancellation, and timeout state under
+  `evidence.executable_probes`
+
+Probe evidence is capped at 64 KiB per stdout/stderr stream so a broken helper cannot
+exhaust server memory. This reduction is never silent: `*_total_bytes`,
+`*_truncated`, and `output_limit_bytes` describe it exactly. The `probe` response
+section reports worker count, completed/cancelled counts, and whether the total
+deadline or bounded one-second cleanup grace was exceeded, plus exact probe-set
+`elapsed_ms`. A total deadline returns the usable partial manifest with a warning;
+an explicit operation cancellation returns `OPERATION_CANCELLED`. The request never
+waits indefinitely for a non-cooperative injected probe runner after cleanup grace.
+The worker pool defaults to four processes and can be set from 1 through 8 with
+`PAO_PLATFORM_PROBE_WORKERS`.
+
+Non-probe manifests are cached for the lifetime of `AppServices`, independently per
+debugger session. The cache key includes the complete debugger and decompiler source
+manifests. `refresh=true` replaces that entry, while an active probe never pollutes a
+later side-effect-free cached response. Each response includes `cache.hit`,
+`cache.stored`, and an explicit reason (`cache_miss`, `refresh`, or `active_probe`).
+
+GDB/pwndbg raw compatibility output is preserved under `evidence.debugger`. If the
+complete manifest exceeds the inline response threshold, the normal response layer
+stores it losslessly as an artifact.

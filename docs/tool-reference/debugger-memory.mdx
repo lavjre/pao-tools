@@ -124,7 +124,10 @@ artifact. Set `limit` only when you intentionally want pwndbg to stop after a fi
 number of matches.
 
 `write_memory` accepts an even-length hexadecimal byte string. With `verify=true`
-(the default), the API reads the bytes back and fails if the result differs.
+(the default), the API reads the bytes back and fails if the result differs. One
+write is limited to 4 MiB by default, and reversible patch records also consume
+the per-session count and byte quotas documented in
+[Debugger completion](/tool-reference/debugger-completion).
 
 ```json
 {"tool":"write_memory","arguments":{"session_id":"chal-a","address":"$rsp","data_hex":"41424300","verify":true}}

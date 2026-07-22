@@ -25,6 +25,10 @@ class FakeGdb:
     def get_state(self):
         return "stopped"
 
+    @staticmethod
+    def quote_mi_argument(value):
+        return f'"{value}"'
+
     def list_breakpoints(self):
         self.calls.append("-break-list")
         return response(
@@ -84,9 +88,9 @@ class FakeGdb:
             return response({"value": "void"})
         if command.startswith("-data-evaluate-expression"):
             return response({"value": "0x401000 <main>"})
-        if command == "-data-write-memory-bytes $rsp 4142":
+        if command == '-data-write-memory-bytes "$rsp" 4142':
             return response({})
-        if command == "-data-read-memory-bytes $rsp 2":
+        if command == '-data-read-memory-bytes "$rsp" 2':
             return response(
                 {"memory": [{"begin": "0x7fffffffe000", "contents": "4142"}]}
             )
@@ -212,7 +216,7 @@ def test_thread_memory_search_write_and_disassembly():
     searched = adapter.search_memory(
         "7f454c46", value_type="bytes", hex_encoded=True, limit=10
     )
-    written = adapter.write_memory("$rsp", "0x4142", verify=True)
+    written = adapter.write_memory("$rsp", "0x4142", verify=True, allow_unsafe=True)
     disassembly = adapter.disassemble("$pc", 32)
 
     assert selected["parsed"]["thread_id"] == "3"

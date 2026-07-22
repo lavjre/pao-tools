@@ -19,18 +19,27 @@ tools.
 | `error` | object or null | Structured failure information |
 | `warnings` | string array | Non-fatal issues reported by the tool |
 | `meta.duration_ms` | integer | Server-side execution duration in milliseconds |
+| `meta.operation_id` | string or null | Server lifecycle identifier for status, progress, and cancellation |
+| `meta.idempotency_key` | string or null | Caller retry key when the tool exposes idempotent execution |
+| `meta.idempotency_replayed` | boolean | Whether this response was replayed without re-running backend work |
 
 ## Complete output policy
 
-The response layer does not truncate, summarize, paginate, or discard payload data.
-Full stdout, stderr, GDB responses, event lists, decompiled code, and Python output are
-preserved. Small payloads are returned directly inside `data`. When serialized `data`
-exceeds `PAO_INLINE_RESPONSE_BYTES`, the server stores it on disk and returns an
-artifact descriptor instead.
+The response layer does not silently truncate, summarize, paginate, or discard
+payload data. GDB responses, event lists, decompiled code, and Python output are
+preserved. Small payloads are returned directly inside `data`.
+When serialized `data` exceeds `PAO_INLINE_RESPONSE_BYTES`, the server stores it on
+disk and returns an artifact descriptor instead. Safety-bounded platform discovery
+probes are one deliberate exception: each stream reports its original byte count and
+an explicit truncation flag. Managed process stdout+stderr have a separate combined
+hard storage budget. Crossing it terminates the process tree and returns
+`RESOURCE_EXHAUSTED` plus exact observed, stored, and dropped byte counts.
 
 For process tools, a large `stdout` or `stderr` stream can independently become an
 artifact descriptor while command metadata remains inline. This lets the subprocess
 backend spool output to disk instead of first accumulating it in server RAM.
+Artifacts preserve the complete stream only while combined process output remains
+within `PAO_MAX_PROCESS_OUTPUT_BYTES`.
 
 See [Large Output Artifacts](/tool-reference/artifacts) for range reads and examples.
 
@@ -54,7 +63,10 @@ Example `run_command(command="checksec --file=/workspace/chal")` response:
   "error": null,
   "warnings": [],
   "meta": {
-    "duration_ms": 84
+    "duration_ms": 84,
+    "operation_id": "d93a1a07510149d38702051d2dafd818",
+    "idempotency_key": null,
+    "idempotency_replayed": false
   }
 }
 ```
@@ -69,14 +81,17 @@ Example `run_command(command="checksec --file=/workspace/chal")` response:
   "session_id": "chal-a",
   "data": null,
   "error": {
-    "code": "FILE_NOT_FOUND_ERROR",
+    "code": "NOT_FOUND",
     "message": "binary_path not found: '/workspace/missing'",
     "type": "FileNotFoundError",
     "details": null
   },
   "warnings": [],
   "meta": {
-    "duration_ms": 1
+    "duration_ms": 1,
+    "operation_id": "929ab62669204cbbb62c44154a106628",
+    "idempotency_key": null,
+    "idempotency_replayed": false
   }
 }
 ```
@@ -90,17 +105,21 @@ The envelope is identical for all tools; only `data` changes.
 | Sessions | `create_debug_session`, `list_debug_sessions`, `close_debug_session`, `get_session_info` | Session metadata and lifecycle results |
 | Execution | `execute`, `set_file`, `run`, `step_control`, `gdb_poll`, `gdb_interrupt`, `finish`, `jump`, `return_from_function`, `until` | GDB/MI responses and debugger state |
 | Compatibility | `get_debugger_capabilities`, `list_pwndbg_commands`, `get_pwndbg_command_help` | Parsed runtime capabilities plus raw GDB/pwndbg evidence |
+| Platform | `get_platform_capabilities` | Unified runtime, helper, architecture, allocator, provider, and readiness manifest |
+| Static analysis | `analyze_static_binary`, `extract_binary_strings`, `compare_binaries` | Complete typed ELF model, strings, fingerprints, cache metadata, and semantic diff |
 | ELF/runtime | `analyze_elf`, `checksec`, `inspect_got_plt`, `memory_maps`, `list_threads`, `get_process_info`, `inspect_libc`, `inspect_address` | Typed security, linkage, mapping, thread, process, libc, and address data plus raw pwndbg evidence |
 | Attach | `attach` | `result` plus immediate `context` snapshots |
 | Debugger state | `set_breakpoint`, `list_breakpoints`, `delete_breakpoint`, `toggle_breakpoint`, `set_watchpoint`, `read_registers`, `write_register`, `evaluate_expression`, `select_thread` | Typed debugger state or mutation results plus raw MI evidence |
 | Memory/stepping | `search_memory`, `write_memory`, `disassemble`, `step_until_event` | Parsed matches/instructions, verified memory writes, and stop evidence |
+| Debugger completion | `create_breakpoint`, `list_watchpoints`, `delete_watchpoint`, `toggle_watchpoint`, `stack_frames`, `select_frame`, `list_debugger_threads`, `list_inferiors`, `read_register_group`, `list_memory_patches`, `revert_memory_patch`, `capture_debugger_snapshot`, `diff_debugger_snapshots` | Typed state, raw MI evidence, snapshots, and reversible patch history |
 | Inspection | `get_context`, `get_memory` | Registers, frames, disassembly, or memory responses |
 | Exploit I/O | `paocli`, `sendinput`, `checkoutput`, `checkevents`, `paocli_stop`, `list_paocli_sessions` | Driver state, output, structured events, and attach information |
-| Processes | `run_command`, `spawn_process`, `get_process`, `kill_process`, `list_processes` | Process metadata, complete stdout, and complete stderr |
+| Processes | `run_command`, `spawn_process`, `get_process`, `kill_process`, `list_processes` | Process metadata, bounded stdout/stderr, and explicit quota evidence |
 | Python | `execute_python_script`, `execute_python_code`, `install_python_packages`, `list_python_packages` | Execution or package-manager results |
 | Repositories | `fetch_repo` | Clone path, revision, branch, and checkout information |
 | Local decompiler | `get_decompiler_status`, `decompile_binary` | Ghidra availability, pseudo-C, function manifest, and analysis logs |
-| Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact`, `get_artifact_store_status`, `set_artifact_pinned`, `delete_artifact`, `cleanup_artifacts` | Storage lifecycle metadata, cleanup controls, or a lossless byte range |
+| Operations | `list_operations`, `get_operation`, `cancel_operation` | Lifecycle, progress, capacity, and cooperative cancellation state |
+| Artifacts | `list_artifacts`, `get_artifact_info`, `read_artifact`, `verify_artifact`, `get_artifact_store_status`, `set_artifact_pinned`, `delete_artifact`, `cleanup_artifacts` | Session-owned storage lifecycle, integrity, cleanup controls, or a lossless byte range |
 
 ## Attach result example
 

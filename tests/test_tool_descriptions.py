@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 66
+    assert len(tools) == 87
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -100,3 +100,47 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         assert tool.output_schema is not None, tool.name
         properties = set(tool.output_schema.get("properties", {}))
         assert properties == required_properties, tool.name
+
+
+@pytest.mark.asyncio
+async def test_high_impact_mutations_expose_idempotency_keys():
+    tools = await create_mcp().list_tools(run_middleware=False)
+    by_name = {tool.name: tool for tool in tools}
+    mutations = {
+        "create_debug_session",
+        "close_debug_session",
+        "execute",
+        "set_file",
+        "attach",
+        "run",
+        "step_control",
+        "gdb_interrupt",
+        "finish",
+        "jump",
+        "return_from_function",
+        "until",
+        "set_breakpoint",
+        "create_breakpoint",
+        "delete_breakpoint",
+        "toggle_breakpoint",
+        "set_watchpoint",
+        "delete_watchpoint",
+        "toggle_watchpoint",
+        "write_register",
+        "select_thread",
+        "select_frame",
+        "write_memory",
+        "revert_memory_patch",
+        "step_until_event",
+        "run_command",
+        "spawn_process",
+        "kill_process",
+        "decompile_binary",
+        "set_artifact_pinned",
+        "delete_artifact",
+        "cleanup_artifacts",
+    }
+
+    for name in mutations:
+        properties = by_name[name].parameters.get("properties", {})
+        assert "idempotency_key" in properties, name

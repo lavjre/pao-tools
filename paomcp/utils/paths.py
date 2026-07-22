@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import os
 import posixpath
 import re
+import shutil
+import stat
 import tempfile
-from typing import Optional
+from typing import Any, Callable, Iterator, Optional
+
+from paomcp.operations import OperationCancelledError
 
 DEFAULT_WORKSPACE = "/workspace"
 DEFAULT_RUNTIME_ROOT = os.environ.get(
@@ -186,3 +191,202 @@ def resolve_workspace_cwd(
     )
     os.makedirs(resolved, exist_ok=True)
     return resolved
+
+
+def resolve_workspace_file(
+    raw_path: str,
+    workspace_root: str = DEFAULT_WORKSPACE,
+    *,
+    kind: str = "file",
+) -> str:
+    """Resolve a regular file and reject symlink escapes from the workspace."""
+    resolved = resolve_workspace_path(
+        raw_path,
+        workspace_root=workspace_root,
+        require_exists=True,
+        kind=kind,
+    )
+    workspace_real = os.path.realpath(workspace_root)
+    file_real = os.path.realpath(resolved)
+    try:
+        contained = os.path.commonpath([file_real, workspace_real]) == workspace_real
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(f"{kind} resolves outside the configured workspace")
+    if not os.path.isfile(file_real):
+        raise ValueError(f"{kind} must identify a regular file")
+    return file_real
+
+
+def _opened_file_path(source: Any, fallback_path: str) -> str:
+    """Return the canonical path represented by an already-open file handle."""
+    if os.name != "nt":
+        return os.path.realpath(fallback_path)
+
+    import ctypes
+    from ctypes import wintypes
+    import msvcrt
+
+    get_final_path = ctypes.WinDLL(
+        "kernel32", use_last_error=True
+    ).GetFinalPathNameByHandleW
+    get_final_path.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    get_final_path.restype = wintypes.DWORD
+    buffer = ctypes.create_unicode_buffer(32768)
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(source.fileno()))
+    length = get_final_path(handle, buffer, len(buffer), 0)
+    if length == 0:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if length >= len(buffer):
+        raise OSError("Opened file path exceeds the supported Windows path length")
+    resolved = buffer.value
+    if resolved.startswith("\\\\?\\UNC\\"):
+        resolved = "\\\\" + resolved[8:]
+    elif resolved.startswith("\\\\?\\"):
+        resolved = resolved[4:]
+    return os.path.realpath(resolved)
+
+
+@contextmanager
+def _open_regular_beneath(
+    source_path: str, workspace_root: Optional[str]
+) -> Iterator[Any]:
+    """Open a regular file without following workspace-relative symlinks."""
+    source_absolute = os.path.abspath(source_path)
+    root = os.path.realpath(workspace_root or os.path.dirname(source_absolute))
+    try:
+        contained = os.path.commonpath([source_absolute, root]) == root
+    except ValueError:
+        contained = False
+    if not contained or source_absolute == root:
+        raise ValueError("analysis input is outside the configured workspace")
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    supports_openat = os.name == "posix" and nofollow and directory
+    if not supports_openat:
+        with open(source_absolute, "rb") as source:
+            final_path = _opened_file_path(source, source_absolute)
+            try:
+                still_contained = os.path.commonpath([final_path, root]) == root
+            except ValueError:
+                still_contained = False
+            if not still_contained:
+                raise ValueError("analysis input escaped the configured workspace")
+            yield source
+        return
+
+    relative = os.path.relpath(source_absolute, root)
+    components = [item for item in relative.split(os.sep) if item not in {"", "."}]
+    if not components or any(item == ".." for item in components):
+        raise ValueError("analysis input is outside the configured workspace")
+
+    directory_flags = os.O_RDONLY | directory | nofollow | cloexec
+    file_flags = os.O_RDONLY | nofollow | cloexec
+    current_fd = os.open(root, directory_flags)
+    try:
+        for component in components[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        source_fd = os.open(components[-1], file_flags, dir_fd=current_fd)
+        try:
+            source = os.fdopen(source_fd, "rb")
+        except Exception:
+            os.close(source_fd)
+            raise
+        with source:
+            yield source
+    finally:
+        os.close(current_fd)
+
+
+@contextmanager
+def stable_file_snapshot(
+    source_path: str,
+    runtime_dir: str,
+    *,
+    workspace_root: Optional[str] = None,
+    minimum_free_bytes: int = 0,
+    cancellation_requested: Optional[Callable[[], bool]] = None,
+) -> Iterator[str]:
+    """Copy one stable regular-file view for parsers that reopen pathnames."""
+    os.makedirs(runtime_dir, exist_ok=True)
+    descriptor, snapshot_path = tempfile.mkstemp(
+        prefix="input-snapshot-",
+        suffix=os.path.splitext(source_path)[1],
+        dir=runtime_dir,
+    )
+    descriptor_open = True
+    try:
+        with _open_regular_beneath(source_path, workspace_root) as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("analysis input must be a regular file")
+            destination = os.fdopen(descriptor, "wb")
+            descriptor_open = False
+            written = 0
+            with destination:
+                while True:
+                    if cancellation_requested is not None and cancellation_requested():
+                        raise OperationCancelledError(
+                            "Analysis input snapshot was cancelled"
+                        )
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    written += len(chunk)
+                    if shutil.disk_usage(runtime_dir).free < minimum_free_bytes:
+                        raise OSError(
+                            "Insufficient free disk for stable analysis snapshot"
+                        )
+                destination.flush()
+                os.fsync(destination.fileno())
+            after = os.fstat(source.fileno())
+
+        current = os.stat(source_path, follow_symlinks=False)
+        if not stat.S_ISREG(current.st_mode):
+            raise RuntimeError("analysis input path was replaced while snapshotting")
+        expected_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        )
+        if expected_identity != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or expected_identity != (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        ):
+            raise RuntimeError("analysis input changed while it was being snapshotted")
+        if written != before.st_size:
+            raise RuntimeError("analysis input size changed while being snapshotted")
+        os.utime(
+            snapshot_path,
+            ns=(before.st_atime_ns, before.st_mtime_ns),
+        )
+        yield snapshot_path
+    finally:
+        if descriptor_open:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.unlink(snapshot_path)
+        except FileNotFoundError:
+            pass

@@ -7,6 +7,8 @@ import ghidra.program.model.address.Address;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
 import ghidra.program.model.listing.FunctionManager;
+import ghidra.program.model.listing.Parameter;
+import ghidra.program.model.listing.Variable;
 
 import java.io.BufferedWriter;
 import java.nio.charset.StandardCharsets;
@@ -14,6 +16,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 public class PaoDecompile extends GhidraScript {
     private static String jsonEscape(String value) {
@@ -43,6 +46,59 @@ public class PaoDecompile extends GhidraScript {
 
     private static String quoted(String value) {
         return "\"" + jsonEscape(value) + "\"";
+    }
+
+    private static String functionReference(Function function) {
+        return "{\"name\":" + quoted(function.getName()) +
+            ",\"entry\":" + quoted(function.getEntryPoint().toString()) + "}";
+    }
+
+    private static String functionSet(Set<Function> functions) {
+        StringBuilder value = new StringBuilder("[");
+        boolean first = true;
+        for (Function function : functions) {
+            if (!first) {
+                value.append(',');
+            }
+            value.append(functionReference(function));
+            first = false;
+        }
+        return value.append(']').toString();
+    }
+
+    private static String parameters(Parameter[] parameters) {
+        StringBuilder value = new StringBuilder("[");
+        for (int index = 0; index < parameters.length; index++) {
+            if (index > 0) {
+                value.append(',');
+            }
+            Parameter parameter = parameters[index];
+            value.append("{\"ordinal\":").append(parameter.getOrdinal())
+                .append(",\"name\":").append(quoted(parameter.getName()))
+                .append(",\"type\":")
+                .append(quoted(parameter.getDataType().getDisplayName()))
+                .append(",\"storage\":")
+                .append(quoted(parameter.getVariableStorage().toString()))
+                .append('}');
+        }
+        return value.append(']').toString();
+    }
+
+    private static String localVariables(Variable[] variables) {
+        StringBuilder value = new StringBuilder("[");
+        for (int index = 0; index < variables.length; index++) {
+            if (index > 0) {
+                value.append(',');
+            }
+            Variable variable = variables[index];
+            value.append("{\"name\":").append(quoted(variable.getName()))
+                .append(",\"type\":")
+                .append(quoted(variable.getDataType().getDisplayName()))
+                .append(",\"storage\":")
+                .append(quoted(variable.getVariableStorage().toString()))
+                .append('}');
+        }
+        return value.append(']').toString();
     }
 
     private List<Function> selectFunctions(String selector) {
@@ -106,11 +162,14 @@ public class PaoDecompile extends GhidraScript {
             BufferedWriter manifest = Files.newBufferedWriter(manifestPath, StandardCharsets.UTF_8)
         ) {
             manifest.write(
-                "{\"type\":\"program\",\"name\":" + quoted(currentProgram.getName()) +
+                "{\"type\":\"program\",\"model_schema_version\":\"1\",\"name\":" + quoted(currentProgram.getName()) +
                 ",\"format\":" + quoted(currentProgram.getExecutableFormat()) +
                 ",\"language\":" + quoted(currentProgram.getLanguageID().toString()) +
                 ",\"compiler\":" +
-                quoted(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) + "}\n"
+                quoted(currentProgram.getCompilerSpec().getCompilerSpecID().toString()) +
+                ",\"image_base\":" + quoted(currentProgram.getImageBase().toString()) +
+                ",\"function_count\":" + currentProgram.getFunctionManager().getFunctionCount() +
+                ",\"symbol_count\":" + currentProgram.getSymbolTable().getNumSymbols() + "}\n"
             );
 
             if (functions.isEmpty()) {
@@ -144,6 +203,18 @@ public class PaoDecompile extends GhidraScript {
                         manifest.write(
                             "{\"type\":\"function\",\"status\":\"success\",\"name\":" +
                             quoted(name) + ",\"entry\":" + quoted(entry) +
+                            ",\"namespace\":" + quoted(function.getParentNamespace().getName(true)) +
+                            ",\"signature\":" + quoted(function.getPrototypeString(false, false)) +
+                            ",\"calling_convention\":" + quoted(function.getCallingConventionName()) +
+                            ",\"return_type\":" + quoted(function.getReturnType().getDisplayName()) +
+                            ",\"parameters\":" + parameters(function.getParameters()) +
+                            ",\"local_variables\":" + localVariables(function.getLocalVariables()) +
+                            ",\"body_size\":" + function.getBody().getNumAddresses() +
+                            ",\"external\":" + function.isExternal() +
+                            ",\"thunk\":" + function.isThunk() +
+                            ",\"var_args\":" + function.hasVarArgs() +
+                            ",\"callers\":" + functionSet(function.getCallingFunctions(monitor)) +
+                            ",\"callees\":" + functionSet(function.getCalledFunctions(monitor)) +
                             ",\"elapsed_ms\":" + elapsed + "}\n"
                         );
                     }

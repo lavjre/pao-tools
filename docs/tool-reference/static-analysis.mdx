@@ -1,0 +1,220 @@
+---
+title: "Static Binary Analysis"
+description: "Lossless typed ELF metadata, strings, fingerprints, caching, and binary comparison without starting a debugger."
+---
+
+Static analysis runs locally with the pinned Python ELF parser. It does not start an
+inferior, execute the target, or upload the binary. Every path is confined to the
+configured workspace, including resolution of symbolic links.
+
+All addresses, offsets, sizes, flags, and alignments that may exceed JavaScript's
+safe integer range are hexadecimal strings. Large results use the shared artifact
+delivery path; the analyzer never silently truncates a list.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `analyze_static_binary` | Fingerprint and build a complete typed ELF model |
+| `extract_binary_strings` | Extract printable ASCII strings with exact file offsets |
+| `compare_binaries` | Compare two full typed models and return semantic differences |
+
+## `analyze_static_binary`
+
+```json
+{
+  "tool": "analyze_static_binary",
+  "arguments": {
+    "binary_path": "/workspace/chal",
+    "include_strings": true,
+    "min_string_length": 4,
+    "refresh": false
+  }
+}
+```
+
+The result contains:
+
+- SHA-256, byte size, and source modification timestamp;
+- ELF class, endian, ABI, type, machine, entry point, flags, and table locations;
+- every program header and section with decoded permissions;
+- complete symbol tables plus normalized imports and dynamic exports;
+- every relocation with symbol, addend, numeric type, and architecture type name;
+- `DT_NEEDED`, SONAME, RPATH, RUNPATH, and the complete dynamic tag table;
+- dynamic and build-ID metadata from program headers even when section headers were
+  stripped, plus REL, RELA, and RELR relocations when present;
+- GNU build ID and `.gnu_debuglink` metadata;
+- DWARF section inventory and basic compilation-unit metadata;
+- optionally, every printable ASCII string and its exact file offset.
+
+Representative response data:
+
+```json
+{
+  "analyzer": "pyelftools",
+  "analyzer_version": "0.32",
+  "parser_version": "1",
+  "binary_path": "/workspace/chal",
+  "fingerprint": {
+    "sha256": "caa3...e92b",
+    "size_bytes": "18256",
+    "modified_ns": "1784660000000000000"
+  },
+  "cache": {
+    "hit": false,
+    "strings_hit": false,
+    "refreshed": false,
+    "key": "caa3...e92b:0.32:1",
+    "max_entries": 8,
+    "max_bytes": 67108864
+  },
+  "parsed": {
+    "elf_header": {
+      "class_bits": 64,
+      "endianness": "little",
+      "machine": "EM_X86_64",
+      "entry": "0x401090"
+    },
+    "program_headers": {"count": 13, "entries": ["..."]},
+    "sections": {"count": 31, "entries": ["..."]},
+    "import_count": 5,
+    "imports": [
+      {
+        "name": "puts",
+        "value": "0x0",
+        "binding": "STB_GLOBAL",
+        "type": "STT_FUNC",
+        "section_index": "SHN_UNDEF"
+      }
+    ],
+    "export_count": 2,
+    "exports": ["..."],
+    "relocations": {"count": 9, "entries": ["..."]},
+    "dynamic": {
+      "needed": ["libc.so.6"],
+      "rpath": [],
+      "runpath": ["$ORIGIN/lib"],
+      "soname": null,
+      "tags": ["..."]
+    },
+    "build_id": "5f72...d291",
+    "debug_link": {"file": "chal.debug", "crc32": "0x91c5bf21"},
+    "dwarf": {
+      "present": true,
+      "compilation_unit_count": 1,
+      "compilation_units": ["..."]
+    },
+    "strings": {
+      "min_length": 4,
+      "total_count": 148,
+      "returned_count": 148,
+      "limited_by_caller": false,
+      "limit": null,
+      "entries": [
+        {
+          "offset": "0x2004",
+          "length": 13,
+          "encoding": "ascii",
+          "value": "Access denied"
+        }
+      ]
+    }
+  }
+}
+```
+
+`include_strings` defaults to `true`. Set it to `false` when only the ELF model is
+needed. `string_limit` is optional and has no server default. If a caller supplies a
+limit, `total_count`, `returned_count`, and `limited_by_caller` make the reduction
+explicit. With no limit, matches are streamed as NDJSON using bounded working
+memory. Small streams are decoded inline; large streams put an artifact descriptor
+in `strings.entries` with `format: "ndjson"` and record schema
+`pao.static-string.v1`.
+
+## `extract_binary_strings`
+
+```json
+{
+  "tool": "extract_binary_strings",
+  "arguments": {
+    "binary_path": "chal",
+    "min_length": 6
+  }
+}
+```
+
+The default response includes every match. The scanner uses a memory-mapped stable
+snapshot and writes large match sets directly to an NDJSON artifact, so it neither
+materializes the complete string list in memory nor silently truncates it. When a
+caller sets `limit`, the scanner counts all matches but retains only the requested
+entries unless a complete content-addressed result is already cached.
+
+## `compare_binaries`
+
+```json
+{
+  "tool": "compare_binaries",
+  "arguments": {
+    "left_path": "/workspace/chal-v1",
+    "right_path": "/workspace/chal-v2"
+  }
+}
+```
+
+The comparison reports complete added, removed, and changed sets for sections,
+imports, exports, needed libraries, RPATH, and RUNPATH. It also reports header,
+fingerprint, build-ID, DWARF, and record-count changes.
+
+```json
+{
+  "identical": false,
+  "differences": {
+    "needed_libraries": {
+      "added": ["libcrypto.so.3"],
+      "removed": [],
+      "unchanged": ["libc.so.6"]
+    },
+    "build_id": {
+      "left": "5f72...d291",
+      "right": "a84e...91c0",
+      "changed": true
+    },
+    "sections": {
+      "added": [],
+      "removed": [],
+      "changed": {".text": {"size": {"left": "0x820", "right": "0x8d0"}}}
+    }
+  }
+}
+```
+
+## Cache and reproducibility
+
+Immutable core models are cached by:
+
+```text
+SHA-256 + pyelftools version + parser schema version
+```
+
+String results also include `min_length` in their key. Both caches are thread-safe,
+bounded LRU caches. `PAO_STATIC_ANALYSIS_CACHE_ENTRIES` controls their maximum entry
+count and defaults to `8`; `PAO_STATIC_ANALYSIS_CACHE_BYTES` bounds combined retained
+heap data and defaults to 64 MiB. Entries larger than their cache budget are returned
+but not retained. Use `refresh=true` to bypass an entry.
+
+Every response reports analyzer and parser versions. Cached values are copied before
+delivery, so one request cannot mutate a later request's result. Each operation
+parses a private stable snapshot that preserves the source timestamp; symlink escapes
+are rejected and concurrent replacement cannot mix bytes from different revisions.
+Cancellation is checked during snapshotting, hashing, ELF/DWARF traversal, string
+scanning, and comparison.
+
+## Failure and output behavior
+
+- Non-ELF, malformed, missing, directory, workspace-escaping, and symlink-escaping
+  paths return the standard structured error envelope.
+- Malformed optional DWARF does not discard otherwise valid ELF results; the response
+  includes a warning and preserves the DWARF section inventory.
+- No target code executes during these operations.
+- Full output is the default. Large typed data is stored losslessly by the shared
+  artifact policy and can be read in chunks through the artifact APIs.

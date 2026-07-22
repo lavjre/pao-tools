@@ -1,0 +1,76 @@
+---
+title: "Operations and Cancellation"
+description: "Poll progress, cancel long-running work, and inspect server operation capacity."
+---
+
+Every MCP invocation tracked by the server receives a unique
+`meta.operation_id`. The operation record is created before backend work starts and
+finishes as `succeeded`, `failed`, or `cancelled`. Records expose timestamps, stable
+error summaries, and optional progress without retaining full tool payloads.
+
+## Tools
+
+| Tool | Arguments | Result |
+| --- | --- | --- |
+| `list_operations` | optional `session_id`, `state`, `limit` | newest operation records plus capacity policy |
+| `get_operation` | `operation_id`, optional `session_id` | one operation and current progress |
+| `cancel_operation` | `operation_id`, optional `session_id` | cooperative cancellation state |
+
+For a debugger operation, pass the same `session_id` used to start it. Omitting
+`session_id` lists only unscoped operations and cannot read or cancel work owned by
+another debug session.
+
+```json
+{
+  "tool": "list_operations",
+  "arguments": {"session_id": "chal-a", "state": "running"}
+}
+```
+
+Then request cancellation from a second MCP request:
+
+```json
+{
+  "tool": "cancel_operation",
+  "arguments": {
+    "operation_id": "d93a1a07510149d38702051d2dafd818",
+    "session_id": "chal-a"
+  }
+}
+```
+
+Cancellation is cooperative. The local Ghidra backend and synchronous command runner
+register process-tree kill handlers, so those workloads stop promptly. Other tools
+observe the cancellation flag at their supported checkpoints. A request that already
+reached a terminal state is returned unchanged.
+
+## Capacity and retention
+
+`list_operations.data.capacity` reports running, available, and tracked counts plus
+the configured policy. Defaults are 32 simultaneous tool calls, 1,000 retained
+records, and a 24-hour TTL for terminal history. Control requests for listing,
+inspecting, and cancelling operations are not counted or retained, so a saturated
+server remains observable and recoverable.
+
+The registry stores lifecycle metadata only. Complete large responses continue to use
+[Large Output Artifacts](/tool-reference/artifacts).
+
+## Idempotent retries
+
+Mutation or long-running tools that expose `idempotency_key` can safely be retried
+after a transport disconnect. Keys are scoped by tool and exact `session_id`, accept
+1–128 safe characters, and remain subject to the operation-history TTL and quota.
+
+- the first request claims the key and performs the work;
+- an identical completed retry replays the original normalized response and sets
+  `meta.idempotency_replayed=true`;
+- a retry while the first request is active returns `IDEMPOTENCY_IN_PROGRESS`;
+- reusing a key with different effective arguments returns
+  `IDEMPOTENCY_CONFLICT`.
+- if retention removed an artifact referenced by the cached response, the retry
+  returns `IDEMPOTENCY_RESULT_EXPIRED` without rerunning the operation. This avoids
+  silently repeating a mutation whose original evidence has expired.
+
+Omitted default arguments and explicitly supplied default values have the same
+fingerprint. Sensitive argument values are hashed and are not retained in the
+idempotency index.

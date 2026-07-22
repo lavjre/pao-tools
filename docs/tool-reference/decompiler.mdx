@@ -11,7 +11,7 @@ are never uploaded to a decompilation service.
 | Tool | Main arguments | Purpose |
 | --- | --- | --- |
 | `get_decompiler_status` | none | report backend readiness, version, executable, script, memory, and concurrency limits |
-| `decompile_binary` | `binary_path`, optional `function`, `timeout`, `function_timeout` | decompile all discovered functions or one function selected by exact name/address |
+| `decompile_binary` | `binary_path`, optional `function`, `timeout`, `function_timeout`, `refresh`, `idempotency_key` | decompile all discovered functions or one function selected by exact name/address |
 
 Check availability:
 
@@ -47,16 +47,30 @@ Successful results include:
 
 - `decompiled_code`: pseudo-C text or an artifact descriptor
 - `program`: executable format, language, and compiler specification
-- `manifest`: per-function name, entry address, status, and elapsed time
+- `model`: schema-versioned program, function, signature, variable, caller/callee,
+  and call-graph data, inline or as a JSON artifact
+- `manifest`: lossless per-function NDJSON evidence
 - `function_count` and `failed_function_count`
 - complete Ghidra `stdout` and `stderr`
 - overall elapsed time and return code
+- SHA-256 fingerprint and content-addressed cache metadata
 
-Pseudo-C, manifests, and logs larger than the inline threshold are copied directly
-to the artifact store. They are not truncated or loaded completely into server RAM.
+Pseudo-C, manifests, structured models, and logs larger than the inline threshold
+are copied directly to the artifact store. Large structured models are assembled on
+disk with bounded working memory; they are not truncated or loaded completely into
+server RAM.
+
+Successful results are cached by binary SHA-256, function selector, per-function
+timeout, Ghidra/script version, and model schema. `refresh=true` bypasses the cache.
+Artifact-backed cache entries are automatically invalidated after their artifacts
+expire or are deleted.
 
 ## Isolation and limits
 
+- workspace paths are resolved through their real target and symlink escapes are
+  rejected
+- each request decompiles a private stable input snapshot, preventing pathname
+  replacement from changing the binary midway through analysis
 - every request uses a unique temporary Ghidra project
 - the temporary project is deleted after completion or failure
 - timeout cleanup terminates the complete Ghidra/Java process tree

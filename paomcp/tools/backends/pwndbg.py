@@ -8,7 +8,9 @@ Each tool returns immediate results suitable for LLM interaction.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+import os
+import re
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from paomcp.tools.backends.compatibility import PwndbgCompatibility
 from paomcp.tools.backends.debugger import DebuggerOperations
@@ -20,11 +22,65 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MAX_MEMORY_PATCHES = 256
+DEFAULT_MAX_MEMORY_PATCH_BYTES = 32 * 1024 * 1024
+MAX_CONFIGURED_MEMORY_PATCHES = 100_000
+MAX_CONFIGURED_MEMORY_PATCH_BYTES = 1024 * 1024 * 1024
+RAW_ADDRESS_SPACE_COMMANDS = frozenset(
+    {
+        "run",
+        "r",
+        "start",
+        "starti",
+        "attach",
+        "detach",
+        "kill",
+        "disconnect",
+        "file",
+        "exec-file",
+        "core",
+        "core-file",
+        "target",
+        "load",
+        "inferior",
+        "add-inferior",
+        "clone-inferior",
+        "remove-inferiors",
+        "-exec-run",
+        "-exec-abort",
+        "-target-attach",
+        "-target-detach",
+        "-target-disconnect",
+        "-file-exec-file",
+        "-file-exec-and-symbols",
+        "-add-inferior",
+        "-remove-inferiors",
+    }
+)
+EXEC_TRANSITION_PATTERN = re.compile(
+    r"\b(?:executing new program|exec(?:ution)? catchpoint)\b", re.IGNORECASE
+)
+
+
+def _bounded_environment_int(name: str, default: int, maximum: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    if not 1 <= value <= maximum:
+        raise ValueError(f"{name} must be between 1 and {maximum}")
+    return value
+
 
 class PwndbgTools:
     """MCP tools for pwndbg interaction"""
 
-    def __init__(self, gdb_controller: GdbController, session_state: SessionState):
+    def __init__(
+        self,
+        gdb_controller: GdbController,
+        session_state: SessionState,
+        *,
+        max_memory_write_bytes: Optional[int] = None,
+        max_memory_patches: Optional[int] = None,
+        max_memory_patch_bytes: Optional[int] = None,
+    ):
         """
         Initialize pwndbg tools
 
@@ -37,8 +93,42 @@ class PwndbgTools:
         self.compatibility = PwndbgCompatibility(gdb_controller)
         self.inspection = PwndbgInspection(gdb_controller)
         self.debugger = DebuggerOperations(
-            gdb_controller, timeout_seconds=self.inspection.timeout_seconds
+            gdb_controller,
+            timeout_seconds=self.inspection.timeout_seconds,
+            max_memory_write_bytes=max_memory_write_bytes,
         )
+        self.max_memory_patches = (
+            max_memory_patches
+            if max_memory_patches is not None
+            else _bounded_environment_int(
+                "PAO_MAX_MEMORY_PATCHES",
+                DEFAULT_MAX_MEMORY_PATCHES,
+                MAX_CONFIGURED_MEMORY_PATCHES,
+            )
+        )
+        self.max_memory_patch_bytes = (
+            max_memory_patch_bytes
+            if max_memory_patch_bytes is not None
+            else _bounded_environment_int(
+                "PAO_MAX_MEMORY_PATCH_BYTES",
+                DEFAULT_MAX_MEMORY_PATCH_BYTES,
+                MAX_CONFIGURED_MEMORY_PATCH_BYTES,
+            )
+        )
+        if not 1 <= self.max_memory_patches <= MAX_CONFIGURED_MEMORY_PATCHES:
+            raise ValueError(
+                "Memory patch count limit must be between 1 and "
+                f"{MAX_CONFIGURED_MEMORY_PATCHES}"
+            )
+        if not 1 <= self.max_memory_patch_bytes <= MAX_CONFIGURED_MEMORY_PATCH_BYTES:
+            raise ValueError(
+                "Memory patch byte limit must be between 1 and "
+                f"{MAX_CONFIGURED_MEMORY_PATCH_BYTES}"
+            )
+        self._memory_patches: Dict[str, Dict[str, Any]] = {}
+        self._memory_patch_sequence = 0
+        self._inferior_generation = 0
+        self._last_gdb_inferior_epoch = self._gdb_inferior_epoch()
         # Ensure GDB is initialized once lazily to avoid startup cost unless used
         try:
             self.gdb.initialize()
@@ -47,6 +137,75 @@ class PwndbgTools:
             logger.exception(
                 "GDB initialize() failed during tool init; will retry on demand"
             )
+
+    def _advance_inferior_generation(self, reason: str) -> None:
+        """Invalidate active patches whenever address-space identity can change."""
+        self._inferior_generation += 1
+        for patch in self._memory_patches.values():
+            if patch.get("active"):
+                patch["active"] = False
+                patch["invalidated"] = True
+                patch["invalidation_reason"] = reason
+        current_epoch = self._gdb_inferior_epoch()
+        if current_epoch is not None:
+            self._last_gdb_inferior_epoch = current_epoch
+
+    def _gdb_inferior_epoch(self) -> Optional[int]:
+        getter = getattr(self.gdb, "get_inferior_epoch", None)
+        if not callable(getter):
+            return None
+        try:
+            return int(getter())
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _sync_inferior_generation(self, reason: str) -> bool:
+        """Invalidate patches when GDB reports an inferior start/exit transition."""
+        current = self._gdb_inferior_epoch()
+        if current is None:
+            return False
+        previous = self._last_gdb_inferior_epoch
+        self._last_gdb_inferior_epoch = current
+        if previous is None or current == previous:
+            return False
+        self._advance_inferior_generation(reason)
+        return True
+
+    @staticmethod
+    def _raw_address_space_reason(command: str) -> Optional[str]:
+        match = re.match(r"^\s*([^\s]+)", command)
+        if match is None:
+            return None
+        root = match.group(1).lower()
+        if root in RAW_ADDRESS_SPACE_COMMANDS:
+            return f"raw debugger lifecycle command: {root}"
+        return None
+
+    @staticmethod
+    def _result_indicates_exec(result: Dict[str, Any]) -> bool:
+        for response in result.get("responses", []):
+            if not isinstance(response, dict):
+                continue
+            payload = response.get("payload")
+            if isinstance(payload, dict):
+                reason = str(payload.get("reason", ""))
+                if "exec" in reason.lower():
+                    return True
+            elif isinstance(payload, str) and EXEC_TRANSITION_PATTERN.search(payload):
+                return True
+        return False
+
+    def _observe_inferior_transition(
+        self, result: Dict[str, Any], explicit_reason: Optional[str] = None
+    ) -> None:
+        epoch_changed = self._sync_inferior_generation(
+            explicit_reason or "GDB inferior lifecycle notification"
+        )
+        reason = explicit_reason
+        if reason is None and self._result_indicates_exec(result):
+            reason = "inferior executed a new program"
+        if reason is not None and not epoch_changed:
+            self._advance_inferior_generation(reason)
 
     def get_debugger_capabilities(self, refresh: bool = False) -> Dict[str, Any]:
         """Return typed pwndbg/GDB runtime compatibility information."""
@@ -161,6 +320,12 @@ class PwndbgTools:
         logger.info(f"Execute tool: {command}")
         self.gdb.initialize()
         result = self.gdb.execute_command(command)
+        if result.get("success"):
+            self._observe_inferior_transition(
+                result, explicit_reason=self._raw_address_space_reason(command)
+            )
+        else:
+            self._sync_inferior_generation("GDB inferior lifecycle notification")
         self.session.update_state(result["state"])
         self.session.record_command(command, result)
         return result
@@ -174,6 +339,7 @@ class PwndbgTools:
             self.session.binary_path = binary_path
             self.session.binary_loaded = True
             self.debugger.clear_register_cache()
+            self._observe_inferior_transition(result, explicit_reason="binary changed")
         self.session.update_state(result["state"])
         self.session.record_command(
             result.get("command", f"-file-exec-and-symbols {binary_path}"), result
@@ -186,6 +352,9 @@ class PwndbgTools:
         self.gdb.initialize()
         result, context = self.gdb.attach(pid)
         if result.get("success"):
+            self._observe_inferior_transition(
+                result, explicit_reason="attached to a new inferior"
+            )
             self.session.pid = pid
         self.session.update_state(result["state"])
         self.session.record_command(
@@ -206,6 +375,10 @@ class PwndbgTools:
                 "error": "No binary loaded. Use set_file first.",
             }
         result = self.gdb.run(args, start=start)
+        if result.get("success"):
+            self._observe_inferior_transition(
+                result, explicit_reason="inferior restarted"
+            )
         self.session.update_state(result["state"])
         self.session.record_command(result.get("command", "-exec-run"), result)
         return result
@@ -215,6 +388,7 @@ class PwndbgTools:
         logger.info("Finish current function")
         self.gdb.initialize()
         result = self.gdb.finish()
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command(result.get("command", "-exec-finish"), result)
         return result
@@ -224,6 +398,7 @@ class PwndbgTools:
         logger.info(f"Jump to {locspec}")
         self.gdb.initialize()
         result = self.gdb.jump(locspec)
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command(
             result.get("command", f"-exec-jump {locspec}"), result
@@ -235,6 +410,7 @@ class PwndbgTools:
         logger.info("Force return from current function")
         self.gdb.initialize()
         result = self.gdb.return_from_function()
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command(result.get("command", "-exec-return"), result)
         return result
@@ -244,6 +420,7 @@ class PwndbgTools:
         logger.info(f"Until {locspec if locspec else '[next line]'}")
         self.gdb.initialize()
         result = self.gdb.until(locspec)
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command(result.get("command", "-exec-until"), result)
         return result
@@ -287,6 +464,7 @@ class PwndbgTools:
                 "state": current_state,
                 "error": f"Unknown step command '{command}'",
             }
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command(result.get("command", actual), result)
         return result
@@ -296,6 +474,7 @@ class PwndbgTools:
         logger.info("GDB poll")
         self.gdb.initialize()
         result = self.gdb.drain_async(timeout_sec=timeout)
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command("gdb_poll", result)
         return result
@@ -305,6 +484,7 @@ class PwndbgTools:
         logger.info("GDB interrupt")
         self.gdb.initialize()
         result = self.gdb.interrupt(timeout_sec=timeout)
+        self._observe_inferior_transition(result)
         self.session.update_state(result["state"])
         self.session.record_command("gdb_interrupt", result)
         return result
@@ -332,13 +512,18 @@ class PwndbgTools:
             return result
 
     def set_breakpoint(
-        self, location: str, condition: Optional[str] = None
+        self,
+        location: str,
+        condition: Optional[str] = None,
+        temporary: bool = False,
     ) -> Dict[str, Any]:
         """Set a breakpoint and return a typed breakpoint record."""
         logger.info(f"Set breakpoint at {location}")
         self.gdb.initialize()
-        result = self.debugger.decorate_created_breakpoint(
-            self.gdb.set_breakpoint(location, condition)
+        result = self.debugger.create_breakpoint(
+            location=location,
+            condition=condition,
+            temporary=temporary,
         )
         breakpoint = result.get("parsed", {}).get("breakpoint")
         if result.get("success") and breakpoint:
@@ -390,6 +575,7 @@ class PwndbgTools:
 
     def _record_debugger(self, result: Dict[str, Any]) -> Dict[str, Any]:
         """Synchronize state and record one typed debugger operation."""
+        self._observe_inferior_transition(result)
         self.session.update_state(result.get("state", self.gdb.get_state()))
         self.session.record_command(result.get("command", "debugger"), result)
         return result
@@ -398,6 +584,32 @@ class PwndbgTools:
         """Set a typed write, read, or access watchpoint."""
         self.gdb.initialize()
         result = self.debugger.set_watchpoint(expression, access)
+        watchpoint = result.get("parsed", {}).get("watchpoint")
+        if result.get("success") and isinstance(watchpoint, dict):
+            number = str(watchpoint.get("number", ""))
+            if number.isdigit():
+                self.session.add_breakpoint(int(number), expression)
+        return self._record_debugger(result)
+
+    def list_watchpoints(self) -> Dict[str, Any]:
+        """List only watchpoint breakpoint records."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.list_watchpoints())
+
+    def delete_watchpoint(self, number: int) -> Dict[str, Any]:
+        """Delete a verified watchpoint and synchronize session metadata."""
+        self.gdb.initialize()
+        result = self.debugger.delete_watchpoint(number)
+        if result.get("success"):
+            self.session.remove_breakpoint(number)
+        return self._record_debugger(result)
+
+    def toggle_watchpoint(self, number: int, enable: bool) -> Dict[str, Any]:
+        """Enable or disable a verified watchpoint."""
+        self.gdb.initialize()
+        result = self.debugger.toggle_watchpoint(number, enable)
+        if result.get("success") and number in self.session.breakpoints:
+            self.session.breakpoints[number].enabled = enable
         return self._record_debugger(result)
 
     def read_registers(
@@ -425,6 +637,35 @@ class PwndbgTools:
         """Select the active inferior thread."""
         self.gdb.initialize()
         return self._record_debugger(self.debugger.select_thread(thread_id))
+
+    def stack_frames(self, low: int = 0, high: Optional[int] = None) -> Dict[str, Any]:
+        """Return typed stack frames without an implicit frame limit."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.stack_frames(low=low, high=high))
+
+    def select_frame(self, level: int) -> Dict[str, Any]:
+        """Select and inspect one stack frame."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.select_frame(level))
+
+    def list_debugger_threads(self) -> Dict[str, Any]:
+        """List typed threads directly from GDB/MI."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.threads())
+
+    def list_inferiors(self, recurse: int = 1) -> Dict[str, Any]:
+        """List typed GDB inferiors/thread groups."""
+        self.gdb.initialize()
+        return self._record_debugger(self.debugger.inferiors(recurse=recurse))
+
+    def read_register_group(
+        self, group: str, refresh_names: bool = False
+    ) -> Dict[str, Any]:
+        """Read a general, vector, floating-point, system, or all register group."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.debugger.read_register_group(group, refresh_names=refresh_names)
+        )
 
     def search_memory(
         self,
@@ -454,13 +695,325 @@ class PwndbgTools:
             )
         )
 
+    @staticmethod
+    def _patch_storage_bytes(patch: Dict[str, Any]) -> int:
+        explicit = patch.get("storage_bytes")
+        if isinstance(explicit, int) and explicit >= 0:
+            return explicit
+        total = 0
+        for field in ("original_hex", "patched_hex"):
+            value = patch.get(field)
+            if isinstance(value, str):
+                total += len(value) // 2
+        return total
+
+    def _memory_patch_quota(self) -> Dict[str, Any]:
+        retained = list(self._memory_patches.values())
+        active = [patch for patch in retained if patch.get("active")]
+        return {
+            "max_write_bytes": self.debugger.max_memory_write_bytes,
+            "max_patch_count": self.max_memory_patches,
+            "max_patch_bytes": self.max_memory_patch_bytes,
+            "retained_patch_count": len(retained),
+            "retained_patch_bytes": sum(
+                self._patch_storage_bytes(patch) for patch in retained
+            ),
+            "active_patch_count": len(active),
+            "active_patch_bytes": sum(
+                self._patch_storage_bytes(patch) for patch in active
+            ),
+            "byte_accounting": "original_plus_patched_payload",
+        }
+
+    def _plan_memory_patch_capacity(
+        self, byte_count: int
+    ) -> Tuple[List[str], Dict[str, Any], Optional[str]]:
+        """Plan inactive-history retention without mutating it before the write."""
+        required_bytes = byte_count * 2
+        quota = self._memory_patch_quota()
+        quota["required_patch_bytes"] = required_bytes
+        quota["retention_candidates"] = []
+        if required_bytes > self.max_memory_patch_bytes:
+            return (
+                [],
+                quota,
+                "Reversible patch payload exceeds the per-session patch byte limit",
+            )
+        removable = sorted(
+            (
+                patch
+                for patch in self._memory_patches.values()
+                if not patch.get("active")
+            ),
+            key=lambda patch: int(patch.get("sequence", 0)),
+        )
+        removed: List[str] = []
+        projected_count = int(quota["retained_patch_count"])
+        projected_bytes = int(quota["retained_patch_bytes"])
+        while removable and (
+            projected_count + 1 > self.max_memory_patches
+            or projected_bytes + required_bytes > self.max_memory_patch_bytes
+        ):
+            candidate = removable.pop(0)
+            patch_id = str(candidate["patch_id"])
+            removed.append(patch_id)
+            projected_count -= 1
+            projected_bytes -= self._patch_storage_bytes(candidate)
+
+        quota["retention_candidates"] = removed
+        quota["projected_patch_count"] = projected_count + 1
+        quota["projected_patch_bytes"] = projected_bytes + required_bytes
+        if projected_count + 1 > self.max_memory_patches:
+            return (
+                removed,
+                quota,
+                "Active memory patches have reached the per-session patch count limit",
+            )
+        if projected_bytes + required_bytes > self.max_memory_patch_bytes:
+            return (
+                removed,
+                quota,
+                "Active memory patches have reached the per-session patch byte limit",
+            )
+        return removed, quota, None
+
     def write_memory(
-        self, address: str, data_hex: str, verify: bool = True
+        self,
+        address: str,
+        data_hex: str,
+        verify: bool = True,
+        allow_unsafe: bool = False,
     ) -> Dict[str, Any]:
-        """Write bytes to inferior memory with optional read-back verification."""
+        """Write bytes with mapping validation and session-local patch history."""
         self.gdb.initialize()
+        self._sync_inferior_generation("GDB inferior lifecycle notification")
+        normalized, byte_count = self.debugger.normalize_memory_write(data_hex)
+        retention_candidates, quota, quota_error = self._plan_memory_patch_capacity(
+            byte_count
+        )
+        if quota_error is not None:
+            return self._record_debugger(
+                {
+                    "success": False,
+                    "command": "write_memory",
+                    "state": self.gdb.get_state(),
+                    "parser_version": "1",
+                    "parsed": {
+                        "address": address,
+                        "byte_count": byte_count,
+                        "write_applied": False,
+                        "patch_quota": quota,
+                    },
+                    "raw_responses": [],
+                    "error": quota_error,
+                    "type": "MemoryPatchQuotaError",
+                }
+            )
+        address_result = self.inspection.address_info(address)
+        resolved_address = None
+        if address_result.get("success"):
+            candidate = address_result.get("parsed", {}).get("address")
+            if candidate:
+                resolved_address = str(candidate)
+        effective_address = resolved_address or address
+        mapping_result = (
+            self.inspection.memory_maps(address_or_module=resolved_address)
+            if resolved_address is not None
+            else None
+        )
+        result = self.debugger.write_memory(
+            effective_address,
+            normalized,
+            verify=verify,
+            mapping_result=mapping_result,
+            allow_unsafe=allow_unsafe,
+        )
+        parsed = result.get("parsed", {})
+        if isinstance(parsed, dict):
+            parsed["requested_address"] = address
+            parsed["canonical_address"] = resolved_address
+            result.setdefault("raw_responses", {})["address_resolution"] = (
+                address_result.get("raw_responses", [])
+            )
+            parsed["retention_pruned"] = []
+            parsed["patch_quota"] = quota
+        original = parsed.get("original_hex") if isinstance(parsed, dict) else None
+        write_applied = (
+            bool(parsed.get("write_applied")) if isinstance(parsed, dict) else False
+        )
+        if write_applied and original is not None:
+            for retained_patch_id in retention_candidates:
+                self._memory_patches.pop(retained_patch_id, None)
+            self._memory_patch_sequence += 1
+            patch_id = f"patch-{self._memory_patch_sequence:06d}"
+            patch = {
+                "patch_id": patch_id,
+                "address": effective_address,
+                "requested_address": address,
+                "canonical_address": resolved_address,
+                "byte_count": parsed.get("byte_count"),
+                "original_hex": original,
+                "patched_hex": parsed.get("data_hex"),
+                "verified": parsed.get("verified"),
+                "verification_uncertain": parsed.get("verification_uncertain"),
+                "allow_unsafe": allow_unsafe,
+                "inferior_generation": self._inferior_generation,
+                "inferior_pid": self.gdb.get_inferior_pid() or self.session.pid,
+                "sequence": self._memory_patch_sequence,
+                "storage_bytes": (
+                    len(str(original)) // 2 + len(str(parsed.get("data_hex", ""))) // 2
+                ),
+                "active": True,
+                "reverted": False,
+            }
+            self._memory_patches[patch_id] = patch
+            parsed["patch_id"] = patch_id
+            parsed["retention_pruned"] = retention_candidates
+            parsed["patch_quota"] = self._memory_patch_quota()
+        return self._record_debugger(result)
+
+    def list_memory_patches(self, active_only: bool = False) -> Dict[str, Any]:
+        """List memory mutations tracked only by this debugger session."""
+        self._sync_inferior_generation("GDB inferior lifecycle notification")
+        patches = [
+            dict(item)
+            for item in self._memory_patches.values()
+            if not active_only or item.get("active")
+        ]
+        return {
+            "success": True,
+            "command": "list_memory_patches",
+            "state": self.gdb.get_state(),
+            "parser_version": "1",
+            "parsed": {
+                "count": len(patches),
+                "patches": patches,
+                "quota": self._memory_patch_quota(),
+            },
+            "raw_responses": [],
+        }
+
+    def revert_memory_patch(
+        self, patch_id: str, verify: bool = True, force: bool = False
+    ) -> Dict[str, Any]:
+        """Restore the original bytes for one active session-local patch."""
+        self._sync_inferior_generation("GDB inferior lifecycle notification")
+        patch = self._memory_patches.get(patch_id)
+        if patch is None:
+            raise ValueError(f"Unknown memory patch id: {patch_id}")
+        if not patch.get("active"):
+            raise ValueError(f"Memory patch is no longer active: {patch_id}")
+        current_pid = self.gdb.get_inferior_pid() or self.session.pid
+        if (
+            patch.get("inferior_generation") != self._inferior_generation
+            or patch.get("inferior_pid") != current_pid
+        ):
+            raise RuntimeError(
+                "Memory patch belongs to a different inferior generation"
+            )
+        canonical_address = patch.get("canonical_address")
+        if canonical_address is None and not force:
+            raise RuntimeError(
+                "Patch address was not canonicalized; pass force=true to revert unsafely"
+            )
+        start = int(str(patch["address"]), 0) if canonical_address is not None else None
+        end = start + int(patch["byte_count"]) if start is not None else None
+        overlapping = []
+        for candidate in self._memory_patches.values():
+            if (
+                not candidate.get("active")
+                or int(candidate.get("sequence", 0)) <= int(patch["sequence"])
+                or candidate.get("canonical_address") is None
+            ):
+                continue
+            candidate_start = int(str(candidate["address"]), 0)
+            candidate_end = candidate_start + int(candidate["byte_count"])
+            if (
+                start is not None
+                and end is not None
+                and start < candidate_end
+                and candidate_start < end
+            ):
+                overlapping.append(str(candidate["patch_id"]))
+        if overlapping and not force:
+            raise RuntimeError(
+                "A newer active patch overlaps this range: " + ", ".join(overlapping)
+            )
+        current_result = self.gdb.execute_mi_command(
+            "-data-read-memory-bytes "
+            f"{self.gdb.quote_mi_argument(str(patch['address']))} "
+            f"{patch['byte_count']}",
+            timeout_sec=self.debugger.timeout_seconds,
+        )
+        current_hex = self.debugger._memory_contents(current_result)
+        if current_hex != patch.get("patched_hex") and not force:
+            return self._record_debugger(
+                {
+                    "success": False,
+                    "command": f"revert_memory_patch {patch_id}",
+                    "state": self.gdb.get_state(),
+                    "parser_version": "1",
+                    "parsed": {
+                        "patch_id": patch_id,
+                        "expected_hex": patch.get("patched_hex"),
+                        "actual_hex": current_hex,
+                        "reverted": False,
+                    },
+                    "raw_responses": current_result.get("responses", []),
+                    "error": "Current bytes differ from the recorded patch; pass force=true to override",
+                    "type": "PatchConflictError",
+                }
+            )
+        mapping_result = self.inspection.memory_maps(
+            address_or_module=str(patch["address"])
+        )
+        result = self.debugger.write_memory(
+            str(patch["address"]),
+            str(patch["original_hex"]),
+            verify=verify,
+            mapping_result=mapping_result,
+            allow_unsafe=bool(patch.get("allow_unsafe")),
+        )
+        if result.get("success"):
+            patch["active"] = False
+            patch["reverted"] = True
+            result.setdefault("parsed", {})["patch_id"] = patch_id
+            result["parsed"]["reverted"] = True
+            result["parsed"]["forced"] = force
+        result["command"] = f"revert_memory_patch {patch_id}"
+        return self._record_debugger(result)
+
+    def capture_debugger_snapshot(
+        self,
+        register_names: Optional[List[str]] = None,
+        disassembly_bytes: int = 64,
+        include_mappings: bool = True,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Capture registers, frames, instructions, threads, inferiors, and maps."""
+        self.gdb.initialize()
+        deadline = self.debugger.snapshot_deadline()
+        if cancellation_check is not None:
+            cancellation_check()
+        mapping_result = self.inspection.memory_maps() if include_mappings else None
+        if cancellation_check is not None:
+            cancellation_check()
         return self._record_debugger(
-            self.debugger.write_memory(address, data_hex, verify=verify)
+            self.debugger.capture_snapshot(
+                register_names=register_names,
+                disassembly_bytes=disassembly_bytes,
+                mapping_result=mapping_result,
+                deadline=deadline,
+                cancellation_check=cancellation_check,
+            )
+        )
+
+    def diff_debugger_snapshots(
+        self, before: Dict[str, Any], after: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Diff two explicit snapshots without hidden snapshot storage."""
+        return self._record_debugger(
+            self.debugger.diff_snapshots(before_value=before, after_value=after)
         )
 
     def disassemble(self, start: str = "$pc", byte_count: int = 64) -> Dict[str, Any]:

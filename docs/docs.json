@@ -72,9 +72,12 @@
 						"group": "Debugger and Inspection",
 						"pages": [
 							"tool-reference/index",
+							"tool-reference/platform-capabilities",
 							"tool-reference/pwndbg-compatibility",
+							"tool-reference/static-analysis",
 							"tool-reference/elf-runtime",
 							"tool-reference/debugger-memory",
+							"tool-reference/debugger-completion",
 							"tool-reference/debug-sessions",
 							"tool-reference/inspection",
 							"tool-reference/attach-api"
@@ -85,6 +88,7 @@
 						"pages": [
 							"tool-reference/paocli",
 							"tool-reference/processes",
+							"tool-reference/operations",
 							"tool-reference/artifacts",
 							"tool-reference/python",
 							"tool-reference/repositories",

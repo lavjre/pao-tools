@@ -5,6 +5,7 @@ def bare_controller():
     controller = object.__new__(GdbController)
     controller._state = "running"
     controller._inferior_pid = None
+    controller._inferior_epoch = 0
     return controller
 
 
@@ -24,3 +25,15 @@ def test_thread_group_started_allows_null_payload():
     )
 
     assert controller.get_inferior_pid() is None
+    assert controller.get_inferior_epoch() == 1
+
+
+def test_thread_group_exit_advances_inferior_epoch():
+    controller = bare_controller()
+
+    controller._handle_notify(
+        {"type": "notify", "message": "thread-group-exited", "payload": {}}
+    )
+
+    assert controller.get_state() == "exited"
+    assert controller.get_inferior_epoch() == 1

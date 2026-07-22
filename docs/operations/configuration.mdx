@@ -21,23 +21,41 @@ This page covers the main knobs exposed by `pao-tools` itself.
 | Variable | Purpose |
 | --- | --- |
 | `PAO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
+| `PAO_MAX_DEBUG_SESSIONS` | maximum simultaneous debugger sessions; defaults to `8` |
+| `PAO_MAX_MANAGED_PROCESSES` | maximum tracked background helper processes; defaults to `16` |
+| `PAO_MAX_PROCESS_OUTPUT_BYTES` | hard combined stdout+stderr storage limit for each managed process and `run_command`; defaults to `268435456` (256 MiB). Crossing it terminates the process tree with an explicit `RESOURCE_EXHAUSTED` result |
+| `PAO_MAX_CONCURRENT_OPERATIONS` | maximum simultaneous MCP tool operations; defaults to `32` |
+| `PAO_OPERATION_HISTORY_LIMIT` | maximum retained lifecycle records; defaults to `1000` |
+| `PAO_OPERATION_TTL_SECONDS` | terminal operation history TTL; defaults to `86400` (24 hours) |
 | `PAO_INLINE_RESPONSE_BYTES` | inline payload threshold in bytes; defaults to `1048576` (1 MiB). Larger payloads use artifact delivery |
 | `PAO_ARTIFACT_CHUNK_BYTES` | default `read_artifact` range size; defaults to `262144` (256 KiB) |
+| `PAO_ARTIFACT_MAX_READ_BYTES` | maximum bytes returned by one range read; defaults to `4194304` (4 MiB) |
 | `PAO_ARTIFACT_TTL_SECONDS` | retention time; defaults to `259200` (72 hours). Set `0` to disable expiry |
 | `PAO_ARTIFACT_QUOTA_BYTES` | soft store quota; defaults to `10737418240` (10 GiB). Set `0` to disable quota cleanup |
 | `PAO_ARTIFACT_CLEANUP_TARGET_RATIO` | low-watermark after quota cleanup; defaults to `0.8` |
 | `PAO_ARTIFACT_CLEANUP_INTERVAL_SECONDS` | background cleanup interval; defaults to `900`. Set `0` to disable periodic cleanup |
 | `PAO_ARTIFACT_MIN_FREE_BYTES` | free disk reserve enforced before writes; defaults to `2147483648` (2 GiB) |
+| `PAO_ARTIFACT_ORPHAN_GRACE_SECONDS` | minimum age before periodic cleanup removes incomplete pairs and interrupted temporary writes; defaults to `300` |
 | `PAO_PWNDBG_EXPECTED_VERSION` | expected runtime pwndbg version; Docker sets this to its pinned release |
 | `PAO_PWNDBG_INSPECTION_TIMEOUT_SECONDS` | per-command timeout for typed ELF/runtime inspection; defaults to `60` and can be increased for very large binaries |
+| `PAO_MAX_MEMORY_WRITE_BYTES` | hard byte limit for one typed memory write; defaults to `4194304` (4 MiB), with an absolute configurable ceiling of 256 MiB |
+| `PAO_MAX_MEMORY_PATCHES` | maximum retained memory patch records per debugger session; defaults to `256` |
+| `PAO_MAX_MEMORY_PATCH_BYTES` | per-session budget for retained original plus patched payload bytes; defaults to `33554432` (32 MiB) |
+| `PAO_PLATFORM_PROBE_WORKERS` | parallel executable-probe workers for the unified platform manifest; defaults to `4` and accepts `1`–`8` |
+| `PAO_STATIC_ANALYSIS_CACHE_ENTRIES` | maximum entries in each static-analysis LRU; defaults to `8` |
+| `PAO_STATIC_ANALYSIS_CACHE_BYTES` | combined retained static-analysis cache budget; defaults to `67108864` (64 MiB) |
 | `PAO_GHIDRA_HEADLESS` | local `analyzeHeadless` executable; Docker defaults to `/opt/ghidra/support/analyzeHeadless` |
 | `PAO_GHIDRA_VERSION` | informational pinned Ghidra version reported by `get_decompiler_status` |
 | `PAO_GHIDRA_MAXMEM` | maximum heap for each headless Ghidra process; defaults to `2G` |
 | `PAO_GHIDRA_MAX_CONCURRENT` | maximum simultaneous decompiler jobs; defaults to `1` |
+| `PAO_GHIDRA_CACHE_ENTRIES` | maximum content-addressed decompiler result entries; defaults to `16` |
 
-These values control delivery, not data retention: crossing the inline threshold does
-not truncate output. `read_artifact` also accepts an explicit `length` and does not
-enforce a maximum range size.
+The artifact thresholds control delivery, not data retention: crossing the inline
+threshold does not truncate output. `read_artifact` accepts an explicit bounded
+`length`; repeated ranges reconstruct the complete stored payload. Process output has
+a separate hard safety budget: crossing `PAO_MAX_PROCESS_OUTPUT_BYTES` terminates the
+process tree and reports exact stored and dropped byte counts instead of silently
+filling the runtime filesystem.
 
 Cleanup runs at startup, periodically, and before artifact writes. It deletes expired
 unpinned artifacts first, then the oldest unpinned artifacts until quota and disk

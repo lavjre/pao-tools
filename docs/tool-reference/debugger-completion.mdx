@@ -1,0 +1,217 @@
+---
+title: "Debugger completion"
+description: "Typed stack, inferior, watchpoint, snapshot, and reversible memory APIs"
+---
+
+# Debugger completion
+
+These tools complete the typed GDB/MI control surface used by Pao Tools. Every
+operation is scoped by `session_id`, retains raw MI evidence, and uses the shared
+lossless artifact path when a response becomes large.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `create_breakpoint` | Create a persistent or temporary code breakpoint with an optional condition |
+| `list_watchpoints` | List only watchpoints, excluding ordinary/catch breakpoints |
+| `delete_watchpoint` | Delete an id only after verifying it is a watchpoint |
+| `toggle_watchpoint` | Enable or disable a verified watchpoint |
+| `stack_frames` | Read an unbounded or caller-bounded typed backtrace |
+| `select_frame` | Select a frame and read it back for verification |
+| `list_debugger_threads` | Read threads and current-thread metadata directly from GDB/MI |
+| `list_inferiors` | Read the inferior/thread-group hierarchy |
+| `read_register_group` | Read `general`, `vector`, `float`, `system`, or `all` registers |
+| `list_memory_patches` | List session-local memory mutation history |
+| `revert_memory_patch` | Restore the original bytes for an active patch |
+| `capture_debugger_snapshot` | Capture registers, frames, disassembly, threads, inferiors, and mappings |
+| `diff_debugger_snapshots` | Diff two caller-supplied snapshot values |
+
+## Breakpoints and watchpoints
+
+`create_breakpoint` validates both the location and condition before generating
+GDB/MI. A temporary breakpoint uses GDB's delete-on-hit disposition.
+
+```json
+{
+  "session_id": "research-1",
+  "location": "main",
+  "condition": "$rax == 1",
+  "temporary": true
+}
+```
+
+The typed response identifies the actual breakpoint returned by GDB:
+
+```json
+{
+  "success": true,
+  "parsed": {
+    "breakpoint": {
+      "number": "3",
+      "type": "breakpoint",
+      "temporary": true,
+      "condition": "$rax == 1",
+      "original_location": "main"
+    },
+    "requested": {
+      "location": "main",
+      "condition": "$rax == 1",
+      "temporary": true
+    }
+  },
+  "raw_responses": []
+}
+```
+
+Watchpoints share GDB's breakpoint number space. The watchpoint-specific delete
+and toggle tools first inspect the breakpoint table. They return
+`WatchpointNotFoundError` instead of accidentally mutating an ordinary code
+breakpoint.
+
+## Frames, threads, inferiors, and registers
+
+Omitting `high` from `stack_frames` requests the complete backtrace. There is no
+server-side silent frame limit. Set `high` when the caller intentionally wants a
+bounded response.
+
+`select_frame` performs both `-stack-select-frame` and `-stack-info-frame`. A
+successful selection with a failed read-back is reported as
+`FrameSelectionError`.
+
+`list_debugger_threads` is distinct from the pwndbg-rendered `list_threads`: it
+uses the stable `-thread-info` MI payload and includes `current_thread_id`.
+`list_inferiors` exposes GDB thread groups for fork/exec and multi-inferior
+workflows.
+
+Register groups are derived from the target's complete MI register-name list.
+Vector values remain raw GDB values, so wide SIMD registers are not coerced into
+lossy integers.
+
+## Protected and reversible memory writes
+
+`write_memory` now checks `vmmap` before mutation. By default it refuses:
+
+- an address with no matching mapping;
+- a non-writable mapping;
+- a mapping that cannot be verified by the runtime.
+
+Set `allow_unsafe: true` only when the mutation is intentional. The response
+records `mapping_validation.override_used` so reports can distinguish normal and
+forced writes.
+
+Before writing, Pao Tools reads and records the original bytes. A successful,
+revertible mutation returns a session-local patch id:
+
+```json
+{
+  "success": true,
+  "parsed": {
+    "address": "0x7fffffffe000",
+    "byte_count": 2,
+    "original_hex": "5548",
+    "data_hex": "9090",
+    "verified": true,
+    "revertible": true,
+    "patch_id": "patch-000001",
+    "mapping_validation": {
+      "checked": true,
+      "mapped": true,
+      "writable": true,
+      "override_used": false
+    }
+  }
+}
+```
+
+One write is capped by `PAO_MAX_MEMORY_WRITE_BYTES` (4 MiB by default). Patch
+history is additionally bounded per session by `PAO_MAX_MEMORY_PATCHES` and
+`PAO_MAX_MEMORY_PATCH_BYTES`. Byte accounting includes both the original and
+patched payload because both are retained for a reversible mutation.
+
+When a new patch needs capacity, the oldest inactive history is removed first.
+Active patches are never evicted automatically: the write is rejected with
+`MemoryPatchQuotaError` before GDB mutates memory if active records occupy the
+remaining quota. `list_memory_patches` reports retained and active count/byte
+usage, and successful writes report any ids removed by retention in
+`retention_pruned`.
+
+Patch ids cannot cross sessions. `revert_memory_patch` restores and verifies the
+original bytes, then marks the patch inactive. Loading a different binary,
+starting or attaching to another inferior, GDB inferior lifecycle notifications,
+explicit raw lifecycle commands, and detected inferior `exec` events invalidate
+active patches. Read-only raw inspection commands do not invalidate them.
+
+## Snapshots and diffs
+
+`capture_debugger_snapshot` collects independently typed components:
+
+- registers;
+- full stack frames;
+- disassembly at `$pc`;
+- threads and current thread;
+- inferiors/thread groups;
+- virtual memory mappings, unless disabled.
+
+A snapshot can be partially successful. Its quality flags have distinct
+meanings:
+
+- `usable` requires at least one core debugger component (registers, frames,
+  disassembly, threads, or inferiors); a successful `vmmap` result alone is not
+  considered a usable debugger snapshot.
+- `core_complete` requires every core debugger component to succeed.
+- `complete` additionally requires mappings when they were requested.
+
+`parsed.component_status` names failed components while successful evidence is
+still returned. `raw_responses` is keyed by component. All core collection runs
+under one compound deadline instead of receiving a fresh timeout for every
+command. Cancellation is checked before and after each component, so a pending
+operation cancellation stops collection at the next safe checkpoint.
+
+`diff_debugger_snapshots` accepts the public `ToolResponse` envelope, its `data`
+payload, the backend capture response, or the inner snapshot value. Both inputs
+must use the current `snapshot_version` and contain every canonical snapshot
+field. Each record section must also contain its canonical identity fields and
+must not contain duplicate identities. This prevents malformed records from
+being silently overwritten while building a diff.
+
+The diff reports added, removed, and changed records for registers, frames,
+instructions, threads, inferiors, and mappings. Changes to `state` and
+`current_thread_id` are counted separately in `scalar_change_count` and are
+included in the overall `changed` and `change_count` values. Snapshots are
+explicit inputs; the server does not keep hidden snapshot state.
+
+```json
+{
+  "success": true,
+  "parsed": {
+    "changed": true,
+    "change_count": 2,
+    "record_change_count": 1,
+    "scalar_change_count": 1,
+    "state": {"changed": true, "before": "stopped", "after": "running"},
+    "sections": {
+      "registers": {
+        "change_count": 1,
+        "changed": [
+          {
+            "key": {"name": "rax"},
+            "before": {"name": "rax", "value": "0x1"},
+            "after": {"name": "rax", "value": "0x2"}
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+## Failure behavior
+
+- Invalid expressions and identifiers are rejected before reaching GDB.
+- MI result records are preferred over earlier asynchronous notifications while
+  parsing command payloads.
+- Runtime failures include a short typed error and the unmodified raw evidence.
+- GDB command timeouts are returned as structured `TimeoutError` results with
+  `timed_out: true` and the effective timeout value.
+- No stack, register, snapshot, or diff collection is silently truncated.
