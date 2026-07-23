@@ -27,6 +27,9 @@ class FakeGdb:
             ),
             "version": "Gdb: 16.2\nPwndbg: 2026.02.18\nPython: 3.12\n",
             "help checksec": "Check binary security settings.\n",
+            "help generate-core-file": (
+                "Save a core file with the current state of the debugged process.\n"
+            ),
         }
         return {
             "success": command in outputs,
@@ -69,6 +72,7 @@ def test_capabilities_validate_pinned_version_and_core_commands():
     assert result["versions"]["pwndbg"] == "2026.02.18"
     assert result["command_groups"]["core"]["missing"] == []
     assert result["command_count"] == 5
+    assert result["gdb_features"]["generate_core_file"]["available"] is True
 
 
 def test_capabilities_report_version_mismatch():

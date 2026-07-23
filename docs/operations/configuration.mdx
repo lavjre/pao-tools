@@ -9,7 +9,7 @@ This page covers the main knobs exposed by `pao-tools` itself.
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--host` | `0.0.0.0` | bind host for the main HTTP server |
+| `--host` | `127.0.0.1` | bind host for the main HTTP server |
 | `--port` | `5500` | bind port for the main HTTP server |
 | `--attach-host` | `127.0.0.1` | bind host for the attach sidecar API |
 | `--attach-port` | `5501` | bind port for the attach sidecar API |
@@ -41,6 +41,9 @@ This page covers the main knobs exposed by `pao-tools` itself.
 | `PAO_MAX_MEMORY_WRITE_BYTES` | hard byte limit for one typed memory write; defaults to `4194304` (4 MiB), with an absolute configurable ceiling of 256 MiB |
 | `PAO_MAX_MEMORY_PATCHES` | maximum retained memory patch records per debugger session; defaults to `256` |
 | `PAO_MAX_MEMORY_PATCH_BYTES` | per-session budget for retained original plus patched payload bytes; defaults to `33554432` (32 MiB) |
+| `PAO_CRASH_RUN_TIMEOUT_SECONDS` | default deadline for `run_until_crash`; defaults to `60` seconds and accepts at most one hour |
+| `PAO_CORE_DUMP_TIMEOUT_SECONDS` | default deadline for GDB CLI core generation; defaults to `120` seconds and accepts at most one hour |
+| `PAO_MAX_CORE_DUMP_BYTES` | hard accepted size cap for one core artifact; defaults to `1073741824` (1 GiB), with an absolute configurable ceiling of 64 GiB |
 | `PAO_PLATFORM_PROBE_WORKERS` | parallel executable-probe workers for the unified platform manifest; defaults to `4` and accepts `1`–`8` |
 | `PAO_STATIC_ANALYSIS_CACHE_ENTRIES` | maximum entries in each static-analysis LRU; defaults to `8` |
 | `PAO_STATIC_ANALYSIS_CACHE_BYTES` | combined retained static-analysis cache budget; defaults to `67108864` (64 MiB) |
@@ -63,6 +66,10 @@ targets are met. A single newest artifact may temporarily exceed the soft quota,
 the free-space reserve is a hard safety check. Pinned artifacts are never removed by
 automatic cleanup.
 
+Core generation additionally enforces `PAO_MAX_CORE_DUMP_BYTES` while GDB writes.
+Docker uses `/var/lib/pao` as `PAO_RUNTIME_ROOT`; mount it on persistent storage with
+capacity greater than the core cap plus `PAO_ARTIFACT_MIN_FREE_BYTES`.
+
 ## Example launches
 
 <CodeGroup>
@@ -72,7 +79,7 @@ python -m paomcp
 ```
 
 ```bash Custom ports
-python -m paomcp --host 0.0.0.0 --port 6600 --attach-port 6601 --http-path /mcp
+python -m paomcp --host 127.0.0.1 --port 6600 --attach-port 6601 --http-path /mcp
 ```
 
 ```bash stdio

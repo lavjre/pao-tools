@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   pao-tools:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
-      # platform: linux/amd64
     image: pao-tools:latest
     container_name: pao-tools-server
     
@@ -25,19 +23,17 @@ services:
       - RUST_LOG=info
       - FASTMCP_DEBUG=false
       - FASTMCP_LOG_LEVEL=INFO
+      - PAO_RUNTIME_ROOT=/var/lib/pao
 
     # Expose MCP HTTP port
     ports:
-      - "5500:5500"
+      - "127.0.0.1:5500:5500"
     
     # Volumes for persistent data and workspace
     volumes:
       - ./workspace:/workspace:rw
       - ./binaries:/binaries:ro
-      - type: tmpfs
-        target: /tmp
-        tmpfs:
-          size: 1G
+      - pao-runtime:/var/lib/pao
     
     # Working directory
     working_dir: /workspace
@@ -57,8 +53,11 @@ services:
     
     # Health check
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "paomcp"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5500/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s 
+
+volumes:
+  pao-runtime:

@@ -7,7 +7,7 @@ Start with the symptom that best matches what you are seeing.
 
 <AccordionGroup>
   <Accordion title="I cannot connect to the HTTP server">
-    Confirm the container publishes `-p 5500:5500` and that the client URL is exactly `http://127.0.0.1:5500/mcp` unless you changed the defaults.
+    Confirm the container publishes `-p 127.0.0.1:5500:5500` and that the client URL is exactly `http://127.0.0.1:5500/mcp` unless you changed the defaults.
   </Accordion>
   <Accordion title="My health check fails">
     Point health checks at `http://127.0.0.1:5500/healthz`. The attach sidecar is a separate service and is not the health endpoint.

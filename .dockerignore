@@ -29,7 +29,8 @@ docs/
 !README.md
 
 # Tests
-tests/
+tests/*
+!tests/docker_stage5_smoke.py
 test_*.py
 *_test.py
 
@@ -49,4 +50,4 @@ Thumbs.db
 # Docker files (avoid recursion)
 Dockerfile*
 docker-compose*.yml
-.dockerignore 
+.dockerignore

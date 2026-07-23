@@ -1,0 +1,401 @@
+---
+title: "Crash Triage and Core Evidence"
+description: "Typed fatal-signal records, snapshots, classifications, signatures, cyclic offsets, core artifacts, and lossless reports."
+---
+
+Stage 5 keeps crash identity explicit. Every fatal stop receives a stable
+`crash_id` built from the debug session, inferior epoch, monotonically increasing MI
+stop sequence, and an opaque debugger-generation token. Recreating the same
+caller-selected session id therefore cannot collide with an earlier controller.
+APIs that capture mutable evidence require that exact id; clients must treat it as
+opaque.
+
+Roadmap shorthand originally counted seven crash APIs because snapshot capture was
+treated as an internal analysis primitive. The public MCP surface exposes **eight
+workflow endpoints**: run, snapshot, analyze, classify, compare, cyclic search, core
+capture, and report generation. `get_last_stop` is an additional supporting
+inspector and is not included in that count.
+
+## Tools
+
+| Tool | Purpose | Primary source |
+| --- | --- | --- |
+| `get_last_stop` | Return the latest MI stop record, current `crash_id`, and stop classification | GDB/MI |
+| `run_until_crash` | Run, continue, or wait for a crash, another stop, normal exit, or timeout | GDB/MI |
+| `capture_crash_snapshot` | Capture registers, frames, instructions, threads, mappings, fault address, and stack bytes | GDB/MI; mappings via pwndbg CLI |
+| `analyze_crash` | Return the canonical snapshot, typed fault analysis, classification, and signature | Local parser over typed evidence |
+| `classify_crash` | Return the focused versioned primitive hypothesis and crash signature | Local parser over typed evidence |
+| `compare_crashes` | Compare two retained crash descriptors using ASLR-normalized evidence | Local |
+| `find_cyclic_offset` | Search one explicit value or scan bounded register/stack evidence from an exact crash | Local over typed evidence |
+| `capture_core_dump` | Generate and store a binary ELF core artifact | GDB CLI fallback |
+| `generate_crash_report` | Store a lossless JSON or Markdown per-crash evidence report with optional verified core reference | Local |
+
+<Info>
+  GDB/MI has no dedicated core-generation command. `capture_core_dump` therefore
+  invokes the built-in GDB CLI command `generate-core-file` through the same
+  controller. The output path is server-owned; clients cannot choose it. The path
+  is passed as a raw filename argument, not shell-quoted.
+</Info>
+
+## Recommended flow
+
+```text
+set_file
+  -> run_until_crash
+  -> capture_crash_snapshot(expected_crash_id=...)    # optional explicit capture
+  -> analyze_crash(expected_crash_id=...)
+  -> classify_crash(expected_crash_id=...)
+  -> find_cyclic_offset(expected_crash_id=..., session_id=...)
+  -> compare_crashes(left_crash_id=..., right_crash_id=...)  # after another run
+  -> capture_core_dump(expected_crash_id=...)
+  -> generate_crash_report(expected_crash_id=..., core_artifact_id=...)
+```
+
+`run_until_crash` accepts a typed `arguments` array, not a shell string. It never
+auto-resumes through a breakpoint, watchpoint, `SIGTRAP`, or other non-crash stop.
+When a fatal signal is observed, it captures an initial typed snapshot before the
+caller can resume the inferior. A custom `fatal_signals` policy is normalized and
+stored in that snapshot; `capture_crash_snapshot`, `analyze_crash`,
+`classify_crash`, `capture_core_dump`, and `generate_crash_report` reuse it across
+cached and refreshed analysis.
+
+Capture the snapshot and core before resuming or replacing the inferior. Live
+snapshot recapture and core generation require the exact current stopped crash.
+Analysis, classification, and report generation may instead reuse an exact
+crash-id-matching cached snapshot. Comparison can use retained descriptors, and
+crash-aware cyclic search can use an older retained full snapshot while it remains
+in the bounded in-memory history.
+
+## Typed inputs and bounds
+
+All tool results use the standard response envelope. Paths below therefore begin at
+`data`, the tool-specific payload inside that envelope.
+
+### Run and capture
+
+| Input | Accepted values | Default / notes |
+| --- | --- | --- |
+| `session_id` | Existing debugger session id | Required for debugger-backed operations |
+| `expected_crash_id` | Exact opaque id returned for the fatal stop | Required after `run_until_crash` |
+| `arguments` | Array of strings | Optional argv for `run_until_crash`; never parsed as a shell command |
+| `mode` | `auto`, `run`, `continue`, `wait` | `auto`; a non-crash stop is returned instead of silently resumed |
+| `timeout_seconds` | Greater than `0`, at most `3600` | Run default `60`; core default `120`; both configurable |
+| `fatal_signals` | 1-32 unique names matching `SIG[A-Z0-9]{1,31}` | Defaults to `SIGABRT`, `SIGBUS`, `SIGFPE`, `SIGILL`, `SIGSEGV`, and `SIGSYS` |
+| `stack_bytes` | `1`-`1048576` | `256` for snapshot/analyze/classify |
+| `disassembly_bytes` | `1`-`16777216` | `64` for snapshot/analyze/classify |
+| `include_mappings` | Boolean | `true`; mappings are supplemental pwndbg evidence |
+| `refresh` | Boolean | `false`; analyze/classify reuse an exact matching cached capture |
+| `max_size_bytes` | `1` through configured `PAO_MAX_CORE_DUMP_BYTES` | Core capture uses the configured cap when omitted |
+| `report_format` | `json`, `markdown` | `json` |
+| `refresh_analysis` | Boolean | `false` |
+
+`generate_crash_report` accepts nullable `stack_bytes`, `disassembly_bytes`, and
+`include_mappings`. When omitted, it preserves the options used by the matching
+cached capture rather than recapturing with unrelated defaults. The tools that
+accept `idempotency_key` are run, snapshot, analyze, classify, compare, core capture,
+and report generation.
+
+### Cyclic search
+
+`find_cyclic_offset` has two mutually constrained modes:
+
+- Standalone mode requires `value` and rejects `session_id`. It searches a locally
+  generated pattern without touching GDB.
+- Crash-aware mode requires both `expected_crash_id` and `session_id`. `value` is
+  optional; the tool can scan up to 512 captured registers and a bounded prefix of
+  retained stack bytes.
+
+`value` accepts `0x...` integers, `hex:...` bytes, `text:...`, or unprefixed UTF-8
+text. The encoded input is limited to 132 characters before decoding, and the
+decoded query must contain 1-64 bytes. `width` is 1-64 bytes and applies to
+caller-supplied integer values.
+
+| Input | Range / enum | Default |
+| --- | --- | ---: |
+| `n` | `2`-`8` | `4` |
+| `endian` | `little`, `big` | `little` |
+| `max_length` | `1`-`67108864` bytes | `1048576` |
+| `alphabet` | 2-256 unique ASCII characters | lowercase ASCII letters |
+| `scan_registers` | Boolean | `true` |
+| `scan_stack` | Boolean | `true` |
+| `max_stack_scan_bytes` | `0`-`1048576` | `4096` |
+| `max_matches` | `1`-`256` | `64` |
+
+The result reports `pattern.space`, `pattern.searched_length`, and
+`pattern.search_complete`; a short `max_length` is never presented as a complete
+search. Crash-aware results identify each match as explicit, register, or stack
+evidence and set `crash_scan.truncated` when the match cap is reached. Pattern
+generation and scanning run outside the async server loop and honor cooperative
+operation cancellation.
+
+A query shorter than `n` is not unique in a de Bruijn sequence. In that case the
+tool returns `resolution: "ambiguous"`, leaves `offset` as `null`, and exposes a
+bounded list of `partial_candidate` matches. It never presents the first occurrence
+as the answer.
+
+## Example crash response
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "run_until_crash",
+  "session_id": "chal-a",
+  "data": {
+    "state": "stopped",
+    "parser_version": "1",
+    "parsed": {
+      "crash_id": "chal-a:7b4e2f8c...:1:3",
+      "crashed": true,
+      "stop": {
+        "reason": "signal-received",
+        "kind": "crash",
+        "signal": {
+          "name": "SIGSEGV",
+          "meaning": "Segmentation fault",
+          "fatal": true
+        },
+        "source": "gdb-mi"
+      },
+      "snapshot_complete": true
+    }
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "idempotency_key": "run-001"
+  }
+}
+```
+
+## Canonical evidence and classification
+
+`capture_crash_snapshot` produces canonical evidence with
+`snapshot_version: "1"`: the fatal stop, registers, frames, threads, typed
+disassembly, stack bytes, mappings, and component status. Its `analysis` includes:
+
+- category, fault address, program counter, stack/frame pointers, and mappings;
+- the typed instruction whose MI address exactly matches the stopped program
+  counter, or an explicit `unknown` result;
+- conservative risk indicators such as a near-null address, unmapped instruction
+  pointer, or executable stack; and
+- `exploitability: "unknown"`.
+
+`analyze_crash` returns this canonical snapshot plus a focused analysis.
+`classify_crash` returns the smaller classification/signature view. Both expose:
+
+- `pao.crash-classification.v1`, whose primary and candidate hypotheses use
+  `possible` or `unknown` assessments with evidence and confidence;
+- `pao.crash-fingerprint.v1`, a SHA-256 digest over canonical signal, category,
+  fault-access, primitive, instruction, top frames, and normalized locations; and
+- the capture options and component status used to produce that evidence.
+
+Fingerprint locations use module-relative offsets where mappings provide stable
+module identity. Target and module identity include the resolved file path and,
+when available, the ELF build id; file metadata is used as a conservative fallback.
+Anonymous, special, and deleted mappings are never treated as stable modules. This
+prevents unrelated binaries with the same basename from being deduplicated. Raw
+unmapped addresses are omitted from the normalized canonical form. Signature
+confidence is `high`, `medium`, or `low`; a matching digest is a crash-family
+signal, not proof of identical root cause or exploitability.
+
+`compare_crashes` returns `pao.crash-comparison.v1` with:
+
+```json
+{
+  "relationship": "same",
+  "same_crash_family": true,
+  "confidence": "medium",
+  "reasons": ["Signal and module-relative program counter match"],
+  "field_evidence": [
+    {
+      "field": "signal",
+      "left": "SIGSEGV",
+      "right": "SIGSEGV",
+      "status": "match",
+      "comparable": true
+    },
+    {
+      "field": "program_counter",
+      "left": {"kind": "module_offset", "module": "chal", "offset": 4660},
+      "right": {"kind": "module_offset", "module": "chal", "offset": 4660},
+      "status": "match",
+      "comparable": true
+    }
+  ],
+  "left_signature": {},
+  "right_signature": {}
+}
+```
+
+`relationship` is `same`, `different`, or `unknown`; `same_crash_family` is
+respectively `true`, `false`, or `null`. A signal difference or stable
+module-relative program-counter difference is strong conflicting evidence.
+Incomplete or unstable evidence intentionally produces `unknown`.
+
+<Warning>
+  Classification and comparison are triage aids. They do not prove buffer
+  overflow, heap corruption, data-flow control, instruction-pointer control, or
+  exploitability. Validate reproducibility, mitigations, allocator state, and
+  controlled data flow separately.
+</Warning>
+
+## Bounded crash history
+
+Each debugger session retains immutable serialized evidence for at most 32 crash
+entries and 64 MiB in aggregate. Oldest entries are evicted first. A snapshot too
+large for the aggregate budget can retain only its compact descriptor; comparison
+still works while that descriptor remains, but historical register/stack cyclic
+scanning requires the full retained snapshot.
+
+History is process memory, not an artifact database. It is lost when the debugger
+session is closed, evicted, rebuilt, or the server restarts. It does not replace a
+core or report artifact when evidence must survive. Responses expose
+`data.parsed.history.snapshot_retained` after explicit snapshot capture.
+
+## Core artifacts
+
+Core bytes are never returned inline and never copied a second time. GDB writes to
+an active staging transaction on the artifact filesystem; a validated `ET_CORE`
+file is atomically adopted into the session-owned store. Binary range reads return
+`content_base64` and intentionally omit decoded text.
+
+```json
+{
+  "parsed": {
+    "crash_id": "chal-a:7b4e2f8c...:1:3",
+    "artifact": {
+      "delivery": "artifact",
+      "artifact_id": "4d3d4d939ae047a1a90a0ffda031bcd2",
+      "session_id": "chal-a",
+      "content_type": "application/x-coredump",
+      "encoding": "binary",
+      "size_bytes": 8421376,
+      "sha256": "...",
+      "provenance": {
+        "schema": "pao.core-provenance.v1",
+        "crash_id": "chal-a:7b4e2f8c...:1:3",
+        "session_id": "chal-a"
+      }
+    },
+    "source": "gdb-cli"
+  }
+}
+```
+
+On Linux, core generation temporarily applies `RLIMIT_FSIZE` to GDB's own process.
+The response reports whether that kernel limit was applied and restored under
+`data.parsed.generation.limit_enforcement`. Core capture fails closed before
+`generate-core-file` when the kernel limit cannot be applied. The polling size
+monitor remains a secondary detector and cleanup aid; it is not accepted as a hard
+size boundary because a writer can overshoot between samples.
+
+Core metadata binds the artifact to the exact opaque `crash_id`. A report accepts
+`core_artifact_id` only when its owner, content type, and provenance all match the
+requested crash. Before binding the core, report generation also recomputes its size
+and SHA-256 digest and rejects modified or truncated payloads. Legacy core artifacts
+without provenance are intentionally rejected; capture a new core instead of
+attaching unverifiable evidence to a report.
+
+A limit, timeout, or cancellation prevents artifact commit. Partial output is
+removed only after the writer is confirmed stopped. If writer quiescence cannot be
+proved, the debugger session is invalidated and the staging file remains reachable
+under quarantine protection. Quarantine bytes count toward storage quota and are
+visible through artifact status; remove them manually only after confirming no
+process still holds the file open.
+
+Keep the runtime directory on a filesystem large enough for the configured hard cap
+plus the artifact free-space reserve. Core dumps contain process memory and can
+include credentials, tokens, keys, and other secrets. Restrict access to the
+artifact volume and use the shortest retention policy compatible with the research
+workflow.
+
+<Warning>
+  The staging transaction is not a sandbox boundary against an actively hostile
+  inferior running under the debugger's UID with access to the artifact directory.
+  Use a disposable VM or stronger process/filesystem isolation for such targets.
+  Also keep one server process per artifact volume: artifact locking is
+  process-local, not a distributed lock across containers.
+</Warning>
+
+## Report artifacts and provenance
+
+`generate_crash_report` always stores an artifact instead of embedding the complete
+report in the MCP response. The report body uses `pao.crash-report.v1` and contains
+the exact canonical snapshot, capture options, classification, fingerprint,
+component status, raw evidence, source manifest, and an optional core reference.
+Core bytes are not duplicated inside the report.
+
+The artifact metadata uses `pao.crash-report-provenance.v1` and binds:
+
+- exact `crash_id` and `session_id`;
+- `json` or `markdown` format;
+- optional verified `core_artifact_id`; and
+- the crash-signature digest.
+
+Mapping provenance is evidence-driven rather than assumed. The report records
+whether mappings were requested, whether capture succeeded, and the exact source:
+`pwndbg-cli` only for a successful capture, `unavailable` when a requested capture
+failed, and `null` when mappings were not requested.
+
+When a core id is supplied, report generation validates session ownership,
+`application/x-coredump` content type, `pao.core-provenance.v1`, exact crash
+identity, current size, and SHA-256 before creating the report. Report
+`capture_options` come from the reused or refreshed analysis and are returned at
+`data.parsed.capture_options`.
+
+## Analysis semantics
+
+- Default fatal signals: `SIGSEGV`, `SIGABRT`, `SIGBUS`, `SIGILL`, `SIGFPE`, and
+  `SIGSYS`.
+- Breakpoints and `SIGTRAP` are not crashes by default.
+- Custom fatal-signal policies are stored with the snapshot and participate in
+  cache matching. Analysis and reports reuse them unless the caller supplies a
+  replacement policy.
+- Fault access is reported as `execute` only when MI evidence shows the fault
+  address equals the program counter; otherwise it remains `unknown`.
+- Automated output never claims exploitability. The report records risk indicators
+  and leaves exploitability as `unknown` for evidence-based review.
+- `xinfo`/`vmmap` pwndbg output is supplemental. Stop, registers, frames,
+  disassembly, memory, and expressions use typed GDB/MI data.
+
+## Operational and security boundaries
+
+- Crash history is in-memory and per debugger session. Persist a report and,
+  when needed, a verified core before closing or rebuilding the session.
+- Large cyclic searches are bounded and cancellable but can still consume
+  significant CPU and memory. Use the smallest `max_length`,
+  `max_stack_scan_bytes`, and `max_matches` that answer the question.
+- Cancellation of an active GDB/core operation may interrupt or invalidate the
+  debugger session. Recreate the session when the response says it was destroyed.
+- This private, single-user tool has no authentication boundary. Keep the MCP HTTP
+  endpoint on loopback or an equivalently private transport; do not publish it
+  directly to an untrusted network.
+- `SYS_PTRACE`, `SYS_ADMIN`, unconfined seccomp/AppArmor, GDB, and a hostile inferior
+  form a high-risk execution environment. Prefer a disposable VM with a dedicated
+  workspace/runtime volume and no unrelated secrets.
+- Core and report artifacts inherit session ownership, TTL, quota, free-space, and
+  cleanup policy. Pin only evidence that must outlive automatic cleanup.
+
+Static/unit validation checks response and failure contracts. The release gate for
+the current image must also pass a live Linux Docker boot, HTTP MCP handshake, and
+real Stage 5 crash/core smoke before runtime completion is claimed.
+
+## Limits and retention
+
+| Setting or bound | Default | Ceiling / meaning |
+| --- | ---: | --- |
+| `PAO_CRASH_RUN_TIMEOUT_SECONDS` | `60` | Greater than 0 and at most 3600 seconds |
+| `PAO_CORE_DUMP_TIMEOUT_SECONDS` | `120` | Greater than 0 and at most 3600 seconds |
+| `PAO_MAX_CORE_DUMP_BYTES` | `1073741824` | Configurable hard cap up to 64 GiB |
+| `PAO_ARTIFACT_MIN_FREE_BYTES` | `2147483648` | Free-space reserve maintained during generation |
+| Snapshot stack bytes | `256` | 1 MiB |
+| Snapshot disassembly bytes | `64` | 16 MiB |
+| Cyclic generated pattern | `1048576` | 64 MiB |
+| Cyclic captured-stack scan | `4096` | 1 MiB |
+| Cyclic returned matches | `64` | 256 |
+| In-memory crash history | N/A | 32 entries and 64 MiB aggregate per session |
+
+Core and report artifacts use the normal TTL/quota/cleanup policy and exact session
+ownership. They are not auto-pinned; use `set_artifact_pinned` when evidence must
+survive automatic retention cleanup.

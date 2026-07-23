@@ -6,7 +6,20 @@ description: "Container launch patterns, local image builds, and compose usage f
 `pao-tools` is designed for containerized usage first.
 
 <Warning>
-  Keep the ptrace-related capabilities and unconfined seccomp/apparmor flags unless you have already proven that your environment supports a stricter configuration.
+  The debugger configuration grants broad container privileges: `SYS_ADMIN` plus
+  unconfined seccomp/AppArmor materially weaken isolation. Use it only on a
+  dedicated research host with untrusted targets contained from production
+  credentials and networks. Keep these settings only until you have proven a
+  narrower platform-specific profile.
+</Warning>
+
+<Warning>
+  This private, single-user MCP server does not enforce authentication. The
+  examples and Compose configuration therefore bind port `5500` to host loopback
+  only. Do not change this to `0.0.0.0`, expose it through a public load balancer,
+  or publish the port on an untrusted LAN. The bundled `paomcp.service` binds
+  `0.0.0.0` for VM networking and therefore requires a private host/network
+  boundary.
 </Warning>
 
 ## Run the published image
@@ -14,12 +27,13 @@ description: "Container launch patterns, local image builds, and compose usage f
 <CodeGroup>
 
 ```bash HTTP
-docker run --rm -p 5500:5500 \
+docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
+  -v "pao-runtime:/var/lib/pao" \
   ghcr.io/lavjre/pao-tools:edge
 ```
 
@@ -30,6 +44,7 @@ docker run --rm -i \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
+  -v "pao-runtime:/var/lib/pao" \
   ghcr.io/lavjre/pao-tools:edge \
   --stdio
 ```
@@ -42,7 +57,10 @@ docker run --rm -i \
 docker build -t pao-tools:latest . --platform linux/amd64
 ```
 
-The published image targets `linux/amd64`. On Apple Silicon, keep the explicit platform flag unless you have built your own compatible variant.
+The `docker-build.local.sh` helper performs the same architecture-specific build
+and prints a loopback-only HTTP run command. The published image targets
+`linux/amd64`. On Apple Silicon, keep the explicit platform flag unless you have
+built your own compatible variant.
 
 ## Docker Compose
 
@@ -52,7 +70,89 @@ docker-compose logs -f
 docker-compose exec pao-tools bash
 ```
 
-The repository `docker-compose.yml` exposes port `5500`, mounts `./workspace` to `/workspace`, and applies the required debugger capabilities.
+The repository `docker-compose.yml` exposes port `5500`, mounts `./workspace` to
+`/workspace`, and applies the debugger capabilities. It also mounts the named
+volume `pao-runtime` at `/var/lib/pao`. This keeps large artifacts and core staging
+files out of a small `/tmp` tmpfs and preserves retained evidence across container
+recreation. The host port is intentionally restricted to `127.0.0.1`. Compose
+also fixes the service platform to `linux/amd64`, matching the published image and
+the x86/i386 package set installed by the Dockerfile.
+
+The prebuilt Python helper environment lives at
+`/opt/pao-python/shared_venv` (`PAO_PYTHON_VENV`), outside the persistent runtime
+volume. `/var/lib/pao/python` contains mutable scripts and runtime state only.
+This separation ensures that replacing the image also replaces the baked helper
+dependencies instead of silently continuing to use a stale environment copied
+into an older `pao-runtime` volume.
+
+Core artifacts may contain the complete memory image of a target, including
+credentials, tokens, cryptographic keys, and private input. Treat `pao-runtime` as
+sensitive evidence: restrict host access, encrypt the backing storage when needed,
+configure TTL/quota cleanup, and delete or archive the volume deliberately when the
+research session ends.
+
+<Warning>
+  Use exactly one `pao-tools` service process for each artifact volume. Artifact
+  transactions, quota accounting, cleanup, and quarantine coordination use
+  in-process locks; the current store does not provide a cross-process lock for two
+  containers or server processes sharing `/var/lib/pao/artifacts`.
+</Warning>
+
+<Warning>
+  The current GDB-to-artifact handoff uses a server-selected staging pathname.
+  Path validation and quarantine reduce accidental corruption, but they are not an
+  isolation boundary against an actively hostile inferior that can access the same
+  filesystem as the debugger under the same UID. Analyze such targets in a
+  disposable VM or a stronger container/UID design where the inferior cannot
+  enumerate or modify the artifact directory. This remains security-hardening
+  debt; do not expose the runtime volume to target code.
+</Warning>
+
+Linux core capture requires the server to apply `RLIMIT_FSIZE` to GDB before
+`generate-core-file` starts. If that kernel limit cannot be applied, capture fails
+closed instead of relying on polling as a hard size boundary. The polling monitor
+remains secondary detection and cleanup evidence only.
+
+## Image publication gates
+
+Both supported image pipelines build one candidate and test that exact local image
+before publication. GitHub Actions runs the Python gate, boots the default
+entrypoint, probes `/healthz`, runs the Linux Stage 5 crash/core smoke, and only
+then logs in and pushes to GHCR. All GHCR publications are serialized at repository
+scope because concurrent release tags can write the same `latest`, major, and
+minor aliases.
+
+Google Cloud Build follows the same ordering: Python verification, one
+`linux/amd64` candidate build, default-entrypoint health probe, Stage 5 smoke,
+then remote tagging. Its `images` are uploaded only after all steps succeed. Each
+runtime probe uses build-ID-scoped container and volume names and cleanup traps.
+Failure of verification, boot, or the Stage 5 smoke therefore prevents image
+publication.
+
+## Deprecated Kubernetes deploy helper
+
+`deploy.sh` is a legacy path and is disabled by default. It would expose the
+unauthenticated MCP endpoint through a public Kubernetes `LoadBalancer`, and it
+does not silently grant the broad debugger security context. The script requires
+the exact `PAO_ACK_LEGACY_UNSAFE_PUBLIC_DEPLOY` acknowledgement printed by the
+script before it will proceed, and is suitable only for disposable,
+network-isolated testing.
+
+Do not treat acknowledgement as a security control. Public or multi-user
+Kubernetes service deployment is outside this private tool's scope. It would
+require a separate authentication, authorization, network-policy, secret-handling,
+audit, and debugger-isolation design. Prefer the loopback-bound Docker or Compose
+paths.
+
+<Warning>
+  Supply-chain verification is incomplete. Pwndbg and pwninit are pinned to
+  release versions, but their downloaded assets are not yet checksum- or
+  signature-verified during the image build (the Ghidra archive is verified).
+  The helper-venv packages also lack a dedicated lock, and CI actions use
+  mutable major-version tags rather than commit SHAs. Add trusted checksums,
+  signatures, dependency locks, and action SHA pinning before treating image
+  builds as production-grade.
+</Warning>
 
 ## Published image tags
 

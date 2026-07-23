@@ -9,6 +9,8 @@ User=pao
 WorkingDirectory=/app
 Environment=PYTHONPATH=/app
 Environment=UV_PROJECT_ENVIRONMENT=/app/.venv
+Environment=PAO_RUNTIME_ROOT=/var/lib/pao
+Environment=PAO_PYTHON_VENV=/opt/pao-python/shared_venv
 ExecStart=/app/.venv/bin/python -m paomcp --host 0.0.0.0 --port 5500
 Restart=on-failure
 RestartSec=2

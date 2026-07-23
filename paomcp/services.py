@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from paomcp.artifacts import ArtifactStore
 from paomcp.operations import OperationRegistry
@@ -35,7 +35,10 @@ class AppServices:
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
+def create_services(
+    workspace_root: str = DEFAULT_WORKSPACE,
+    runtime_root: Optional[str] = None,
+) -> AppServices:
     if not os.path.exists(workspace_root):
         try:
             os.makedirs(workspace_root, exist_ok=True)
@@ -46,7 +49,11 @@ def create_services(workspace_root: str = DEFAULT_WORKSPACE) -> AppServices:
             )
             logger.info("Continuing without default workspace directory")
 
-    runtime_paths = build_runtime_paths(workspace_root)
+    runtime_paths = (
+        build_runtime_paths(workspace_root)
+        if runtime_root is None
+        else build_runtime_paths(workspace_root, runtime_root)
+    )
     session_registry = DebugSessionRegistry(runtime_paths)
     default_session = session_registry.create_session("default")
 

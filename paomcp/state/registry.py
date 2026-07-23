@@ -16,6 +16,7 @@ from paomcp.utils.paths import RuntimePaths, validate_session_id
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_DEBUG_SESSIONS = int(os.environ.get("PAO_MAX_DEBUG_SESSIONS", "8"))
+DEFAULT_SESSION_CLOSE_LOCK_TIMEOUT_SEC = 2.0
 
 
 class SessionLimitError(RuntimeError):
@@ -44,6 +45,11 @@ class DebugSession:
     driver_pid: Optional[int] = None
     closing: bool = False
     closed: bool = False
+    cleanup_callback: Optional[Callable[["DebugSession"], Any]] = field(
+        default=None, repr=False
+    )
+    cleanup_attempted: bool = False
+    cleanup_result: Any = field(default=None, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize lightweight metadata for API responses."""
@@ -73,6 +79,7 @@ class DebugSessionRegistry:
         if self.max_sessions <= 0:
             raise ValueError("max_sessions must be positive")
         self.sessions: Dict[str, DebugSession] = {}
+        self._tombstones: Dict[str, DebugSession] = {}
         self.default_session_id: Optional[str] = None
         self._lock = threading.RLock()
 
@@ -86,66 +93,282 @@ class DebugSessionRegistry:
 
     def create_session(self, session_id: Optional[str] = None) -> DebugSession:
         """Create (or return existing) debugger session by id."""
-        with self._lock:
-            chosen_id = (
-                validate_session_id(session_id)
-                if session_id
-                else self._new_session_id()
-            )
-            if chosen_id in self.sessions:
-                return self.sessions[chosen_id]
-            if len(self.sessions) >= self.max_sessions:
-                raise SessionLimitError(
-                    "Debug session limit reached "
-                    f"({len(self.sessions)}/{self.max_sessions})"
-                )
+        chosen_id = (
+            validate_session_id(session_id) if session_id else self._new_session_id()
+        )
+        # Reaping may wait for a bounded GDB shutdown, so it must never run while
+        # the registry-wide lock is held.
+        self.reap_tombstones(lock_timeout_sec=0.0)
 
-            runtime_dir = self._runtime_dir_for(chosen_id)
-            gdb = GdbController()
-            try:
-                gdb.initialize()
-                state = SessionState(session_id=chosen_id)
-                tools = PwndbgTools(gdb, state)
-                session = DebugSession(
-                    session_id=chosen_id,
-                    runtime_dir=runtime_dir,
-                    gdb=gdb,
-                    state=state,
-                    tools=tools,
-                )
-            except Exception:
-                try:
-                    gdb.close()
-                except Exception:
-                    logger.exception(
-                        "Failed to close partially initialized session '%s'",
-                        chosen_id,
+        while True:
+            detached: Optional[DebugSession] = None
+            initialization_error: Optional[Exception] = None
+            new_session: Optional[DebugSession] = None
+            with self._lock:
+                if chosen_id in self._tombstones:
+                    raise SessionLimitError(
+                        f"Debug session '{chosen_id}' is pending debugger shutdown"
                     )
-                raise
-            self.sessions[chosen_id] = session
-            if self.default_session_id is None:
-                self.default_session_id = chosen_id
+                existing = self.sessions.get(chosen_id)
+                if existing is not None:
+                    if self._session_is_destroyed(existing):
+                        detached = self._detach_session_locked(existing)
+                    else:
+                        return existing
+
+                if detached is None:
+                    occupied = self._occupied_count_locked()
+                    if occupied >= self.max_sessions:
+                        raise SessionLimitError(
+                            "Debug session limit reached "
+                            f"({occupied}/{self.max_sessions})"
+                        )
+
+                    runtime_dir = self._runtime_dir_for(chosen_id)
+                    gdb = GdbController()
+                    state = SessionState(session_id=chosen_id)
+                    tools = PwndbgTools(gdb, state)
+                    new_session = DebugSession(
+                        session_id=chosen_id,
+                        runtime_dir=runtime_dir,
+                        gdb=gdb,
+                        state=state,
+                        tools=tools,
+                    )
+                    try:
+                        gdb.initialize()
+                    except Exception as exc:
+                        new_session.closing = True
+                        self._tombstones[chosen_id] = new_session
+                        initialization_error = exc
+                    else:
+                        self.sessions[chosen_id] = new_session
+                        if self.default_session_id is None:
+                            self.default_session_id = chosen_id
+
+            if detached is not None:
+                self._close_tombstone_session(detached, lock_timeout_sec=0.0)
+                # A confirmed close removes the tombstone and permits immediate
+                # recreation. A still-active action leaves it capacity-consuming
+                # and the next iteration returns the typed pending error.
+                continue
+
+            if initialization_error is not None:
+                assert new_session is not None
+                self._close_tombstone_session(
+                    new_session,
+                    lock_timeout_sec=DEFAULT_SESSION_CLOSE_LOCK_TIMEOUT_SEC,
+                )
+                raise initialization_error
+
+            assert new_session is not None
             logger.info("Created debug session '%s'", chosen_id)
-            return session
+            return new_session
 
     def get_session(self, session_id: str) -> Optional[DebugSession]:
         lookup_id = validate_session_id(session_id)
+        detached: Optional[DebugSession] = None
         with self._lock:
-            return self.sessions.get(lookup_id)
+            session = self.sessions.get(lookup_id)
+            if session is not None and self._session_is_destroyed(session):
+                # The gdb process was force-killed (e.g. core-size enforcement).
+                # Evict the dead session so the next resolve rebuilds a fresh
+                # controller instead of dispatching MI to a corpse.
+                detached = self._detach_session_locked(session)
+                session = None
+        if detached is not None:
+            # Never race a still-unwinding MI action. A zero-timeout attempt
+            # leaves a tombstone for the explicit reaper if the action owns the
+            # per-session lock.
+            self._close_tombstone_session(detached, lock_timeout_sec=0.0)
+        return session
+
+    @staticmethod
+    def _session_is_destroyed(session: DebugSession) -> bool:
+        checker = getattr(session.gdb, "is_destroyed", None)
+        return bool(checker()) if callable(checker) else False
+
+    def _detach_session_locked(
+        self, session: DebugSession, *, choose_new_default: bool = False
+    ) -> DebugSession:
+        """Detach one session and reserve its slot as a shutdown tombstone."""
+        session.closing = True
+        self.sessions.pop(session.session_id, None)
+        if self.default_session_id == session.session_id:
+            self.default_session_id = (
+                next(iter(self.sessions), None) if choose_new_default else None
+            )
+        self._tombstones[session.session_id] = session
+        return session
+
+    @staticmethod
+    def _gdb_process_running(session: DebugSession) -> Optional[bool]:
+        """Return observable debugger liveness without trusting close results."""
+        checker = getattr(session.gdb, "gdb_process_running", None)
+        if not callable(checker):
+            return None
+        try:
+            running = checker()
+        except Exception:
+            logger.debug(
+                "Could not inspect gdb liveness for session '%s'",
+                session.session_id,
+                exc_info=True,
+            )
+            return None
+        return running if isinstance(running, bool) else None
+
+    def _close_session_controller(self, session: DebugSession) -> bool:
+        """Attempt bounded close and confirm the debugger no longer occupies a slot."""
+        try:
+            closed = session.gdb.close()
+        except Exception:
+            logger.exception("Failed to close gdb for session '%s'", session.session_id)
+            return False
+
+        running = self._gdb_process_running(session)
+        if running is True:
+            logger.error(
+                "Debugger for session '%s' remains alive after close",
+                session.session_id,
+            )
+            return False
+        if running is False:
+            return True
+        # GdbController.close returns a bool.  The explicit result is the only
+        # proof available for test doubles or legacy controllers without an
+        # inspectable Popen handle.
+        return closed is True
+
+    @staticmethod
+    def _cleanup_failed(result: Any) -> bool:
+        """Return whether a cleanup callback explicitly reported failure."""
+        if result is False:
+            return True
+        if not isinstance(result, dict):
+            return False
+        if result.get("success") is False:
+            return True
+        # SubprocessTools.close_session_processes reports aggregate cleanup
+        # status through failure_count/failures rather than a success boolean.
+        # Treat either signal as authoritative so a live helper process can
+        # never be hidden behind a successful debugger-session close.
+        failure_count = result.get("failure_count", 0)
+        failures = result.get("failures", [])
+        try:
+            if int(failure_count) > 0:
+                return True
+        except (TypeError, ValueError):
+            return True
+        return bool(failures)
+
+    def _close_tombstone_session(
+        self,
+        session: DebugSession,
+        *,
+        lock_timeout_sec: float,
+    ) -> Dict[str, Any]:
+        """Close one tombstone without holding the registry-wide lock.
+
+        Acquiring the per-session lock serializes pipe/process teardown with any
+        MI action that resolved the session before it was detached. Failure to
+        acquire it is a normal pending state: the tombstone remains allocated.
+        """
+        timeout = max(0.0, float(lock_timeout_sec))
+        acquired = session.lock.acquire(timeout=timeout)
+        if not acquired:
+            return {
+                "lock_acquired": False,
+                "controller_closed": False,
+                "cleanup": session.cleanup_result,
+            }
+
+        try:
+            if session.cleanup_callback is not None and not session.cleanup_attempted:
+                session.cleanup_attempted = True
+                try:
+                    session.cleanup_result = session.cleanup_callback(session)
+                except Exception as exc:
+                    logger.exception(
+                        "Session cleanup callback failed for '%s'", session.session_id
+                    )
+                    session.cleanup_result = {
+                        "success": False,
+                        "type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+            controller_closed = self._close_session_controller(session)
+            session.closed = True
+            session.closing = False
+        finally:
+            session.lock.release()
+
+        if controller_closed:
+            with self._lock:
+                if self._tombstones.get(session.session_id) is session:
+                    self._tombstones.pop(session.session_id, None)
+        return {
+            "lock_acquired": True,
+            "controller_closed": controller_closed,
+            "cleanup": session.cleanup_result,
+        }
+
+    def _occupied_count_locked(self) -> int:
+        """Count active sessions plus shutdown tombstones."""
+        return len(self.sessions) + len(self._tombstones)
+
+    def reap_tombstones(self, *, lock_timeout_sec: float = 0.0) -> int:
+        """Retry cleanup without holding the registry lock while waiting."""
+        with self._lock:
+            tombstones = list(self._tombstones.values())
+        reaped = 0
+        for session in tombstones:
+            result = self._close_tombstone_session(
+                session, lock_timeout_sec=lock_timeout_sec
+            )
+            if result["controller_closed"]:
+                reaped += 1
+        return reaped
+
+    def evict_session(self, session_id: str) -> bool:
+        """Publicly drop a session (used after gdb was force-killed).
+
+        Returns True if a session was present and detached. Safe to call with an
+        unknown id. The id remains reserved until bounded controller shutdown is
+        confirmed, after which a later resolve can rebuild it.
+        """
+        lookup_id = validate_session_id(session_id)
+        with self._lock:
+            session = self.sessions.get(lookup_id)
+            if session is None:
+                return False
+            detached = self._detach_session_locked(session)
+        result = self._close_tombstone_session(detached, lock_timeout_sec=0.0)
+        if result["controller_closed"]:
+            logger.info("Evicted destroyed debug session '%s'", lookup_id)
+        else:
+            logger.info(
+                "Detached debug session '%s'; debugger shutdown remains pending",
+                lookup_id,
+            )
+        return True
 
     def ensure_session(self, session_id: Optional[str] = None) -> DebugSession:
         """Return an existing session, creating if necessary."""
-        with self._lock:
-            if session_id:
-                validated_id = validate_session_id(session_id)
-                existing = self.sessions.get(validated_id)
-                if existing:
-                    return existing
-                return self.create_session(validated_id)
+        if session_id:
+            validated_id = validate_session_id(session_id)
+            existing = self.get_session(validated_id)
+            return (
+                existing if existing is not None else self.create_session(validated_id)
+            )
 
-            if self.default_session_id and self.default_session_id in self.sessions:
-                return self.sessions[self.default_session_id]
-            return self.create_session("default")
+        with self._lock:
+            default_id = self.default_session_id
+        if default_id is not None:
+            default = self.get_session(default_id)
+            if default is not None:
+                return default
+        return self.create_session("default")
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -155,9 +378,13 @@ class DebugSessionRegistry:
         """Return debugger-session capacity without exposing live objects."""
         with self._lock:
             active = len(self.sessions)
+            tombstones = len(self._tombstones)
+            occupied = active + tombstones
             return {
                 "active": active,
-                "available": max(0, self.max_sessions - active),
+                "tombstones": tombstones,
+                "occupied": occupied,
+                "available": max(0, self.max_sessions - occupied),
                 "max_sessions": self.max_sessions,
                 "default_session_id": self.default_session_id,
             }
@@ -166,56 +393,92 @@ class DebugSessionRegistry:
         self,
         session_id: str,
         on_closing: Optional[Callable[[DebugSession], Any]] = None,
+        *,
+        lock_timeout_sec: float = DEFAULT_SESSION_CLOSE_LOCK_TIMEOUT_SEC,
     ) -> Dict[str, Any]:
         """Close a session and release associated resources."""
         lookup_id = validate_session_id(session_id)
         with self._lock:
             session = self.sessions.pop(lookup_id, None)
             if not session:
-                return {
-                    "success": False,
-                    "error": f"Session '{lookup_id}' not found",
-                    "type": "SessionNotFoundError",
-                    "code": "NOT_FOUND",
-                }
+                session = self._tombstones.get(lookup_id)
+                if session is None:
+                    return {
+                        "success": False,
+                        "error": f"Session '{lookup_id}' not found",
+                        "type": "SessionNotFoundError",
+                        "code": "NOT_FOUND",
+                    }
+            else:
+                # Mark closing before waiting for the per-session lock. Any action
+                # that already resolved this session but is queued behind an active
+                # action then fails closed.
+                session.closing = True
+                self._tombstones[lookup_id] = session
+                if self.default_session_id == lookup_id:
+                    self.default_session_id = next(iter(self.sessions), None)
 
-            # Mark closing before waiting for the per-session lock. Any action that
-            # already resolved this session but is queued behind an active action
-            # will then fail closed instead of running after close was requested.
-            session.closing = True
-            cleanup_result = None
-            with session.lock:
-                if on_closing is not None:
-                    try:
-                        cleanup_result = on_closing(session)
-                    except Exception as exc:
-                        logger.exception(
-                            "Session cleanup callback failed for '%s'", lookup_id
-                        )
-                        cleanup_result = {
-                            "success": False,
-                            "type": type(exc).__name__,
-                            "error": str(exc),
-                        }
-                try:
-                    session.gdb.close()
-                except Exception:
-                    logger.exception("Failed to close gdb for session '%s'", lookup_id)
-                finally:
-                    session.closed = True
-                    session.closing = False
+            if on_closing is not None and not session.cleanup_attempted:
+                session.cleanup_callback = on_closing
 
-            if self.default_session_id == lookup_id:
-                self.default_session_id = next(iter(self.sessions), None)
-
+        close_result = self._close_tombstone_session(
+            session, lock_timeout_sec=lock_timeout_sec
+        )
+        cleanup_result = close_result["cleanup"]
+        if not close_result["lock_acquired"]:
+            logger.warning(
+                "Debugger action remained active while closing session '%s'", lookup_id
+            )
+            result = {
+                "success": False,
+                "session_id": lookup_id,
+                "error": (
+                    "An active debugger action did not finish before the "
+                    "session close timeout"
+                ),
+                "type": "SessionShutdownPendingError",
+                "code": "SHUTDOWN_PENDING",
+                "shutdown_pending": True,
+                "action_lock_busy": True,
+            }
+        elif not close_result["controller_closed"]:
+            logger.error(
+                "Debugger shutdown remains pending for session '%s'", lookup_id
+            )
+            result = {
+                "success": False,
+                "session_id": lookup_id,
+                "error": "Debugger process could not be confirmed stopped",
+                "type": "SessionShutdownPendingError",
+                "code": "SHUTDOWN_PENDING",
+                "shutdown_pending": True,
+            }
+        elif self._cleanup_failed(cleanup_result):
+            logger.error("Session cleanup failed for '%s'", lookup_id)
+            result = {
+                "success": False,
+                "session_id": lookup_id,
+                "error": "Debugger closed, but associated resource cleanup failed",
+                "type": "SessionCleanupError",
+                "code": "SESSION_CLEANUP_FAILED",
+                "shutdown_pending": False,
+            }
+        else:
             logger.info("Closed debug session '%s'", lookup_id)
             result = {"success": True, "session_id": lookup_id}
-            if cleanup_result is not None:
-                result["cleanup"] = cleanup_result
-            return result
+
+        if cleanup_result is not None:
+            result["cleanup"] = cleanup_result
+        return result
 
     def close_all(self) -> None:
         """Close all tracked sessions."""
         with self._lock:
-            for session_id in list(self.sessions.keys()):
-                self.close_session(session_id)
+            for session in list(self.sessions.values()):
+                self._detach_session_locked(session, choose_new_default=True)
+            tombstones = list(self._tombstones.values())
+        for session in tombstones:
+            self._close_tombstone_session(
+                session,
+                lock_timeout_sec=DEFAULT_SESSION_CLOSE_LOCK_TIMEOUT_SEC,
+            )

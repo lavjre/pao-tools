@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 87
+    assert len(tools) == 96
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -95,6 +95,15 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "write_memory",
         "disassemble",
         "step_until_event",
+        "get_last_stop",
+        "run_until_crash",
+        "capture_crash_snapshot",
+        "analyze_crash",
+        "classify_crash",
+        "compare_crashes",
+        "find_cyclic_offset",
+        "capture_core_dump",
+        "generate_crash_report",
     } <= tool_names
     for tool in tools:
         assert tool.output_schema is not None, tool.name
@@ -132,6 +141,13 @@ async def test_high_impact_mutations_expose_idempotency_keys():
         "write_memory",
         "revert_memory_patch",
         "step_until_event",
+        "run_until_crash",
+        "capture_crash_snapshot",
+        "analyze_crash",
+        "classify_crash",
+        "compare_crashes",
+        "capture_core_dump",
+        "generate_crash_report",
         "run_command",
         "spawn_process",
         "kill_process",

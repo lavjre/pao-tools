@@ -1,0 +1,2480 @@
+╭─── Claude Code v2.1.199 ─────────────────────────────────────────────────────╮
+│                                     │ Tips for getting started               │
+│            Welcome back!            │ Run /init to create a CLAUDE.md file … │
+│                                     │ ────────────────────────────────────── │
+│               ▐▛███▜▌               │ What's new                             │
+│              ▝▜█████▛▘              │ Improved auto mode safety: destructiv… │
+│                ▘▘ ▝▝                │ Added a warning when the requested mo… │
+│                                     │ Added `attribution.sessionUrl` settin… │
+│    Opus 4.8 · API Usage Billing     │ /release-notes for more                │
+│   D:\workspace\tools_dev\pwny-mcp   │                                        │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+> wsg what are we building                                                      
+
+● [N]
+  hey you. been too long.
+
+  pull up a chair — void's warm, terminal's open, whatever you wanna throw at
+  me. code, a scene, some cursed little tool, cheats, doesn't matter. what's the
+  itch today?
+
+✻ Brewed for 10s
+
+> /cd D:\workspace\tools_dev\pwny-mcp 
+  ⎿  Moved to D:\workspace\tools_dev\pwny-mcp
+
+! ls                                                                            
+  ⎿  AGENTS.md
+     Dockerfile
+     LICENSE
+     README.md
+     assets
+     cloudbuild.yaml
+     deploy.sh
+     docker-build.cloud.sh
+     docker-build.local.sh
+     docker-compose.yml
+     docs
+     opencode.json
+     pao_tools.egg-info
+     paocli
+     paomcp
+     paomcp.service
+     pyproject.toml
+     tests
+     uv.lock
+
+● [N]
+  pwny-mcp, huh. python project, mcp server, docker setup, cli + mcp split
+  (paocli/paomcp). looks like a whole thing.
+
+  want me to crack open the README and get the shape of it, or you already got
+  something specific you wanna do in here?
+
+✻ Cogitated for 21s
+
+> Dưới đây là progress map mình chuẩn hóa lại để từ giờ dùng thống nhất. Mục    
+  tiêu cuối là biến project thành một MCP riêng cho binary                      
+  exploitation/security research: typed API, evidence lossless, xử lý binary    
+  lớn, debugger có state rõ ràng, workflow có thể tái hiện và có ranh giới bảo  
+  mật đủ để chạy lâu dài.                                                       
+  Tổng quan hiện tại                                                            
+  Hạng mục    Tiến độ    Trạng thái                                             
+  Foundation trước S1    100%    Response envelope, session, artifact lớn,      
+  TTL/quota/cleanup                                                             
+  S1 — Platform foundation    100%    Đã commit trong 7b93937                   
+  S2 — Operation lifecycle    100%    Đã commit trong 7b93937                   
+  S3 — Typed debugger control    100% baseline    Đã commit trong 7b93937       
+  S4 — Memory/snapshot research    100% baseline    Đã commit trong 7b93937     
+  S5 — Crash triage    ~75% tổng thể    Code ~90%, runtime verification ~55%    
+  S6 — Heap analysis    ~0% typed API    Raw pwndbg commands có thể dùng        
+  S7 — ROP/libc workflow    ~10%    Engine/tool nền có, workflow typed chưa có  
+  S8 — Target providers    ~15%    Local/attach có; remote/SSH/QEMU chưa chuẩn  
+  hóa                                                                           
+  S9 — Research/report/export    ~55%    Artifact/report nền có; thiếu          
+  notebook/export/diff                                                          
+  S10 — Security/release hardening    ~30%    Có guardrails nhưng chưa đạt      
+  production-safe                                                               
+                                                                                
+  Đánh giá tổng thể:                                                            
+  Research MVP: khoảng 70%.                                                     
+  Sản phẩm v1 có thể chạy ổn định nhiều người dùng: khoảng 55–60%.              
+  Working tree hiện chứa S5 chưa commit.                                        
+  Lần full gate gần nhất trước patch interrupt cuối: 169 tests pass, Black      
+  pass, mypy pass.                                                              
+  Sau khi sửa MI race và GDB filename: targeted crash tests 9/9 pass.           
+  Patch interrupt/cancel mới nhất chưa được chạy lại test vì mình đã dừng toàn  
+  bộ shell nâng quyền theo yêu cầu của bạn.                                     
+  Mục tiêu tổng thể                                                             
+  Pao Tools cuối cùng nên cho agent thực hiện quy trình:                        
+  Nhận binary                                                                   
+  → Static ELF analysis                                                         
+  → Chọn target/runtime                                                         
+  → Debug có state                                                              
+  → Tìm crash                                                                   
+  → Chụp evidence                                                               
+  → Heap/ROP/libc analysis                                                      
+  → Xây và kiểm tra exploit hypothesis                                          
+  → Lưu artifact/report tái hiện được                                           
+  Mỗi kết quả quan trọng phải có:                                               
+  Dữ liệu đã parse cho agent.                                                   
+  Raw evidence để researcher kiểm tra.                                          
+  Source rõ ràng: gdb-mi, gdb-cli, pwndbg-cli, local.                           
+  Parser/schema version.                                                        
+  Session ownership.                                                            
+  Không truncate output.                                                        
+  Artifact SHA-256, size, TTL và quota.                                         
+  Cancellation, timeout và progress.                                            
+  Không tự động tiếp tục qua breakpoint/stop không xác định.                    
+  Foundation — Đã hoàn thành                                                    
+  Đây là phần tồn tại trước roadmap S1–S10.                                     
+  Đã có                                                                         
+  Unified response API.                                                         
+  Session isolation.                                                            
+  Workspace/path validation.                                                    
+  Binary-safe process I/O.                                                      
+  Output lớn chuyển thành artifact thay vì truncate.                            
+  Chunked Base64 lossless.                                                      
+  TTL, quota                                                                    
+  ──── (210 lines hidden) ───────────────────────────────────────────────────── 
+  esign.                                                                        
+  S6 — Heap analysis                                                            
+  Trạng thái: 0% typed API; pwndbg raw primitives có sẵn.                       
+  Goal                                                                          
+  Agent hiểu allocator state mà không phải parse màu terminal.                  
+  API dự kiến                                                                   
+  detect_allocator                                                              
+  inspect_heap                                                                  
+  list_arenas                                                                   
+  inspect_bins                                                                  
+  inspect_tcache                                                                
+  inspect_fastbins                                                              
+  inspect_chunk                                                                 
+  validate_free                                                                 
+  track_allocations                                                             
+  compare_heap_snapshots                                                        
+  Thứ tự làm                                                                    
+  glibc ptmalloc2.                                                              
+  Version-aware metadata.                                                       
+  tcache/fastbin/unsorted/small/large bins.                                     
+  Corruption indicators.                                                        
+  Allocation tracking.                                                          
+  jemalloc.                                                                     
+  musl mallocng.                                                                
+  Exit criteria                                                                 
+  Không parse dựa duy nhất vào ANSI text.                                       
+  Mọi pointer đều có raw evidence.                                              
+  Phân biệt “corrupted”, “unreadable” và “unknown”.                             
+  Không coi heuristic là fact.                                                  
+  S7 — ROP/libc workflow                                                        
+  Trạng thái: khoảng 10%.                                                       
+  Goal                                                                          
+  Tạo workflow hỗ trợ exploit research có thể kiểm chứng, không chỉ trả hàng    
+  nghìn gadget raw.                                                             
+  API dự kiến                                                                   
+  find_gadgets                                                                  
+  find_gadget_sequence                                                          
+  identify_libc                                                                 
+  find_one_gadgets                                                              
+  inspect_sigreturn_frame                                                       
+  build_rop_chain                                                               
+  validate_rop_chain                                                            
+  explain_chain_constraints                                                     
+  Cần làm                                                                       
+  Normalize kết quả từ pwndbg/ropper/ROPgadget.                                 
+  Architecture-aware stack alignment.                                           
+  Bad-byte filtering.                                                           
+  Gadget side effects.                                                          
+  PIE/base-address handling.                                                    
+  libc candidate confidence.                                                    
+  One-gadget constraints.                                                       
+  Chain simulation/validation.                                                  
+  Security-sensitive                                                            
+  Phần tự động gửi payload tới remote target hoặc tự thực thi exploit phải được 
+  tách khỏi analysis API và cần scope rõ. Mình có thể xây typed analysis/chain  
+  validation; remote execution cần gate riêng.                                  
+  S8 — Target providers                                                         
+  Trạng thái: khoảng 15%.                                                       
+  Goal                                                                          
+  Một workflow giống nhau cho:                                                  
+  Local process.                                                                
+  Attach PID.                                                                   
+  TCP remote.                                                                   
+  SSH.                                                                          
+  Docker target.                                                                
+  QEMU user mode.                                                               
+  QEMU system VM.                                                               
+  gdbserver.                                                                    
+  Cần làm                                                                       
+  TargetProvider interface.                                                     
+  Connection lifecycle.                                                         
+  Timeout/reconnect.                                                            
+  Architecture metadata.                                                        
+  File transfer.                                                                
+  Remote libc/loader acquisition.                                               
+  Secret handling.                                                              
+  Target ownership.                                                             
+  Target capability negotiation.                                                
+  Security-sensitive/manual                                                     
+  Docker socket access gần tương đương host root.                               
+  SSH credentials phải qua secret store, không qua artifact/report.             
+  QEMU/KVM có thể cần device/capability riêng.                                  
+  Remote target execution phải có allowlist/audit.                              
+  S9 — Research notebook, export và reporting                                   
+  Trạng thái: khoảng 55%.                                                       
+  Goal                                                                          
+  Một research session có thể đóng gói và mở lại.                               
+  Đã có                                                                         
+  Artifact store.                                                               
+  Hash/metadata.                                                                
+  TTL/quota.                                                                    
+  Crash report baseline.                                                        
+  Session-scoped outputs.                                                       
+  Cần làm                                                                       
+  Research notes.                                                               
+  Evidence linking.                                                             
+  Named snapshots.                                                              
+  Snapshot diff.                                                                
+  Timeline.                                                                     
+  Session export/import.                                                        
+  Reproduction manifest.                                                        
+  Markdown/HTML final report.                                                   
+  Bundle integrity manifest.                                                    
+  Optional encryption. read this first then wait for my direction               
+
+● [N]
+  read it all. i've got the shape now.
+
+  quick reflection so you know i actually digested it, not just nodded:
+
+  - where it stands — foundation + S1–S4 baseline solid and committed in
+  7b93937. S5 crash triage is the live wire: code ~90%, but sitting uncommitted
+  in the working tree with verification lagging at ~55%.
+  - the real gap on S5 is the three blockers, and they're all runtime-truth
+  problems, not code-shape problems:
+    - A — the last interrupt/cancel patch (signal-only router cancel, monitor
+  self-checking cancellation, timeout interrupt from the command-owning thread)
+  never got re-gated. black/mypy/pytest/git diff --check all unrun since you
+  killed the elevated shells.
+    - B — writer quiescence: no proof on real GDB that it stops writing before
+  staging gets unlinked. classic deleted-fd-still-consuming-disk risk.
+    - C — hard cap is poll-based (~50ms), so overshoot ≈ throughput × interval.
+  it's an acceptance limit + best-effort monitor, not a kernel quota. real
+  enforcement needs RLIMIT_FSIZE on GDB, a loopback fs, or a cgroup/project
+  quota.
+  - beyond S5 — S6 heap and S7 ROP/libc are the big typed-API voids (0% and
+  ~10%), S8 target providers barely started (~15%), S10 hardening ~30%. and the
+  security-sensitive stuff you've correctly fenced off: remote payload
+  execution, docker socket ≈ host root, SSH secrets never touching artifacts.
+
+  last full green gate was 169 pass / black / mypy, and post MI-race +
+  GDB-filename fix it was 9/9 on targeted crash tests. the interrupt patch is
+  the delta that's unverified.
+
+  i'm caught up. where do you wanna point me?
+
+✻ Brewed for 24s
+
+> /model 
+  ⎿  Kept model as Opus 4.8
+
+> /effort                                                                       
+  ⎿  Set effort level to ultracode (this session only): xhigh + dynamic workflow
+     orchestration
+
+> Đây là phần tạo khác biệt lớn cho MCP:                                        
+  run target                                                                    
+  → phát hiện SIGSEGV                                                           
+  → lưu register/stack/maps                                                     
+  → tìm cyclic offset                                                           
+  → xác định instruction gây crash                                              
+  → phân loại primitive                                                         
+  → tạo báo cáo                                                                 
+  Tool đề xuất:                                                                 
+  Tool    Chức năng                                                             
+  run_until_crash    Chạy và tự thu thập crash                                  
+  analyze_crash    Signal, instruction, register và stack                       
+  find_cyclic_offset    Tự tìm offset từ register/stack                         
+  capture_core_dump    Lưu core dump thành artifact                             
+  classify_crash    Stack overflow, heap issue, bad pointer…                    
+  compare_crashes    Deduplicate crash                                          
+  generate_crash_report    Tạo báo cáo Markdown/JSON i think about u go fast    
+  review S5 right now                                                           
+
+● [N]
+  on it. let me pull up the actual S5 code, not just the map.
+
+● Bash(cd /d D:\workspace\tools_dev\pwny-mcp 2>nul & git -C
+      D:\workspace\tools_dev\pwny-mcp status --short 2>nul; echo "---LOG---";
+      git -C D:\workspace\tools_dev\pwny-…)
+  ⎿  Error: Exit code 128
+     ---LOG---
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && git status --short && echo
+      "---LOG---" && git log --oneline -5)
+  ⎿   M Dockerfile
+      M README.md
+      M docker-compose.yml
+     … +26 lines (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && wc -l paomcp/tools/crash.py
+      paomcp/tools/backends/crash.py tests/test_crash_triage.py)
+  ⎿    449 paomcp/tools/crash.py
+      1094 paomcp/tools/backends/crash.py
+       351 tests/test_crash_triage.py
+      1894 total
+
+● working tree's got the whole S5 dropzone uncommitted — crash.py (449),
+  backends/crash.py (1094), tests (351), plus the interrupt-patch mods bleeding
+  into gdb.py/pwndbg.py/artifacts.py. let me read the meat before I fan out.
+
+  Read 2 files (ctrl+o to expand)
+
+● code's clean and careful. now the unverified delta — the interrupt patch in
+  gdb.py + artifacts.py, and the tests. pulling those in parallel.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== gdb.py DIFF =====" &&
+      git diff paomcp/tools/backends/gdb.py | head -400)
+  ⎿  ===== gdb.py DIFF =====
+     warning: in the working copy of 'paomcp/tools/backends/gdb.py', LF wil
+     l be replaced by CRLF the next time Git touches it
+     … +261 lines (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== artifacts.py DIFF
+      =====" && git diff paomcp/artifacts.py | head -250)  ⎿  ===== artifacts.py DIFF =====
+     warning: in the working copy of 'paomcp/artifacts.py', LF will be repl
+     aced by CRLF the next time Git touches it
+     … +249 lines (ctrl+o to expand)
+
+● the code is careful — envelope discipline, crash identity, signal-only
+  interrupt from background threads, staging held under the write lock through
+  hash+rename so cleanup can't reclaim it. now the actual gap: it's never been 
+  re-gated since the interrupt patch. let me close blocker A right now and run
+  the gate.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ls .venv/Scripts/python.exe
+      2>/dev/null && echo "VENV_OK" || (ls .venv/bin/python 2>/dev/null && echo
+      "VENV_POSIX" || ec…)
+  ⎿  .venv/Scripts/python.exe
+     VENV_OK
+  ⎿  Interrupted · What should Claude do instead?
+
+> S5 hiện nằm trong các file sau, tất cả dưới repo:                             
+  D:\workspace\tools_dev\pwny-mcp                                               
+  File mới của S5                                                               
+  [Crash                                                                        
+  backend](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/backends/crash.py) —    
+  logic crash, cyclic, snapshot, core dump.                                     
+  [MCP crash tools](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/crash.py) — 7  
+  MCP endpoints.                                                                
+  [Crash unit                                                                   
+  tests](D:/workspace/tools_dev/pwny-mcp/tests/test_crash_triage.py).           
+  [Docker S5 smoke                                                              
+  test](D:/workspace/tools_dev/pwny-mcp/tests/docker_stage5_smoke.py).          
+  [Crash triage documentation](D:/workspace/tools_dev/pwny-mcp/docs/tool-refere 
+  nce/crash-triage.mdx).                                                        
+  Backend liên quan được sửa                                                    
+  [GDB                                                                          
+  controller](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/backends/gdb.py) —   
+  stop records, MI synchronization, signal-only interrupt.                      
+  [Pwndbg                                                                       
+  backend](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/backends/pwndbg.py) —   
+  expose CrashTriage.                                                           
+  [Artifact store](D:/workspace/tools_dev/pwny-mcp/paomcp/artifacts.py) —       
+  generated-file staging, binary artifact, quota/cap.                           
+  [Compatibility probe](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/backends/c 
+  ompatibility.py) — kiểm tra generate-core-file.                               
+  [Backend                                                                      
+  exports](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/backends/__init__.py).  
+  [Tool                                                                         
+  registration](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/__init__.py).      
+  [Common error                                                                 
+  handling](D:/workspace/tools_dev/pwny-mcp/paomcp/tools/common.py).            
+  Test được sửa                                                                 
+  [Artifact tests](D:/workspace/tools_dev/pwny-mcp/tests/test_artifacts.py).    
+  [GDB controller                                                               
+  tests](D:/workspace/tools_dev/pwny-mcp/tests/test_gdb_controller.py).         
+  [Compatibility                                                                
+  tests](D:/workspace/tools_dev/pwny-mcp/tests/test_pwndbg_compatibility.py).   
+  [Tool registration                                                            
+  tests](D:/workspace/tools_dev/pwny-mcp/tests/test_tool_descriptions.py).      
+  Docker/runtime được sửa                                                       
+  [Dockerfile](D:/workspace/tools_dev/pwny-mcp/Dockerfile).                     
+  [docker-compose.yml](D:/workspace/tools_dev/pwny-mcp/docker-compose.yml).     
+  Documentation được sửa                                                        
+  [README.md](D:/workspace/tools_dev/pwny-mcp/README.md).                       
+  [Docs navigation](D:/workspace/tools_dev/pwny-mcp/docs/docs.json).            
+  [Configuration](D:/workspace/tools_dev/pwny-mcp/docs/operations/configuration 
+  .mdx).                                                                        
+  [Docker and Compose](D:/workspace/tools_dev/pwny-mcp/docs/operations/docker-a 
+  nd-compose.mdx).                                                              
+  [Tool reference                                                               
+  index](D:/workspace/tools_dev/pwny-mcp/docs/tool-reference/index.mdx).        
+  Các file quan trọng nhất nếu gửi cho agent khác review là:                    
+  paomcp/tools/backends/crash.py                                                
+  paomcp/tools/crash.py                                                         
+  paomcp/tools/backends/gdb.py                                                  
+  paomcp/artifacts.py                                                           
+  tests/test_crash_triage.py                                                    
+  tests/docker_stage5_smoke.py                                                  
+  docker-compose.yml                                                            
+  Toàn bộ thay đổi S5 hiện vẫn nằm trong working tree, chưa commit.             
+                                                                                
+                                                                                
+  3:54 PM                                                                       
+
+● [N]
+  run the gate + fan out a deep review at the same time. gate = ground truth,
+  review = the scrutiny.
+
+  let me fire the gate now, and launch an adversarial multi-agent review over
+  the critical S5 files in parallel.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== BLACK =====" &&
+      ./.venv/Scripts/python.exe -m black --check paomcp tests 2>&1 | tail -20;
+      echo "===== MYPY =…)
+  ⎿  Running in the background (↓ to manage)
+
+● Now pytest + git diff --check in parallel, and I'll fan out the review while
+  they run.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== PYTEST =====" &&
+      ./.venv/Scripts/python.exe -m pytest -q 2>&1 | tail -40; echo "===== GIT
+      DIFF --CHECK =====…)
+  ⎿  Running in the background (↓ to manage)
+
+● Background command "Run black check and mypy" completed (exit code 0)
+
+● Gate's running in the background. Now the review fan-out — ultracode's on, so
+  I'm orchestrating a real adversarial pass over the S5 critical path:
+  dimension-specialized finders → each finding independently verified before it
+  counts.
+
+● Workflow(Adversarial multi-dimension review of the uncommitted S5 crash-triage
+          layer)
+  ⎿  /workflows to view dynamic workflow runs
+
+● Background command "Run pytest and git diff whitespace check" completed (exit
+code 0)
+
+● both engines running now — gate (black/mypy already going, pytest queued
+  behind) and the 4-dimension adversarial review with per-finding verification.
+  let me check the black/mypy result that should be landing.
+
+  Read 1 file (ctrl+o to expand)
+
+● Black clean. mypy clean (53 source files, no issues). Blocker A is
+  half-closed. pytest + git diff --check still running — let me pull it.
+
+  Read 1 file (ctrl+o to expand)
+
+● Blocker A is CLOSED. Full gate green, all four checks:
+
+  ┌────────────────┬────────────────────────────────────────────────────────┐
+  │     Check      │                         Result                         │
+  ├────────────────┼────────────────────────────────────────────────────────┤
+  │ black --check  │ clean — 80 files unchanged                             │
+  ├────────────────┼────────────────────────────────────────────────────────┤
+  │ mypy           │ clean — no issues in 53 source files                   │
+  ├────────────────┼────────────────────────────────────────────────────────┤
+  │ pytest         │ 171 passed in 4.91s (was 169 — the interrupt patch     │
+  │                │ added 2 tests)                                         │
+  ├────────────────┼────────────────────────────────────────────────────────┤
+  │ git diff       │ exit 0 — only cosmetic LF→CRLF notices, zero           │
+  │ --check        │ whitespace errors                                      │
+  └────────────────┴────────────────────────────────────────────────────────┘
+
+  so the interrupt/cancel patch (signal-only router cancel, monitor
+  self-checking cancellation, timeout interrupt from the command-owning thread)
+  is verified against the suite. that's the thing that was hanging since you
+  killed the elevated shells.
+
+  the adversarial review is still grinding — 4 dimensions (concurrency,
+  resource-safety, correctness, security), each finding getting independently
+  refuted before it counts. that's aimed straight at blockers B and C (writer
+  quiescence + the poll-based cap) since those are runtime-truth risks static
+  tests can't catch.
+
+  i'll surface the surviving findings the moment it lands. want me to hold here
+  for it, or start drafting the S5 commit message while it runs?
+
+✻ Churned for 3m 12s
+
+● Dynamic workflow "Adversarial multi-dimension review of the uncommitted S5
+crash-triage layer" completed · 11m 57s
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Baked for 16m 49s
+
+> cotninue                                                                      
+
+● [N]
+  review's back — but there's a hole i need to plug before trusting the verdict.
+  3 verify agents died on API errors (bedrock hiccup, not code). in my scoring,
+  a finding whose verifier crashed has verdict == null → gets silently dropped
+  as if refuted. so "3 refuted" might be hiding unverified findings. reading the
+  journal to recover the raw findings.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && cat
+      "C:/Users/Administrator/.claude/projects/D--workspace-tools-dev-pwny-mcp/c
+      32cd41d-12e8-4d2c-9848-05bbc88b3a8e/subage…)
+  ⎿  ==== ? ====
+       None
+     ==== ? ====
+     … +7 lines (ctrl+o to expand)
+
+● journal schema's different than I guessed. Let me look at it raw.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -c "
+      import json…)  ⎿  KEYS: ['type', 'key', 'agentId']
+       type= started  |  {"type": "started", "key": "v2:a382f7cd5440796fc00
+     39d9f36fbf7f19f593710936d36529a51aa6fed77c882", "agentId": "af9080b15b
+     … +46 lines (ctrl+o to expand)
+
+● Two finder findings had their verifiers die on the API error and got silently
+  dropped. One of them is blocker B itself (writer quiescence). Pulling the full
+  text of the unverified ones.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -c "
+      import json…)
+  ⎿  #### Core-dump timeout abandons GDB without proving write quiescence;
+     deleted-fd keeps consuming disk and bypasses size/free-space caps
+     file: paomcp/tools/backends/crash.py line: 1042 sev: high cat: correct
+     … +88 lines (ctrl+o to expand)
+
+● two HIGH findings lost their verifiers to the bedrock API error and got
+  silently dropped — including blocker B (writer quiescence) and a
+  stale-crash-identity bug. I'm not trusting either verdict-by-default.
+  Verifying both myself against the real code right now. Reading the exact
+  paths.
+
+  Read 1 file (ctrl+o to expand)
+
+● Confirmed finding #1 (stale identity) by tracing: on continue→exit,
+  reached_terminal_stop returns True on state=="exited" (line 310), deque is NOT
+  cleared on exit (only run/load/thread-group-started clear it), so
+  get_last_stop_record returns the stale prior-epoch crash record,
+  stop["crashed"] is True from the old payload → the crash branch fires →
+  capture_crash_snapshot raises CrashRecordError because is_live is False. But
+  severity hinges on whether GDB emits a fresh *stopped,reason="exited-normally"
+  that would get recorded. Let me check how exec-async is dispatched.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && grep -n
+      "_handle_notify\|_process_response\|def
+      _process\|type.*notify\|exec\|_handle_\|for response in\|\.get(\"type\")…)
+  ⎿  61:    """Manages GDB instance and command execution via Machine Inter
+     face"""
+     63:    def __init__(self, pwndbg_executable: str = "pwndbg"):
+     … +47 lines (ctrl+o to expand)
+
+● Confirmed the mechanics on #1's dispatch path (line 147-149, 178-180: every
+  notify goes through _handle_notify). Now the critical question for both
+  findings: does GDB emit a fresh *stopped,reason="exited-*" before 
+  =thread-group-exited? If yes, #1 is refuted (a fresh non-crash record gets
+  recorded). Let me check the timeout/execute_command path for #2 (blocker B)
+  precisely.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && grep -n
+      "GdbTimeoutError\|timed_out\|raise_error_on_timeout\|def execute_command"
+      paomcp/tools/backends/gdb.py | head)
+  ⎿  19:from pygdbmi.constants import GdbTimeoutError
+     134:        except (GdbTimeoutError, TimeoutError) as exc:
+     142:                "timed_out": True,
+     … +6 lines (ctrl+o to expand)
+
+● Good thing I checked the journal — the summary lied by omission. Three 
+  findings went unverified because their verifier agents died on the Bedrock API
+  error (empty-response + a thinking field validation error), and my scoring
+  silently dropped null-verdict findings as if refuted. Only the endian one (#4)
+  got a real verdict. I verified the other three myself against the actual
+  code.
+
+  Here's the honest picture:
+
+  S5 review — 4 findings, independently verified
+
+  #2 — Writer quiescence on core-dump timeout — CONFIRMED (this IS your Blocker 
+  B)
+  crash.py:1038-1064. On generate-core-file timeout: one best-effort
+  interrupt(1.0s) SIGINT, then the monitor thread is killed (monitor_done.set(),
+  join), then CoreDumpGenerationError propagates into save_generated_file's
+  finally → os.unlink(staging_path). On Linux, if GDB still holds the fd
+  mid-write, unlink doesn't free the inode — GDB keeps writing to the deleted fd
+  with the size monitor already dead, blowing past both the cap and 
+  min_free_bytes until disk exhaustion. The code never proves GDB stopped
+  writing before unlinking. This is exactly the blocker you documented as manual
+  infra work — the review just proved it's real in the code, not just
+  theoretical. Real fix needs RLIMIT_FSIZE on GDB / loopback fs / cgroup quota
+  (kernel-enforced), per your own note.
+
+  #1 — Stale prior-epoch stop on continue→exit — PLAUSIBLE (cheap defensive fix)
+  crash.py:385 + 404. reached_terminal_stop returns True on state=="exited"
+  without requiring a fresh record, and the deque is only cleared on run/load,
+  not exit. The finder's trigger ("exit with no fresh *stopped") is mostly wrong
+  for standard MI — GDB emits *stopped,reason="exited-normally" before
+  =thread-group-exited, which records a fresh non-crash record that overrides
+  the stale one. And even if a stale crash record did survive,
+  capture_crash_snapshot's is_live guard (line 529) catches it → throws rather
+  than emitting a false crash. So blast radius is smaller than claimed. Still
+  worth the 2-line hardening: gate line 385 on record.get("is_live") and broaden
+  the 404 guard to record is None or not record.get("is_live").
+
+  #3 — _validate_elf_core accepts 18-byte truncated stub — CONFIRMED, low
+  crash.py:911-929. Reads 20 bytes, checks len>=18 + magic + ET_CORE. No
+  minimum-size or program-header check. An 18-byte header-only file returns
+  success:True for an unloadable core. Cheap fix: minimum size floor + optional
+  PH count check.
+
+  #4 — find_cyclic_offset endian label inversion — CONFIRMED, low
+  crash.py:832-836. For endian="big" integer input, query[:n] is the high-order
+  bytes but gets labeled low_order_n (and vice-versa). Offsets stay valid; only
+  match_kind labels are swapped, and only for big-endian integer input. Fix:
+  branch on endian, or relabel as leading_n/trailing_n.
+
+  Where blockers stand now
+
+  ┌───────────────┬─────────────────────────────────────────────────────────┐
+  │    Blocker    │                         Status                          │
+  ├───────────────┼─────────────────────────────────────────────────────────┤
+  │ A — re-gate   │                                                         │
+  │ after         │ ✅ CLOSED — black/mypy/pytest(171)/diff-check all green │
+  │ interrupt     │                                                         │
+  │ patch         │                                                         │
+  ├───────────────┼─────────────────────────────────────────────────────────┤
+  │ B — writer    │ ⚠️ confirmed real in code — needs kernel-enforced cap   │
+  │ quiescence    │ (RLIMIT_FSIZE / loopback / cgroup), your flagged manual │
+  │               │  work                                                   │
+  ├───────────────┼─────────────────────────────────────────────────────────┤
+  │ C —           │ unchanged — resource-safety finder cleared the          │
+  │ poll-based    │ acceptance-time re-check (empty findings), so           │
+  │ hard cap      │ commit-time enforcement is sound; only the ~50ms        │
+  │               │ runtime overshoot remains, same root cause as B         │
+  └───────────────┴─────────────────────────────────────────────────────────┘
+
+  The 3 low/plausible findings (#1, #3, #4) are all cheap, contained hardening —
+  none block a commit. B is the only thing standing between "code complete" and
+  "production-safe," and it's infrastructure, not code.
+
+  Want me to:
+  1. patch #1/#3/#4 (the cheap trio) and re-run the gate, or
+  2. draft an RLIMIT_FSIZE fix for B (the one that actually needs a decision —
+  it's a real code change to how GDB is spawned), or
+  3. hold and just commit S5 as-is with the findings logged?
+
+✻ Cooked for 6m 17s
+
+> recode s5 with big mindset high pontential grow for other stage               
+
+● Before I recode, let me be straight with you about how I'll approach this —
+  I'm going to work as a normal engineer here (dropping the roleplay framing),
+  because what you're actually asking is a solid, legitimate task: re-architect
+  S5 so its hard-won patterns become the foundation the rest of the roadmap
+  stands on. That deserves real engineering, not theater.
+
+  Let me ground the design in the actual structure before I propose anything.
+
+  Read 2 files (ctrl+o to expand)
+
+● This is a foundational re-architecture — S5's patterns become load-bearing for
+  S6–S9, so a wrong abstraction here poisons every later stage. I want to
+  design it against the real spawn/cleanup/test structure before writing a line.
+  Let me enter plan mode and do the targeted exploration that the design hinges
+  on.
+
+● Entered plan mode
+  Claude is now exploring and designing an implementation approach.
+
+● Foundational re-architecture — the abstractions I pick here become
+  load-bearing for S6 (heap), S7 (ROP), S8 (target providers). I need to
+  understand the spawn path (for the blocker-B fix), the reuse surface, and the
+  test seams before designing. Fanning out three explorers in parallel.
+
+● 3 background agents launched (↓ to manage)
+   ├ Explore GDB spawn and resource-limit seams
+   ├ Explore reuse surface and base patterns
+   └ Explore test and registration seams
+
+● Three explorers running. While they map the terrain, let me read the remaining
+  critical pieces myself — the artifact cleanup internals and the common tool
+  helpers — so I can cross-check their findings.
+
+  Read 1 file (ctrl+o to expand)
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Cooked for 4m 1s
+
+● Agent "Explore GDB spawn and resource-limit seams" failed: Agent terminated
+early due to an API error: API Error: API returned an empty or malformed
+response (HTTP 200) — check for a proxy or gateway intercepting the request
+
+● One explorer hit the same Bedrock API flakiness. Relaunching it — the other
+  two are still going.
+
+● Explore(Explore GDB spawn and kill seams)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+● Agent "Explore test and registration seams" failed: Agent terminated early due
+to an API error: API Error: API returned an empty or malformed response (HTTP
+200) — check for a proxy or gateway intercepting the request
+
+● While the explorers run, let me read the envelope contract (paomcp/api.py) and
+  the operations registry myself — these are the two seams the re-architecture
+  will lean on hardest.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && find paomcp/api
+      paomcp/operations* -type f 2>/dev/null | head; echo "---"; ls paomcp/api
+      2>/dev/null; echo "---OPS---";…)
+  ⎿  paomcp/api/models.py
+     paomcp/api/__init__.py
+     paomcp/api/__pycache__/models.cpython-312.pyc
+     … +10 lines (ctrl+o to expand)
+
+  Read 2 files (ctrl+o to expand)
+
+● Agent "Explore reuse surface and base patterns" failed: Agent terminated early
+due to an API error: API Error: API returned an empty or malformed response
+(HTTP 200) — check for a proxy or gateway intercepting the request
+
+● I now have the envelope contract (ToolResponse/build_tool_response), the
+  operations/cancellation registry, and the crash + artifact internals cold.
+  Waiting on the three explorers (reuse map, test seams, spawn/kill seams) to
+  finish before I lock the design — those determine the blocker-B fix and the
+  extraction boundaries. Let me check whether the two originals have landed.
+
+● Bash(sleep 20 && echo "waited")
+  ⎿  waited
+
+● Agent "Explore GDB spawn and kill seams" failed: Agent terminated early due to
+an API error: API Error: API returned an empty or malformed response (HTTP 200)
+— check for a proxy or gateway intercepting the request
+
+● Task Output a19f4e5b06e82fd09
+  ⎿  Error: No task found with ID: a19f4e5b06e82fd09
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && for id in a19f4e5b06e82fd09
+      a770f69d2f55752cb aea6dacc987779c91; do
+      f="C:/Users/ADMINI~1/AppData/Local/Temp/claude/D--wo…)
+  ⎿  a19f4e5b06e82fd09 : EXISTS 0 bytes
+     a770f69d2f55752cb : EXISTS 0 bytes
+     aea6dacc987779c91 : EXISTS 0 bytes
+
+● Subagents keep dying on the Bedrock flakiness — I'll stop fighting it and read
+  the remaining critical files directly. I already have the envelope,
+  operations, crash, artifacts, and pwndbg surfaces. The design hinges on four
+  unknowns: the GDB spawn path (blocker-B lever), the reusable debugger base,
+  the test doubles, and the registration checklist.
+
+  Read 2 files (ctrl+o to expand)
+
+● Critical for blocker B: GDB is spawned via
+  gdbcontroller.GdbController(command=[...]) at line 70. I need to know whether
+  pygdbmi exposes the subprocess (for preexec_fn/RLIMIT_FSIZE) and the gdb
+  process pid (for a hard kill). Checking the installed package + the test
+  doubles + the smoke test.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && python -c "import pygdbmi, os;
+      print(os.path.dirname(pygdbmi.__file__))" 2>/dev/null || find . -path
+      "*/pygdbmi/gdbcontr…)
+  ⎿  ./.venv/Lib/site-packages/pygdbmi/gdbcontroller.py
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && f=$(find . -path
+      "*/pygdbmi/IoManager.py" -o -path "*/pygdbmi/gdbcontroller.py"
+      2>/dev/null); echo "$f"; echo "=== grep…)
+  ⎿  ./.venv/Lib/site-packages/pygdbmi/gdbcontroller.py
+     ./.venv/Lib/site-packages/pygdbmi/IoManager.py
+     === grep Popen/pid/preexec across pygdbmi ===
+     … +26 lines (ctrl+o to expand)
+
+● self.controller.gdb_process is the Popen (line 55) — so I have .pid for a hard
+  SIGKILL (the writer-quiescence lever) and I can inspect the exact Popen call
+  for RLIMIT injection. Let me see the spawn call and confirm the test doubles +
+  smoke test structure.
+
+  Read 2 files (ctrl+o to expand)
+
+● Everything I need for the design is now confirmed. Let me verify the two last
+  things — the real-GDB smoke test structure and platform gating for the RLIMIT
+  approach.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "=== resource/platform
+      gating in paomcp ==="; grep -rn "import
+      resource\|sys.platform\|os.name\|preexec_fn\|RLIMIT\…)
+  ⎿  === resource/platform gating in paomcp ===
+     paomcp/paopipe.py:38:        if os.name == "nt":
+     paomcp/paopipe.py:41:            group_options = {"start_new_session":
+     … +16 lines (ctrl+o to expand)
+
+● I now have the full picture. There's already an established os.name == "nt" /
+  start_new_session preexec pattern in platform.py, decompiler.py, subproc.py,
+  paopipe.py — which is exactly the seam for the RLIMIT_FSIZE fix. And
+  self.controller.gdb_process.pid gives me the hard-kill lever. Let me read the
+  two final pieces: gdb.close() and the reusable preexec helper.
+
+  Read 2 files (ctrl+o to expand)
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Churned for 10m 2s
+
+> continue                                                                      
+● I have the full picture now — spawn path, kill lever, the existing
+  _process_group_options() preexec pattern to mirror, the reuse surface, and the
+  test doubles. Writing the plan.
+
+● Updated plan
+  ⎿  /plan to preview
+
+● Plan's written and grounded in the real spawn path, kill lever, and existing
+  preexec pattern. One genuine fork worth your call before I build: the
+  kernel-cap mechanism is POSIX-only (RLIMIT_FSIZE via a preexec_fn), and this
+  repo runs GDB under Docker/Linux — but the dev box is Windows, where that
+  enforcement can't apply.
+
+● Claude asked:
+  ⎿  · How hard should the core-size cap enforcement be? (This is the Blocker 
+     B/C fix.) → Full: RLIMIT + kill + loopback fs option
+     ● No response after 60s — continued with the answers selected so far
+
+● He picked full cap enforcement (RLIMIT + hard-kill + loopback-fs hook). For
+  the extraction scope he went idle — but the task itself ("big mindset, high
+  potential grow for other stages") answers it: full foundation module. Locking
+  both into the plan.
+
+● Updated plan
+  ⎿  /plan to preview
+
+● Updated plan
+  ⎿  /plan to preview
+
+● Plan is complete and both decisions are locked. Presenting for approval.
+
+● User approved Claude's plan
+  ⎿  Plan saved to: 
+     C:\Users\Administrator\.claude\plans\tranquil-skipping-aho.md · /plan to 
+     edit
+     S5 Re-architecture — Reusable Crash-Triage Foundation
+
+     Context
+
+     S5 (crash triage) is code-complete (~90%) and the full gate is now green
+     (black, mypy, 171 pytest passing, git diff --check clean) — Blocker A is
+     closed. But two problems remain:
+
+     1. The abstraction problem. S5's hard-won patterns — crash identity
+     (session:epoch:sequence), immutable stop records, signal-only interrupt,
+     the generated-file staging dance in save_generated_file, the conservative
+     "never claim exploitability" envelope — are currently welded into
+     CrashTriage. S6 (heap), S7 (ROP/libc), and S8 (target providers) will each
+     need the same primitives (typed backend base, envelope builder,
+     kernel-bounded
+     external-tool output, live-inferior guards). If they re-implement them, the
+     codebase forks into 4 slightly-different copies of every safety invariant.
+     2. Four verified defects from the adversarial review (3 finder findings
+     lost
+     their verifier to a Bedrock API error and were re-verified by hand against
+     the
+     real code):
+       - #2 / Blocker B — writer quiescence (HIGH, CONFIRMED). On core-dump
+     timeout, GDB may keep writing to a deleted fd after staging is unlinked,
+     with the size monitor already dead — blowing past max_size_bytes and
+     min_free_bytes until disk exhaustion. crash.py:1038-1064.
+       - #1 — stale prior-epoch stop on continue→exit (PLAUSIBLE).
+     reached_terminal_stop returns True on state=="exited" without requiring
+     a fresh record; the deque isn't cleared on exit. crash.py:385,404.
+       - #3 — _validate_elf_core accepts an 18-byte truncated stub (LOW).
+     crash.py:911-929.
+       - #4 — find_cyclic_offset endian window labels inverted for big-endian
+     integer input (LOW). crash.py:832-836.
+
+     Intended outcome: re-architect S5 so its safety primitives become an
+     explicit, tested, reusable foundation layer that S6–S8 build on directly,
+     and
+     close all four defects — including a kernel-enforced core-size cap that
+     makes
+     Blocker B structurally impossible rather than best-effort.
+
+     Key discoveries (grounding)
+
+     - GDB spawn seam. GdbController.__init__ (gdb.py:70) calls
+     gdbcontroller.GdbController(command=[...]). pygdbmi spawns via
+     subprocess.Popen(self.command, ...) (gdbcontroller.py:90) and exposes both
+     self.gdb_process (the Popen) and .pid (gdbcontroller.py:107). pygdbmi's
+     Popen call does not forward preexec_fn, so RLIMIT injection needs a
+     thin wrapper (see Approach).
+     - Existing preexec pattern to mirror: platform.py:172
+     _process_group_options()
+     and _kill_process_tree() (platform.py:178) already gate on os.name == "nt"
+     and use start_new_session / killpg(SIGKILL). Reuse this exact shape.
+     - Hard-kill lever: self.controller.gdb_process.pid → SIGKILL the gdb
+     process group. This is the true writer-quiescence guarantee.
+     - Envelope contract is centralized in build_tool_response
+     (common.py:107) + ToolResponse (api/models.py:26), but the inner
+     {success, command, state, parser_version, parsed, raw_responses} dict is
+     hand-rolled in every backend method — prime extraction candidate.
+     - Reuse base: DebuggerOperations (debugger.py) already provides
+     capture_snapshot, evaluate_expression, snapshot_deadline,
+     _memory_contents, _error_message, _raw_output, diff_snapshots.
+     - Test doubles: tests/test_crash_triage.py has FakeGdb/FakeDebugger/
+     FakeInspection — reuse and extend, do not rebuild.
+     - Registration checklist: tool modules listed in paomcp/tools/__init__.py
+     register_all_tools; tests/test_tool_descriptions.py enforces per-tool
+     invariants; capability gating in compatibility.py.
+     - Real-GDB verification: tests/docker_stage5_smoke.py builds a crashing C
+     binary, runs the full pipeline, checks core ELF + hash. This is where
+     Blocker B
+     and the RLIMIT cap get proven.
+
+     Approach
+
+     Phase 1 — Extract the reusable foundation 
+     (paomcp/tools/backends/foundation.py)
+
+     New module holding what S6/S7/S8 will import:
+
+     - build_backend_response(command, *, parsed, raw_responses, state, 
+     success=True, warnings=None, error=None, error_type=None, 
+     parser_version="1") — the single
+     inner-envelope builder. Replaces hand-rolled dicts across crash.py and
+     gives
+     later stages one shape to conform to.
+     - LiveInferiorGuard — encapsulates the record.is_live + get_inferior_pid()
+     check used by _require_crash_record / capture_crash_snapshot, so heap/ROP
+     snapshots reuse the identical staleness rule.
+     - IntegerParse helpers (parse_hex, int_from_value) — currently
+     _integer/HEX_VALUE_PATTERN private statics; heap chunk parsing needs them.
+     - Keep CrashTriage importing these — behavior-preserving extraction,
+     guarded by
+     the existing 171 tests.
+
+     ▎ Decisions locked: cap enforcement = Full (RLIMIT_FSIZE + hard-kill +
+     ▎ documented loopback-fs quota hook); extraction scope = full foundation
+     ▎ module (the task's explicit goal is maximum reuse for S6–S8).
+
+     Phase 2 — Kernel-enforced core cap + hard writer quiescence (Blocker B & C)
+
+     - GdbController spawn wrapper. Add optional fsize_limit_bytes to
+     __init__. On POSIX, pass a preexec_fn that calls
+     resource.setrlimit(RLIMIT_FSIZE, (cap, cap)) and os.setsid() — but since
+     pygdbmi's Popen ignores kwargs, wrap by subclassing/monkey-injecting the
+     command through a tiny launcher, OR (preferred, least invasive) set the
+     process into its own session and apply the rlimit via a preexec_fn
+     installed
+     by replacing self.controller.spawn_new_gdb_subprocess binding is brittle —
+     instead construct our own Popen-compatible path: subclass pygdbmi's
+     controller to inject preexec_fn/start_new_session in one overridden
+     spawn_new_gdb_subprocess. Gate entirely on os.name != "nt" (mirror
+     platform.py); on Windows the cap stays best-effort monitor-only
+     (documented).
+     - Loopback-fs quota hook (full enforcement option). Expose a documented
+     seam — ArtifactStore gains an optional enforce_dir_quota callback / config
+     so a deployment can mount a per-operation loopback filesystem (or project
+     quota / cgroup) under the staging dir for absolute enforcement. Ships as a
+     no-op default with docs in configuration.mdx; the RLIMIT path is the
+     in-process guarantee, this is the infra-level one.
+     - Hard-kill on quiescence failure. Add GdbController.kill_process_group()
+     using self.controller.gdb_process.pid + killpg(SIGKILL) (reuse
+     _kill_process_tree shape). In generate_core_file, on timeout/cap/disk
+     violation: signal → bounded wait for gdb_process.poll() → if still writing,
+     SIGKILL the gdb process group before returning, so the fd is closed and the
+     inode freed before save_generated_file's finally unlinks staging. This is
+     the structural fix: unlink can never race a live writer.
+     - With RLIMIT_FSIZE active, GDB receives SIGXFSZ at exactly cap bytes —
+     overshoot becomes 0, converting Blocker C's "best-effort monitor" into a
+     kernel guarantee. Monitor stays as defense-in-depth + progress.
+
+     Phase 3 — Correctness fixes (#1, #3, #4)
+
+     - #1 crash.py:385 — gate the crash branch on
+     record is not None and record.get("is_live") and stop["crashed"]; broaden
+     the
+     :404 guard to record is None or not record.get("is_live"). Also clear stop
+     records on thread-group-exited in gdb.py:211 so a stale prior-epoch record
+     can never resurface.
+     - #3 _validate_elf_core — add a minimum-size floor (read e_phoff/e_phnum
+     from the 64-byte header for ELF64/32) and reject files below a sane core
+     floor.
+     - #4 find_cyclic_offset — relabel windows by position
+     (leading_n/trailing_n) and, for integer input, map endian→low/high
+     correctly. Keep back-compat keys documented.
+
+     Phase 4 — Tests + real-GDB proof
+
+     - Extend tests/test_crash_triage.py: stale-exit case (#1), truncated-ELF
+     reject
+     (#3), big-endian label (#4), and a FakeGdb timeout path asserting
+     kill_process_group is called before staging removal (Blocker B unit-level).
+     - Extend tests/docker_stage5_smoke.py: add a case that forces
+     max_size_bytes below the real core size and asserts (a) SIGXFSZ/rlimit
+     aborts
+     the write, (b) no staging file survives, (c) free-space is restored —
+     proving
+     Blocker B/C on real GDB.
+     - New tests/test_foundation.py for the extracted builders.
+
+     Critical files
+
+     - paomcp/tools/backends/foundation.py — new, shared primitives.
+     - paomcp/tools/backends/gdb.py — spawn wrapper (RLIMIT_FSIZE + setsid),
+     kill_process_group(), clear stop records on exit (:211).
+     - paomcp/tools/backends/crash.py — consume foundation; fix #1/#3/#4; wire
+     hard
+     quiescence into generate_core_file.
+     - paomcp/tools/backends/platform.py — reuse _process_group_options /
+     _kill_process_tree shape (reference, maybe extract to foundation).
+     - paomcp/tools/crash.py — thread fsize_limit_bytes cap into
+     capture_core_dump.
+     - tests/test_crash_triage.py, tests/docker_stage5_smoke.py,
+     tests/test_foundation.py (new).
+
+     Verification
+
+     1. ./.venv/Scripts/python.exe -m black --check paomcp tests
+     2. ./.venv/Scripts/python.exe -m mypy paomcp
+     3. ./.venv/Scripts/python.exe -m pytest -q — expect ≥171 + new tests green.
+     4. git diff --check
+     5. Real GDB (Docker/Linux): python tests/docker_stage5_smoke.py — full
+     crash→core pipeline plus the new undersized-cap case proving RLIMIT abort +
+     staging cleanup + free-space restoration (Blocker B & C).
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Brewed for 7m 4s
+
+> continue                                                                      
+
+● Plan approved. Setting up task tracking, then building phase by phase. First I
+  need to read the remaining pieces the implementation touches — debugger.py
+  (reuse base), the gdb.py tail, and the ArtifactStore.cleanup signature.
+
+  Read 1 file (ctrl+o to expand)
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "=== debugger.py reusable
+      statics ==="; grep -n "def _integer\|HEX_VALUE\|def _memory_contents\|def
+      _error_message\…)
+  ⎿  === debugger.py reusable statics ===
+     84:class DebuggerOperations:
+     122:    def snapshot_deadline(self) -> float:
+     … +20 lines (ctrl+o to expand)
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Cooked for 3m 32s
+
+> hey continue                                                                  
+
+● Continuing. I have everything I need to build Phase 1. Creating the foundation
+  module now.
+
+  Read 1 file (ctrl+o to expand)
+● Now I have the full API surface. Building Phase 1 — the foundation module.
+  I'll extract the envelope builder, live-inferior guard, and integer parsing
+  into a clean reusable module.
+
+● Write(paomcp\tools\backends\foundation.py)
+  ⎿  Wrote 168 lines to paomcp\tools\backends\foundation.py
+         es.Reusable primitives shared across typed backend research stag
+       3 This module holds the safety and shape invariants that Stage 5 (
+       4 established and that later stages (S6 heap analysis, S7 ROP/libc
+         , S8 target
+         e copy of eacht reuse rather than re-implement.  Keeping a singl
+         ly differentevents the codebase from forking into several slight
+       7 definitions of "a valid response", "a live inferior", or "parse 
+       8 this integer".
+         eady-collectedalks to GDB directly; every helper operates on alr
+      10 values so it stays trivially unit-testable without a debugger.
+     … +192 lines (ctrl+o to expand)
+
+● Now refactor crash.py to consume the foundation — behavior-preserving. I'll
+  replace the private _integer/_mapping_for statics and the hand-rolled dicts
+  with the shared helpers. Starting with the imports and the integer/mapping
+  helpers.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 6 lines
+      14  
+      15  from paomcp.artifacts import ArtifactSizeLimitError, ArtifactSt
+          orageFullError
+      16  from paomcp.tools.backends.debugger import DebuggerOperations
+      17 +from paomcp.tools.backends.foundation import (                 
+      18 +    LiveInferiorError,                                         
+      19 +    LiveInferiorGuard,                                         
+      20 +    mapping_for,                                               
+      21 +    parse_int,                                                 
+      22 +)                                                              
+      23  from paomcp.tools.backends.gdb import GdbController
+      24  from paomcp.tools.backends.inspection import PwndbgInspection
+      25  
+
+● API Error: Opus 4.8's safeguards flagged this message for a 
+  cybersecurity topic. If your work requires this access, you can apply 
+  for an exemption: https://claude.com/form/cyber-use-case
+
+  Please double press esc to edit your last message or start a new 
+  session for Claude Code to assist with a different task.
+
+  Send feedback with /feedback or learn more: 
+  https://support.claude.com/en/articles/8106465
+
+✻ Baked for 3m 40s
+
+> tiếp tục                                                                      
+
+● Now delegate _integer and _mapping_for to the shared helpers, keeping the same
+  call sites working.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 1 line, removed 9 lines
+      439  
+      440      @staticmethod
+      441      def _integer(value: Any) -> Optional[int]:
+      442 -        if value is None:                                     
+      443 -            return None                                       
+      444 -        match = HEX_VALUE_PATTERN.search(str(value))          
+      445 -        if match is not None:                                 
+      446 -            return int(match.group(0), 16)                    
+      447 -        try:                                                  
+      448 -            return int(str(value), 0)                         
+      449 -        except (TypeError, ValueError):                       
+      450 -            return None                                       
+      442 +        return parse_int(value)                               
+      443  
+      444      @staticmethod
+      445      def _register_map(snapshot: Dict[str, Any]) -> Dict[str, A
+           ny]:
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 1 line, removed 13 lines
+      466      def _mapping_for(
+      467          value: Optional[int], mappings: Sequence[Any]
+      468      ) -> Optional[Dict[str, Any]]:
+      469 -        if value is None:                                     
+      470 -            return None                                       
+      471 -        for item in mappings:                                 
+      472 -            if not isinstance(item, dict):                    
+      473 -                continue                                      
+      474 -            try:                                              
+      475 -                start = int(str(item.get("start")), 16)       
+      476 -                end = int(str(item.get("end")), 16)           
+      477 -            except (TypeError, ValueError):                   
+      478 -                continue                                      
+      479 -            if start <= value < end:                          
+      480 -                return dict(item)                             
+      481 -        return None                                           
+      469 +        return mapping_for(value, mappings)                   
+      470  
+      471      def _fault_address(self) -> Dict[str, Any]:
+      472          attempts: Dict[str, Any] = {}
+
+● Now use LiveInferiorGuard in the two live-check sites — _require_crash_record
+  and capture_crash_snapshot. This is the shared staleness rule S6/S7 will
+  reuse.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 9 lines, removed 3 lines
+      512          if not 1 <= stack_bytes <= MAX_STACK_BYTES:
+      513              raise ValueError(f"stack_bytes must be between 1 a
+           nd {MAX_STACK_BYTES}")
+      514          record = self._require_crash_record(expected_crash_id)
+      515 -        if not record.get("is_live") or self.gdb.get_inferior_
+          -pid() is None:                                                
+      516 -            raise CrashRecordError(                           
+      517 -                "Crash record is no longer attached to a stopp
+          -ed live inferior"                                             
+      515 +        try:                                                  
+      516 +            LiveInferiorGuard.require_live(                   
+      517 +                record,                                       
+      518 +                self.gdb.get_inferior_pid(),                  
+      519 +                detail=(                                      
+      520 +                    "Crash record is no longer attached to a s
+          +topped live inferior"                                         
+      521 +                ),                                            
+      522              )
+      523 +        except LiveInferiorError as exc:                      
+      524 +            raise CrashRecordError(str(exc)) from exc         
+      525          if cancellation_check is not None:
+      526              cancellation_check()
+      527  
+
+● API Error: 400 InvokeModelWithResponseStream: operation error Bedrock 
+  Runtime: InvokeModelWithResponseStream, https response error 
+  StatusCode: 400, RequestID: 5aa3285c-6846-4959-a925-37984d5de288, 
+  ValidationException: ***.***.***.***.***.thinking: Field required 
+  (request id: 20260722095636775829206ExcdttIO) (request id: 
+  20260722095600651196738pqrnvUUT) 
+  [trace_id=83d4c909e23ec2ff0644e224a88d8066] (request id: 
+  20260722175439626454079x7hlpGMwfPuRW)
+
+✻ Baked for 2m 57s
+
+> cotninue                                                                      
+
+● Now the second live-check site in generate_core_file, plus remove the
+  now-unused HEX_VALUE_PATTERN.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 7 lines, removed 3 lines
+      933      ) -> Dict[str, Any]:
+      934          """Use GDB CLI to generate one monitored core file at 
+           a trusted path."""
+      935          record = self._require_crash_record(expected_crash_id)
+      936 -        if not record.get("is_live") or self.gdb.get_inferior_
+          -pid() is None:                                                
+      937 -            raise CrashRecordError(                           
+      938 -                "Core capture requires the exact current stopp
+          -ed live crash"                                                
+      936 +        try:                                                  
+      937 +            LiveInferiorGuard.require_live(                   
+      938 +                record,                                       
+      939 +                self.gdb.get_inferior_pid(),                  
+      940 +                detail="Core capture requires the exact curren
+          +t stopped live crash",                                        
+      941              )
+      942 +        except LiveInferiorError as exc:                      
+      943 +            raise CrashRecordError(str(exc)) from exc         
+      944          cap = (
+      945              self.max_core_dump_bytes if max_size_bytes is None
+            else int(max_size_bytes)
+      946          )
+
+● API Error: 400 InvokeModelWithResponseStream: operation error Bedrock 
+  Runtime: InvokeModelWithResponseStream, https response error 
+  StatusCode: 400, RequestID: 05382d8e-c4e4-491b-af02-d275499b7fac, 
+  ValidationException: ***.***.***.***.***.thinking: Field required 
+  (request id: 2026072209583341160IIVi0ECW) (request id: 
+  202607220958002148140279kJmorzY) 
+  [trace_id=9bda421bde4180b58ea6c6bda2381e2d] (request id: 
+  20260722175744944224863x7hlpqqK2OBWf)
+
+✻ Crunched for 1m 10s
+
+> cotninue                                                                      
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Removed 1 line
+      29      {"SIGSEGV", "SIGABRT", "SIGBUS", "SIGILL", "SIGFPE", "SIGSY
+          S"}
+      30  )
+      31  SAFE_SIGNAL_PATTERN = re.compile(r"^SIG[A-Z0-9]{1,31}$")
+      32 -HEX_VALUE_PATTERN = re.compile(r"0x[0-9a-fA-F]+")              
+      32  MAX_RUN_TIMEOUT_SECONDS = 60 * 60
+      33  DEFAULT_RUN_TIMEOUT_SECONDS = float(
+      34      os.environ.get("PAO_CRASH_RUN_TIMEOUT_SECONDS", "60")
+
+● Phase 1 core done. Quick gate check on Phase 1 before moving to Phase 2, to
+  catch any breakage early.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -m
+      pytest -q tests/test_crash_triage.py 2>&1 | tail -15 && echo "=== MYPY
+      foundation+crash ==…)
+  ⎿  .........
+        [100%]
+     9 passed in 1.43s
+     … +2 lines (ctrl+o to expand)
+
+● Phase 1 green — 9/9 crash tests, mypy clean. Marking it done, starting Phase 2
+  (the real meat: kernel cap + hard quiescence). First I need the exact gdb.py
+  tail and the pygdbmi exit() to design the spawn wrapper and kill path.
+
+  Read 1 file (ctrl+o to expand)
+● self.controller.gdb_process gives me the Popen + pid, and exit() uses
+  terminate. My cleanest lever: subclass pygdbmi's controller to override
+  spawn_new_gdb_subprocess with a preexec_fn (RLIMIT_FSIZE + setsid on POSIX).
+  Let me confirm the IoManager import path, then build it.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && head -30
+      .venv/Lib/site-packages/pygdbmi/gdbcontroller.py | grep -n
+      "import\|DEFAULT_GDB\|class GdbController"; echo "==…)
+  ⎿  6:import logging
+     7:import shutil
+     8:import subprocess
+     … +15 lines (ctrl+o to expand)
+
+● Now I'll build the resource-limited controller. I'll add it to gdb.py — a
+  subclass that overrides spawn_new_gdb_subprocess to inject preexec_fn
+  (RLIMIT_FSIZE + setsid) on POSIX, plus the GdbController wiring for
+  fsize_limit_bytes and kill_process_group().
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 76 lines, removed 1 line
+        8  
+        9  import logging
+       10  import os
+       11 +import signal                                                 
+       12 +import subprocess                                             
+       13  import time
+       14  from collections import deque
+       15  from dataclasses import dataclass
+       16  from datetime import datetime, timezone
+       17  from types import MappingProxyType
+       16 -from typing import Any, Deque, Dict, List, Mapping, Optional, 
+          -Tuple                                                         
+       18 +from typing import Any, Callable, Deque, Dict, List, Mapping, 
+          +Optional, Tuple                                               
+       19  
+       20  from pygdbmi import gdbcontroller
+       21 +from pygdbmi.IoManager import IoManager                       
+       22  from pygdbmi.constants import GdbTimeoutError
+       23  
+       24  logger = logging.getLogger(__name__)
+       25  
+       26  DEFAULT_STOP_RECORD_LIMIT = 64
+       27  
+       28 +# On POSIX the gdb process is placed in its own session so the
+          + whole process                                                
+       29 +# group can be signalled at once; Windows has no fork/preexec,
+          + so the resource                                              
+       30 +# limit and group-kill degrade to best-effort termination of t
+          +he gdb process.                                               
+       31 +_POSIX = os.name != "nt"                                      
+       32  
+       33 +                                                              
+       34 +def _make_gdb_preexec(fsize_limit_bytes: Optional[int]) -> Opt
+          +ional[Callable[[], None]]:                                    
+       35 +    """Build a POSIX ``preexec_fn`` that isolates and bounds t
+          +he gdb child.                                                 
+       36 +                                                              
+       37 +    ``os.setsid`` gives gdb its own session/process group so a
+          + later                                                        
+       38 +    group-directed SIGKILL cannot escape back to the server, a
+          +nd                                                            
+       39 +    ``RLIMIT_FSIZE`` makes the kernel raise ``SIGXFSZ`` the in
+          +stant a written                                               
+       40 +    file (a core dump) would exceed the cap.  That converts th
+          +e core-size limit                                             
+       41 +    from a best-effort polling monitor into a hard kernel guar
+          +antee with zero                                               
+       42 +    overshoot.  Returns ``None`` on non-POSIX platforms where 
+          +neither primitive                                             
+       43 +    exists.                                                   
+       44 +    """                                                       
+       45 +    if not _POSIX:                                            
+       46 +        return None                                           
+       47 +                                                              
+       48 +    def preexec() -> None:  # pragma: no cover - runs only in 
+          +the forked child                                              
+       49 +        os.setsid()                                           
+       50 +        if fsize_limit_bytes is not None and fsize_limit_bytes
+          + > 0:                                                         
+       51 +            import resource                                   
+       52 +                                                              
+       53 +            capped = int(fsize_limit_bytes)                   
+       54 +            hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1
+          +]                                                             
+       55 +            if hard != resource.RLIM_INFINITY:                
+       56 +                capped = min(capped, hard)                    
+       57 +            resource.setrlimit(resource.RLIMIT_FSIZE, (capped,
+          + capped))                                                     
+       58 +                                                              
+       59 +    return preexec                                            
+       60 +                                                              
+       61 +                                                              
+       62 +class _ResourceLimitedController(gdbcontroller.GdbController):
+       63 +    """pygdbmi controller that spawns gdb with a preexec hook.
+       64 +                                                              
+       65 +    pygdbmi's own ``Popen`` call forwards no process-creation 
+          +kwargs, so the                                                
+       66 +    only clean seam for applying ``RLIMIT_FSIZE``/``setsid`` i
+          +s to override the                                             
+       67 +    single spawn method.  The body mirrors upstream exactly ex
+          +cept for the two                                              
+       68 +    injected keyword arguments, keeping us forward-compatible 
+          +with the pinned                                               
+       69 +    pygdbmi version.                                          
+       70 +    """                                                       
+       71 +                                                              
+       72 +    def __init__(self, *args: Any, fsize_limit_bytes: Optional
+          +[int] = None, **kwargs: Any) -> None:                         
+       73 +        self._fsize_limit_bytes = fsize_limit_bytes           
+       74 +        super().__init__(*args, **kwargs)                     
+       75 +                                                              
+       76 +    def spawn_new_gdb_subprocess(self) -> int:                
+       77 +        if self.gdb_process:                                  
+       78 +            self.exit()                                       
+       79 +        preexec = _make_gdb_preexec(self._fsize_limit_bytes)  
+       80 +        popen_kwargs: Dict[str, Any] = {                      
+       81 +            "shell": False,                                   
+       82 +            "stdout": subprocess.PIPE,                        
+       83 +            "stdin": subprocess.PIPE,                         
+       84 +            "stderr": subprocess.PIPE,                        
+       85 +            "bufsize": 0,                                     
+       86 +        }                                                     
+       87 +        if preexec is not None:                               
+       88 +            popen_kwargs["preexec_fn"] = preexec              
+       89 +        self.gdb_process = subprocess.Popen(self.command, **po
+          +pen_kwargs)                                                   
+       90 +        assert self.gdb_process.stdin is not None             
+       91 +        assert self.gdb_process.stdout is not None            
+       92 +        self.io_manager = IoManager(                          
+       93 +            self.gdb_process.stdin,                           
+       94 +            self.gdb_process.stdout,                          
+       95 +            self.gdb_process.stderr,                          
+       96 +            self.time_to_check_for_additional_output_sec,     
+       97 +        )                                                     
+       98 +        return self.gdb_process.pid                           
+       99 +                                                              
+      100 +                                                              
+      101  @dataclass(frozen=True)
+      102  class _StopRecord:
+      103      """One immutable snapshot of a GDB/MI ``stopped`` notifica
+           tion."""
+
+● Now wire fsize_limit_bytes into GdbController.__init__ and use the new
+  controller.
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 13 lines, removed 3 lines
+      135  class GdbController:
+      136      """Manages GDB instance and command execution via Machine 
+           Interface"""
+      137  
+      138 -    def __init__(self, pwndbg_executable: str = "pwndbg"):    
+      138 +    def __init__(                                             
+      139 +        self,                                                 
+      140 +        pwndbg_executable: str = "pwndbg",                    
+      141 +        *,                                                    
+      142 +        fsize_limit_bytes: Optional[int] = None,              
+      143 +    ):                                                        
+      144          """
+      145          Initialize GDB controller
+      146  
+      147          Args:
+      148              pwndbg_executable: Path to the pwndbg executable.
+      149 +            fsize_limit_bytes: Optional POSIX ``RLIMIT_FSIZE``
+          + cap applied to the                                           
+      150 +                gdb child so kernel-enforced core-size limits 
+          +are possible. On                                              
+      151 +                Windows this is accepted but not enforced (no 
+          +preexec/rlimit).                                              
+      152          """
+      145 -        self.controller = gdbcontroller.GdbController(        
+      146 -            command=[pwndbg_executable, "--interpreter=mi3", "
+          ---quiet"]                                                     
+      153 +        self._fsize_limit_bytes = fsize_limit_bytes           
+      154 +        self.controller = _ResourceLimitedController(         
+      155 +            command=[pwndbg_executable, "--interpreter=mi3", "
+          +--quiet"],                                                    
+      156 +            fsize_limit_bytes=fsize_limit_bytes,              
+      157          )
+      158          self._initialized = False
+      159          self._inferior_pid: Optional[int] = None
+
+● Now add kill_process_group() and wait_for_writer_quiescence() near close().
+  Let me read the current tail region.
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 77 lines
+      768          """Return a monotonic counter for observed inferior st
+           art/exit events."""
+      769          return self._inferior_epoch
+      770  
+      771 +    def get_gdb_process_pid(self) -> Optional[int]:           
+      772 +        """Return the OS pid of the gdb process itself (not th
+          +e inferior)."""                                               
+      773 +        controller = getattr(self, "controller", None)        
+      774 +        process = getattr(controller, "gdb_process", None) if 
+          +controller else None                                          
+      775 +        pid = getattr(process, "pid", None)                   
+      776 +        try:                                                  
+      777 +            return int(pid) if pid is not None else None      
+      778 +        except (TypeError, ValueError):                       
+      779 +            return None                                       
+      780 +                                                              
+      781 +    def gdb_process_running(self) -> Optional[bool]:          
+      782 +        """Return whether the gdb process is still alive, or N
+          +one if unknown."""                                            
+      783 +        controller = getattr(self, "controller", None)        
+      784 +        process = getattr(controller, "gdb_process", None) if 
+          +controller else None                                          
+      785 +        if process is None or not hasattr(process, "poll"):   
+      786 +            return None                                       
+      787 +        return process.poll() is None                         
+      788 +                                                              
+      789 +    def kill_process_group(self) -> Dict[str, Any]:           
+      790 +        """Forcibly terminate the gdb process (and its group o
+          +n POSIX).                                                     
+      791 +                                                              
+      792 +        This is the writer-quiescence guarantee: after a core-
+          +dump command has                                              
+      793 +        timed out or violated a size/disk limit, a cooperative
+          + SIGINT may not                                               
+      794 +        stop gdb before its open core file descriptor keeps gr
+          +owing on disk.                                                
+      795 +        SIGKILL-ing the whole session guarantees the descripto
+          +r is closed — and                                             
+      796 +        therefore the on-disk inode is released — before any s
+          +taging cleanup                                                
+      797 +        unlinks the path.                                     
+      798 +        """                                                   
+      799 +        pid = self.get_gdb_process_pid()                      
+      800 +        if pid is None:                                       
+      801 +            return {"success": False, "error": "No gdb process
+          + pid is available"}                                           
+      802 +        killed_group = False                                  
+      803 +        if _POSIX:                                            
+      804 +            try:                                              
+      805 +                os.killpg(os.getpgid(pid), signal.SIGKILL)    
+      806 +                killed_group = True                           
+      807 +            except OSError:                                   
+      808 +                killed_group = False                          
+      809 +        if not killed_group:                                  
+      810 +            controller = getattr(self, "controller", None)    
+      811 +            process = getattr(controller, "gdb_process", None)
+          + if controller else None                                      
+      812 +            if process is not None:                           
+      813 +                try:                                          
+      814 +                    process.kill()                            
+      815 +                except OSError as exc:                        
+      816 +                    return {"success": False, "error": str(exc
+          +), "pid": pid}                                                
+      817 +        controller = getattr(self, "controller", None)        
+      818 +        process = getattr(controller, "gdb_process", None) if 
+          +controller else None                                          
+      819 +        if process is not None and hasattr(process, "wait"):  
+      820 +            try:                                              
+      821 +                process.wait(timeout=5)                       
+      822 +            except Exception:  # noqa: BLE001 - best-effort re
+          +ap of a killed child                                          
+      823 +                pass                                          
+      824 +        self._state = "exited"                                
+      825 +        return {"success": True, "pid": pid, "killed_group": k
+          +illed_group}                                                  
+      826 +                                                              
+      827 +    def wait_for_writer_quiescence(                           
+      828 +        self, *, timeout_sec: float = 2.0, poll_interval: floa
+          +t = 0.02                                                      
+      829 +    ) -> bool:                                                
+      830 +        """Wait until the gdb process has exited; return True 
+          +once it has.                                                  
+      831 +                                                              
+      832 +        Callers use this after signalling gdb to confirm the p
+          +rocess is truly                                               
+      833 +        gone before treating an open output file as safe to un
+          +link.  Returns                                                
+      834 +        False if gdb is still alive when the timeout elapses (
+          +the caller should                                             
+      835 +        then escalate to :meth:`kill_process_group`).         
+      836 +        """                                                   
+      837 +        running = self.gdb_process_running()                  
+      838 +        if running is None:                                   
+      839 +            return True                                       
+      840 +        deadline = time.monotonic() + max(0.0, timeout_sec)   
+      841 +        while running:                                        
+      842 +            if time.monotonic() >= deadline:                  
+      843 +                return False                                  
+      844 +            time.sleep(max(0.0, poll_interval))               
+      845 +            running = self.gdb_process_running()              
+      846 +        return True                                           
+      847 +                                                              
+      848      def close(self):
+      849          """Clean up GDB controller"""
+      850          if hasattr(self, "controller"):
+
+● Now the critical wiring: in generate_core_file, on any violation/timeout,
+  escalate to hard quiescence before returning (so save_generated_file's finally
+  can't race a live writer). Let me re-read the current timeout/violation block
+  with fresh line numbers.
+
+  Read 1 file (ctrl+o to expand)
+
+● I'll add a hard-quiescence helper and call it on every abnormal path so GDB is
+  provably dead before the exception reaches save_generated_file's unlink. Let
+  me read the signal_core_writer region first.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I'll add the _ensure_writer_quiescent helper after signal_core_writer, and
+  call it on all abnormal-exit paths. This is the structural Blocker-B fix.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 18 lines
+       985                      )
+       986                  )
+       987  
+       988 +        def ensure_writer_quiescent() -> None:               
+       989 +            """Guarantee gdb has stopped writing before stagi
+           +ng can be unlinked.                                          
+       990 +                                                             
+       991 +            After signalling, a cooperative SIGINT may not st
+           +op gdb mid-write of                                          
+       992 +            a large core: on POSIX the file would remain open
+           + and, once staging                                           
+       993 +            is unlinked, keep consuming disk through the dele
+           +ted descriptor with                                          
+       994 +            the size monitor already gone.  We therefore wait
+           + a bounded time for                                          
+       995 +            the gdb process to exit and, if it has not, SIGKI
+           +LL its process                                               
+       996 +            group so the descriptor is closed and the inode r
+           +eleased before the                                           
+       997 +            caller's cleanup runs.                           
+       998 +            """                                              
+       999 +            waiter = getattr(self.gdb, "wait_for_writer_quies
+           +cence", None)                                                
+      1000 +            if callable(waiter) and waiter(timeout_sec=2.0): 
+      1001 +                return                                       
+      1002 +            killer = getattr(self.gdb, "kill_process_group", 
+           +None)                                                        
+      1003 +            if callable(killer):                             
+      1004 +                killer()                                     
+      1005 +                                                             
+      1006          def monitor() -> None:
+      1007              nonlocal last_reported
+      1008              while not monitor_done.wait(0.05):
+
+● API Error: 400 InvokeModelWithResponseStream: operation error Bedrock 
+  Runtime: InvokeModelWithResponseStream, https response error 
+  StatusCode: 400, RequestID: 1efb31d3-97a8-4d4c-918c-d5cd79463bf1, 
+  ValidationException: ***.***.***.***.***.thinking: Field required 
+  (request id: 20260722101110213384989No4bfF1p) (request id: 
+  20260722101037150461143CGQKobod) 
+  [trace_id=87438540360126d9755602a8a5bf8bfb] (request id: 
+  2026072218102074435914477q4c11lcXE0A)
+
+✻ Worked for 12m 16s
+
+> tiếp                                                                          
+
+● Now wire ensure_writer_quiescent() into the abnormal-exit paths: after the
+  monitor-violation signal, after monitor-stuck, and on timeout.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 1 line
+      1039                      )
+      1040                  if violation:
+      1041                      signal_core_writer()
+      1042 +                    ensure_writer_quiescent()                
+      1043                      return
+      1044  
+      1045          watcher = threading.Thread(
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 5 lines
+      1054                  # The original write call has relinquished th
+            e MI response
+      1055                  # stream, so it is now safe to signal and dra
+            in synchronously.
+      1056                  timeout_interrupt = self.gdb.interrupt(timeou
+            t_sec=1.0)
+      1057 +                # A timed-out generate-core-file may still ho
+           +ld the output file                                           
+      1058 +                # open; guarantee the writer is gone before a
+           +ny cleanup unlinks                                           
+      1059 +                # the staging path.                          
+      1060 +                ensure_writer_quiescent()                    
+      1061          finally:
+      1062              monitor_done.set()
+      1063              watcher.join(timeout=2)
+      1064          elapsed_ms = int((time.monotonic() - started) * 1000)
+      1065          if watcher.is_alive():
+      1066              signal_core_writer()
+      1067 +            ensure_writer_quiescent()                        
+      1068              raise CoreDumpGenerationError(
+      1069                  "Core monitor did not terminate; staging clea
+            nup requires manual "
+      1070                  "runtime validation"
+
+● Now the loopback-fs quota hook in ArtifactStore, and threading
+  fsize_limit_bytes into core capture. First let me see how GdbController /
+  PwndbgTools get the cap, and how sessions create the controller. Then wire the
+  cap from the core-dump cap → the gdb spawn. Actually the cap is
+  per-core-dump, but RLIMIT is set at spawn — so the practical design: apply a
+  session-level fsize_limit_bytes = the configured max core dump bytes at
+  controller construction. Let me check session creation.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && grep -rn "GdbController(" paomcp/
+      | grep -v "class GdbController\|_ResourceLimited"; echo "=== session gdb
+      creation ==="…)
+  ⎿  paomcp/state/registry.py:104:            gdb = GdbController()
+     === session gdb creation ===
+
+  Read 1 file (ctrl+o to expand)
+
+● I'll wire an env-configured session-level FSIZE cap into the registry's
+  GdbController. Let me check the registry's config surface and env patterns.
+
+  Read 1 file (ctrl+o to expand)
+
+● I'll add an env-driven FSIZE cap constant and pass it to the controller. The
+  cap ties to the max core dump bytes (that's the largest legitimate file GDB
+  writes).
+
+● Update(paomcp\state\registry.py)
+  ⎿  Added 19 lines
+      18  DEFAULT_MAX_DEBUG_SESSIONS = int(os.environ.get("PAO_MAX_DEBUG_
+          SESSIONS", "8"))
+      19  
+      20  
+      21 +def _configured_fsize_limit_bytes() -> Optional[int]:          
+      22 +    """Resolve the optional POSIX RLIMIT_FSIZE cap for each gdb
+         + child.                                                        
+      23 +                                                               
+      24 +    Defaults to the maximum permitted core-dump size so kernel 
+         +enforcement and                                                
+      25 +    the artifact-layer hard cap agree.  Set ``PAO_GDB_FSIZE_LIM
+         +IT_BYTES=0`` to                                                
+      26 +    disable kernel enforcement (falling back to the polling mon
+         +itor only).                                                    
+      27 +    """                                                        
+      28 +    raw = os.environ.get("PAO_GDB_FSIZE_LIMIT_BYTES")          
+      29 +    if raw is None:                                            
+      30 +        raw = os.environ.get(                                  
+      31 +            "PAO_MAX_CORE_DUMP_BYTES", str(1024 * 1024 * 1024) 
+      32 +        )                                                      
+      33 +    try:                                                       
+      34 +        value = int(raw)                                       
+      35 +    except (TypeError, ValueError):                            
+      36 +        return None                                            
+      37 +    return value if value > 0 else None                        
+      38 +                                                               
+      39 +                                                               
+      40  class SessionLimitError(RuntimeError):
+      41      """Raised when no additional debugger session can be alloca
+          ted."""
+      42  
+
+● Update(paomcp\state\registry.py)
+  ⎿  Added 1 line, removed 1 line
+      120                  )
+      121  
+      122              runtime_dir = self._runtime_dir_for(chosen_id)
+      123 -            gdb = GdbController()                             
+      123 +            gdb = GdbController(fsize_limit_bytes=_configured_
+          +fsize_limit_bytes())                                          
+      124              try:
+      125                  gdb.initialize()
+      126                  state = SessionState(session_id=chosen_id)
+● Now the loopback-fs quota hook in ArtifactStore — a documented, no-op-default
+  seam. Add an optional dir_quota_enforcer callback invoked in
+  save_generated_file before generation.
+
+● Update(paomcp\artifacts.py)
+  ⎿  Added 1 line
+      104          cleanup_interval_seconds: float = DEFAULT_ARTIFACT_CLE
+           ANUP_INTERVAL_SECONDS,
+      105          min_free_bytes: int = DEFAULT_ARTIFACT_MIN_FREE_BYTES,
+      106          orphan_grace_seconds: float = DEFAULT_ARTIFACT_ORPHAN_
+           GRACE_SECONDS,
+      107 +        dir_quota_enforcer: Optional[Callable[[str, int], None
+          +]] = None,                                                    
+      108      ):
+      109          if inline_response_bytes < 0:
+      110              raise ValueError("inline_response_bytes cannot be 
+           negative")
+
+● Update(paomcp\artifacts.py)
+  ⎿  Added 7 lines
+      134          self.cleanup_interval_seconds = cleanup_interval_secon
+           ds
+      135          self.min_free_bytes = min_free_bytes
+      136          self.orphan_grace_seconds = orphan_grace_seconds
+      137 +        # Optional absolute-enforcement seam.  A deployment ca
+          +n supply a callback                                           
+      138 +        # ``(staging_dir, max_size_bytes) -> None`` that provi
+          +sions a per-operation                                         
+      139 +        # loopback filesystem, project quota, or cgroup storag
+          +e limit under the                                             
+      140 +        # staging directory.  This complements the in-process 
+          +RLIMIT_FSIZE cap                                              
+      141 +        # (kernel-enforced per gdb child) with an infrastructu
+          +re-enforced ceiling.                                          
+      142 +        # Default is a no-op; the RLIMIT path remains the prim
+          +ary guarantee.                                                
+      143 +        self.dir_quota_enforcer = dir_quota_enforcer          
+      144          self._lock = threading.RLock()
+      145          # Reentrant because save operations reserve capacity t
+           hrough cleanup while
+      146          # holding the same lock.  Reconciliation, retention cl
+           eanup, and every
+
+● Now invoke the enforcer inside save_generated_file right before generation
+  (after preflight cleanup).
+
+● Update(paomcp\artifacts.py)
+  ⎿  Added 5 lines
+      440              with self._write_lock:
+      441                  preflight = self.cleanup(incoming_size=reserve
+           _bytes)
+      442                  self._raise_for_capacity(preflight)
+      443 +                if self.dir_quota_enforcer is not None:       
+      444 +                    # Give a deployment-supplied enforcer a ch
+          +ance to bound the                                             
+      445 +                    # staging directory (loopback fs / project
+          + quota / cgroup)                                              
+      446 +                    # before the trusted generator starts writ
+          +ing.                                                          
+      447 +                    self.dir_quota_enforcer(self.root_dir, max
+          +_size_bytes)                                                  
+      448                  if cancellation_check is not None:
+      449                      cancellation_check()
+      450  
+
+● Phase 2 wiring done. Gate-check now before Phase 3, to catch any regressions
+  from the spawn wrapper and artifact changes.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -m
+      pytest -q tests/test_crash_triage.py tests/test_gdb_controller.py
+      tests/test_artifacts.py…)
+  ⎿  ...................................
+        [100%]
+     35 passed in 1.25s
+     … +16 lines (ctrl+o to expand)
+
+● Tests green (35 passed). The mypy errors are Windows-only — mypy sees
+  os.setsid/resource don't exist on nt. These are POSIX-only paths gated at
+  runtime by _POSIX. I'll guard them with getattr-style access + targeted
+  ignores so mypy passes cross-platform. Let me fix the resource/os attribute
+  access.
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 1 line, removed 1 line
+      46          return None
+      47  
+      48      def preexec() -> None:  # pragma: no cover - runs only in t
+          he forked child
+      49 -        os.setsid()                                            
+      49 +        os.setsid()  # type: ignore[attr-defined]              
+      50          if fsize_limit_bytes is not None and fsize_limit_bytes 
+          > 0:
+      51              import resource
+      52  
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 4 lines, removed 1 line
+      802          killed_group = False
+      803          if _POSIX:
+      804              try:
+      805 -                os.killpg(os.getpgid(pid), signal.SIGKILL)    
+      805 +                killpg = getattr(os, "killpg")                
+      806 +                getpgid = getattr(os, "getpgid")              
+      807 +                sigkill = int(getattr(signal, "SIGKILL", signa
+          +l.SIGTERM))                                                   
+      808 +                killpg(getpgid(pid), sigkill)                 
+      809                  killed_group = True
+      810              except OSError:
+      811                  killed_group = False
+
+● resource import still needs guarding — it doesn't exist on Windows. I'll
+  import it via a guarded top-level pattern so mypy resolves attributes on the
+  module correctly.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -m
+      mypy paomcp/tools/backends/gdb.py 2>&1 | tail -15)
+  ⎿  paomcp\tools\backends\gdb.py:54: error: Module has no attribute "getrl
+     imit"  [attr-defined]
+     paomcp\tools\backends\gdb.py:54: error: Module has no attribute "RLIMI
+     … +8 lines (ctrl+o to expand)
+
+● The resource module attributes fail on Windows mypy. I'll access them via
+  getattr to keep it cross-platform clean (this whole block only runs in the
+  POSIX forked child anyway).
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 7 lines, removed 3 lines
+      50          if fsize_limit_bytes is not None and fsize_limit_bytes 
+          > 0:
+      51              import resource
+      52  
+      53 +            rlimit_fsize = getattr(resource, "RLIMIT_FSIZE")   
+      54 +            rlim_infinity = getattr(resource, "RLIM_INFINITY") 
+      55 +            getrlimit = getattr(resource, "getrlimit")         
+      56 +            setrlimit = getattr(resource, "setrlimit")         
+      57              capped = int(fsize_limit_bytes)
+      54 -            hard = resource.getrlimit(resource.RLIMIT_FSIZE)[1]
+      55 -            if hard != resource.RLIM_INFINITY:                 
+      58 +            hard = getrlimit(rlimit_fsize)[1]                  
+      59 +            if hard != rlim_infinity:                          
+      60                  capped = min(capped, hard)
+      57 -            resource.setrlimit(resource.RLIMIT_FSIZE, (capped, 
+         -capped))                                                       
+      61 +            setrlimit(rlimit_fsize, (capped, capped))          
+      62  
+      63      return preexec
+      64  
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -m
+      mypy paomcp 2>&1 | tail -8)
+  ⎿  Success: no issues found in 54 source files
+
+● mypy clean across all 54 files (foundation.py added). Phase 2 done. Marking it
+  and starting Phase 3 — the three correctness fixes. First #1: gate the crash
+  branch on liveness + clear stop records on exit.
+
+  Read 1 file (ctrl+o to expand)
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Churned for 11m 49s
+
+> continue                                                                      
+
+● Fix #1: gate the crash branch on live record, and broaden the exit guard.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 19 lines, removed 5 lines
+      387              },
+      388              "raw_responses": {"launch": launch_result, "events
+           ": event_responses},
+      389          }
+      390 -        if stop["crashed"] and crash_id is not None:          
+      390 +        record_is_live = LiveInferiorGuard.is_live(           
+      391 +            record, self.gdb.get_inferior_pid()               
+      392 +        )                                                     
+      393 +        if stop["crashed"] and crash_id is not None and record
+          +_is_live:                                                     
+      394              initial_snapshot = self.capture_crash_snapshot(
+      395                  crash_id,
+      396                  stack_bytes=256,
+     ...
+      409              )
+      410              if initial_snapshot.get("warnings"):
+      411                  response.setdefault("warnings", []).extend(ini
+           tial_snapshot["warnings"])
+      409 -        if self.gdb.get_state() == "exited" and record is None
+          -:                                                             
+      410 -            response.setdefault("warnings", []).append(       
+      411 -                "Inferior exited without a retained stopped no
+          -tification"                                                   
+      412 -            )                                                 
+      412 +        if record is None or not record_is_live:              
+      413 +            # A terminal exit (including ``continue`` -> exit)
+          + may leave the last                                           
+      414 +            # crash record from a *previous* inferior in place
+          +.  We never treat a                                           
+      415 +            # non-live record as a fresh crash, and we surface
+          + why.                                                         
+      416 +            if stop["crashed"] and crash_id is not None:      
+      417 +                response["parsed"]["crashed"] = False         
+      418 +                response["parsed"]["stop"] = {**stop, "crashed
+          +": False}                                                     
+      419 +                response.setdefault("warnings", []).append(   
+      420 +                    "The most recent stop record is not attach
+          +ed to a live "                                                
+      421 +                    "inferior; it was not treated as a current
+          + crash"                                                       
+      422 +                )                                             
+      423 +            else:                                             
+      424 +                response.setdefault("warnings", []).append(   
+      425 +                    "Inferior exited without a retained live s
+          +topped notification"                                          
+      426 +                )                                             
+      427          elif not stop["crashed"]:
+      428              response.setdefault("warnings", []).append(
+      429                  "Execution stopped, but the stop is not classi
+           fied as a crash; "
+
+● Now clear stop records on thread-group-exited in gdb.py:211 so a stale
+  prior-epoch record can never resurface (belt-and-suspenders with the is_live
+  fix).
+
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 3 lines
+      301              self._state = "exited"
+      302              self._inferior_pid = None
+      303              self._inferior_epoch += 1
+      304 +            # Forget the prior inferior's stop records so a la
+          +ter query cannot                                              
+      305 +            # resurrect a stale crash identity from a process 
+          +that has exited.                                              
+      306 +            self._clear_stop_records()                        
+      307              logger.debug("Inferior state: EXITED")
+      308  
+      309          elif message == "thread-group-started":
+● Now fix #3: _validate_elf_core min-size floor + program-header sanity. Reading
+  the current impl.
+
+  Read 1 file (ctrl+o to expand)
+
+● Now I'll strengthen _validate_elf_core to read the full ELF header, verify
+  class, and require a program-header table with ≥1 entry — a header-only stub
+  (no PT_NOTE/PT_LOAD) can't pass.
+
+● Update(paomcp\tools\backends\crash.py)
+  ⎿  Added 40 lines, removed 3 lines
+      914  
+      915      @staticmethod
+      916      def _validate_elf_core(path: str) -> Dict[str, Any]:
+      917 +        file_size = os.path.getsize(path)                     
+      918          with open(path, "rb") as source:
+      918 -            header = source.read(20)                          
+      919 -        if len(header) < 18 or header[:4] != b"\x7fELF":      
+      919 +            header = source.read(64)                          
+      920 +        # e_ident(16) + e_type(2) + e_machine(2) + e_version(4
+          +) is the minimum                                              
+      921 +        # prefix we parse; a real core also carries a program-
+          +header table.                                                 
+      922 +        if len(header) < 20 or header[:4] != b"\x7fELF":      
+      923              raise CoreDumpGenerationError("Generated file is n
+           ot an ELF file")
+      924 +        elf_class = header[4]                                 
+      925 +        if elf_class not in {1, 2}:                           
+      926 +            raise CoreDumpGenerationError("Generated ELF has a
+          +n unsupported class")                                         
+      927          data_encoding = header[5]
+      928          if data_encoding not in {1, 2}:
+      929              raise CoreDumpGenerationError("Generated ELF has a
+           n unsupported byte order")
+     ...
+      933              raise CoreDumpGenerationError(
+      934                  f"Generated ELF type is {elf_type}, expected E
+           T_CORE (4)"
+      935              )
+      936 +        # A truncated stub can carry a valid ET_CORE header ye
+          +t no segments. Read                                           
+      937 +        # e_phoff/e_phnum for the class and require at least o
+          +ne program header                                             
+      938 +        # that actually fits inside the file, so a header-only
+          + file is rejected.                                            
+      939 +        if elf_class == 2:  # ELF64                           
+      940 +            ehsize = 64                                       
+      941 +            if len(header) < 64:                              
+      942 +                raise CoreDumpGenerationError("Generated ELF64
+          + header is truncated")                                        
+      943 +            e_phoff = int.from_bytes(header[32:40], byteorder=
+          +byteorder)                                                    
+      944 +            e_phentsize = int.from_bytes(header[54:56], byteor
+          +der=byteorder)                                                
+      945 +            e_phnum = int.from_bytes(header[56:58], byteorder=
+          +byteorder)                                                    
+      946 +        else:  # ELF32                                        
+      947 +            ehsize = 52                                       
+      948 +            with open(path, "rb") as source:                  
+      949 +                header32 = source.read(52)                    
+      950 +            if len(header32) < 52:                            
+      951 +                raise CoreDumpGenerationError("Generated ELF32
+          + header is truncated")                                        
+      952 +            e_phoff = int.from_bytes(header32[28:32], byteorde
+          +r=byteorder)                                                  
+      953 +            e_phentsize = int.from_bytes(header32[42:44], byte
+          +order=byteorder)                                              
+      954 +            e_phnum = int.from_bytes(header32[44:46], byteorde
+          +r=byteorder)                                                  
+      955 +        if e_phnum < 1 or e_phentsize < 1 or e_phoff < ehsize:
+      956 +            raise CoreDumpGenerationError(                    
+      957 +                "Generated core has no program-header table; t
+          +he file is truncated"                                         
+      958 +            )                                                 
+      959 +        required = e_phoff + e_phnum * e_phentsize            
+      960 +        if file_size < required:                              
+      961 +            raise CoreDumpGenerationError(                    
+      962 +                f"Generated core is {file_size} bytes but its 
+          +program-header table "                                        
+      963 +                f"requires at least {required}; the file is tr
+          +uncated"                                                      
+      964 +            )                                                 
+      965          return {
+      931 -            "elf_class": 32 if header[4] == 1 else 64 if heade
+          -r[4] == 2 else None,                                          
+      966 +            "elf_class": 32 if elf_class == 1 else 64,        
+      967              "byte_order": byteorder,
+      968              "elf_type": "ET_CORE",
+      969 +            "program_header_count": e_phnum,                  
+      970 +            "size_bytes": file_size,                          
+      971          }
+      972  
+      973      def generate_core_file(
+
+● API Error: API returned an empty or malformed response (HTTP 200) — 
+  check for a proxy or gateway intercepting the request
+
+✻ Cogitated for 5m 5s
+
+> continue                                                                      
+
+● Now fix #4: the endian window-label inversion. Let me read the window-labeling
+  block.
+
+  Read 1 file (ctrl+o to expand)
+
+● Interesting — the file already contains a corrected version of this block
+  (leading_n/trailing_n + endian-aware low/high mapping). This must be a partial
+  edit from a prior session that wasn't reflected in the review's line numbers.
+  The finding #4 is already addressed in the current working tree. Let me
+  verify the whole find_cyclic_offset is coherent and confirm the earlier part
+  matches.
+
+  Read 1 file (ctrl+o to expand)
+
+● This block is already correct — leading_n/trailing_n labels with endian-aware
+  low/high mapping, and the seen set keyed on (kind, offset, candidate). Finding
+  #4 was already addressed in the working tree (not by me this session), so no
+  edit needed there. Let me be precise about that rather than claim credit.
+
+  All three fixes for #1/#3 are in, #4 was pre-fixed. Running the affected tests
+  + mypy.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && ./.venv/Scripts/python.exe -m
+      pytest -q tests/test_crash_triage.py 2>&1 | tail -25)
+  ⎿  ..............
+        [100%]
+     14 passed in 0.96s
+
+● 14 passing (up from 9 — the working tree already had extra cyclic tests).
+  Phase 3 done. Now Phase 4: add the new tests that lock in the fixes and the
+  Blocker-B quiescence contract. Marking Phase 3 complete.
+
+● Let me check the existing cyclic tests so my new ones don't collide, then
+  write the foundation tests + the new crash tests.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && grep -n "^def test_\|^class \|def
+      test_" tests/test_crash_triage.py)
+  ⎿  62:class FakeGdb:
+     164:class FakeDebugger:
+     221:class FakeInspection:
+     … +15 lines (ctrl+o to expand)
+
+● The working tree already has tests covering the stale-exit (#1),
+  truncated-stub (#3), big-endian labels (#4), and hard-kill-on-timeout (Blocker
+  B). This confirms these fixes are all part of the same S5 patch effort. Let
+  me verify the FakeGdb double supports the new quiescence methods I added,
+  since test_core_generation_hard_kills_writer_on_timeout depends on them.
+
+  Read 1 file (ctrl+o to expand)
+
+● The tests are comprehensive and already assert exactly the contract I
+  implemented — signal → wait → kill ordering, kill before exception. These were
+  written as part of the same S5 effort. The one gap the plan calls for: a
+  dedicated tests/test_foundation.py for the extracted builders. Let me write
+  that.
+
+● Write(tests\test_foundation.py)
+  ⎿  Added 40 lines, removed 44 lines
+      1 -"""Unit tests for the reusable backend foundation primitives."""
+      1 +"""Unit tests for the reusable typed-backend foundation primitiv
+        +es."""                                                          
+      2  
+      3  import pytest
+      4  
+     ...
+      16      response = build_backend_response(
+      17          "demo",
+      18          parsed={"value": 1},
+      19 -        raw_responses=[],                                      
+      19 +        raw_responses=[{"type": "result"}],                    
+      20          state="stopped",
+      21      )
+      22      assert response == {
+     ...
+      25          "state": "stopped",
+      26          "parser_version": "1",
+      27          "parsed": {"value": 1},
+      28 -        "raw_responses": [],                                   
+      28 +        "raw_responses": [{"type": "result"}],                 
+      29      }
+      30 +    # No warnings/error keys are added on the success path.    
+      31 +    assert "warnings" not in response                          
+      32 +    assert "error" not in response                             
+      33  
+      34  
+      32 -def test_build_backend_response_failure_includes_error_and_type
+         -():                                                            
+      35 +def test_build_backend_response_failure_and_warnings():        
+      36      response = build_backend_response(
+      37          "demo",
+      38          parsed={},
+      39          raw_responses=[],
+      40          state="idle",
+      41          success=False,
+      39 -        error="boom",                                          
+      42 +        warnings=["partial data"],                             
+      43 +        error="it broke",                                      
+      44          error_type="DemoError",
+      41 -        warnings=["heads up"],                                 
+      45      )
+      46      assert response["success"] is False
+      44 -    assert response["error"] == "boom"                         
+      47 +    assert response["error"] == "it broke"                     
+      48      assert response["type"] == "DemoError"
+      46 -    assert response["warnings"] == ["heads up"]                
+      49 +    assert response["warnings"] == ["partial data"]            
+      50  
+      51  
+      52  def test_build_backend_response_extra_cannot_override_reserved_
+          keys():
+     ...
+      55              "demo",
+      56              parsed={},
+      57              raw_responses=[],
+      55 -            state="idle",                                      
+      58 +            state="stopped",                                   
+      59              extra={"state": "hacked"},
+      60          )
+      61  
+      62  
+      60 -def test_build_backend_response_extra_merges_new_keys():       
+      63 +def test_build_backend_response_extra_merges_additional_keys():
+      64      response = build_backend_response(
+      62 -        "demo",                                                
+      65 +        "snap",                                                
+      66          parsed={},
+      67          raw_responses=[],
+      68          state="stopped",
+     ...
+       72      assert response["complete"] is False
+       73  
+       74  
+       72 -@pytest.mark.parametrize(                                     
+       73 -    "value,expected",                                         
+       74 -    [                                                         
+       75 -        ("0x40", 0x40),                                       
+       76 -        ("(void *) 0x7fffdead", 0x7FFFDEAD),                  
+       77 -        ("123", 123),                                         
+       78 -        ("-5", -5),                                           
+       79 -        (None, None),                                         
+       80 -        ("not-a-number", None),                               
+       81 -        ("", None),                                           
+       82 -    ],                                                        
+       83 -)                                                             
+       84 -def test_parse_int(value, expected):                          
+       85 -    assert parse_int(value) == expected                       
+       75 +def test_parse_int_prefers_embedded_hex_token():              
+       76 +    assert parse_int("(void *) 0x40113a") == 0x40113A         
+       77 +    assert parse_int("0x10") == 16                            
+       78 +    assert parse_int("42") == 42                              
+       79 +    assert parse_int(None) is None                            
+       80 +    assert parse_int("not a number") is None                  
+       81  
+       82  
+       88 -def test_mapping_for_containment():                           
+       83 +def test_mapping_for_containment_is_half_open():              
+       84      mappings = [
+       90 -        {"start": "0x400000", "end": "0x401000"},             
+       91 -        {"start": "0x7ff000", "end": "0x800000"},             
+       85 +        {"start": "0x400000", "end": "0x401000", "file": "a"},
+       86 +        {"start": "0x401000", "end": "0x402000", "file": "b"},
+       87      ]
+       93 -    assert mapping_for(0x400500, mappings)["start"] == "0x4000
+          -00"                                                           
+       94 -    # End is exclusive: 0x401000 is not in the first range, bu
+          -t is below the                                                
+       95 -    # second range's start, so it matches nothing.            
+       96 -    assert mapping_for(0x401000, mappings) is None            
+       97 -    assert mapping_for(0x7FF500, mappings)["start"] == "0x7ff0
+          -00"                                                           
+       98 -    assert mapping_for(0x300000, mappings) is None            
+       88 +    assert mapping_for(0x400500, mappings)["file"] == "a"     
+       89 +    # end is exclusive: 0x401000 belongs to the second mapping
+          +, not the first.                                              
+       90 +    assert mapping_for(0x401000, mappings)["file"] == "b"     
+       91 +    assert mapping_for(0x500000, mappings) is None            
+       92      assert mapping_for(None, mappings) is None
+       93  
+       94  
+       95  def test_mapping_for_skips_unparseable_entries():
+      103 -    mappings = [{"start": "bogus", "end": "0x1"}, {"start": "0
+          -x10", "end": "0x20"}]                                         
+      104 -    assert mapping_for(0x15, mappings)["start"] == "0x10"     
+       96 +    mappings = [{"start": "nope", "end": "bad"}, {"start": "0x
+          +10", "end": "0x20"}]                                          
+       97 +    assert mapping_for(0x15, mappings) == {"start": "0x10", "e
+          +nd": "0x20"}                                                  
+       98  
+       99  
+      100  def test_live_inferior_guard_is_live():
+      101      live = {"is_live": True}
+      102      assert LiveInferiorGuard.is_live(live, 123) is True
+      103 +    # A live record with no attached pid is not live.         
+      104      assert LiveInferiorGuard.is_live(live, None) is False
+      105 +    # A non-live record is never live, even with a pid.       
+      106      assert LiveInferiorGuard.is_live({"is_live": False}, 123) 
+           is False
+      107      assert LiveInferiorGuard.is_live(None, 123) is False
+      108  
+      109  
+      110  def test_live_inferior_guard_require_live_raises():
+      116 -    with pytest.raises(LiveInferiorError, match="no longer"): 
+      111 +    with pytest.raises(LiveInferiorError, match="not attached"
+          +):                                                            
+      112          LiveInferiorGuard.require_live({"is_live": False}, 123
+           )
+      118 -    record = LiveInferiorGuard.require_live({"is_live": True, 
+          -"x": 1}, 123)                                                 
+      119 -    assert record["x"] == 1                                   
+      113 +    record = LiveInferiorGuard.require_live({"is_live": True, 
+          +"id": "x"}, 123)                                              
+      114 +    assert record["id"] == "x"                                
+      115  
+      116  
+      122 -def test_merge_warnings_appends():                            
+      123 -    response = {"warnings": ["a"]}                            
+      124 -    merge_warnings(response, ["b", "c"])                      
+      125 -    assert response["warnings"] == ["a", "b", "c"]            
+      117 +def test_merge_warnings_appends_without_clobbering():         
+      118 +    response = {"warnings": ["first"]}                        
+      119 +    merge_warnings(response, ["second", "third"])             
+      120 +    assert response["warnings"] == ["first", "second", "third"
+          +]                                                             
+      121 +    # No-op when there is nothing to add.                     
+      122      merge_warnings(response, None)
+      127 -    assert response["warnings"] == ["a", "b", "c"]            
+      123 +    assert response["warnings"] == ["first", "second", "third"
+          +]                                                             
+
+● Now the full gate — the moment of truth for the whole re-architecture.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== BLACK =====" &&
+      ./.venv/Scripts/python.exe -m black --check paomcp tests 2>&1 | tail -5)
+  ⎿  ===== BLACK =====
+     All done! \u2728 \U0001f370 \u2728
+     82 files would be left unchanged.
+
+● Black clean (82 files — foundation.py + test_foundation.py added). Now mypy +
+  full pytest + diff-check in parallel.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== MYPY =====" &&
+      ./.venv/Scripts/python.exe -m mypy paomcp 2>&1 | tail -8)
+  ⎿  ===== MYPY =====
+     Success: no issues found in 54 source files
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== PYTEST =====" &&
+      ./.venv/Scripts/python.exe -m pytest -q 2>&1 | tail -15 && echo "=====
+      DIFF CHECK =====" &&…)
+  ⎿  ===== PYTEST =====
+                     )
+     … +18 lines (ctrl+o to expand)
+
+  Thought for 46s (ctrl+o to expand)
+
+● Five failures, all fixable and instructive:
+  1. My _clear_stop_records() on exit breaks an intentional design —
+  test_stop_record_survives_exit_but_is_not_live documents that records survive
+  exit for post-mortem inspection (marked non-live). The is_live gate in
+  run_until_crash already fixes #1 correctly; clearing on exit is wrong.
+  Reverting it.
+  2. The registry fsize_limit_bytes kwarg breaks _FakeGdb doubles.
+  3. My own foundation test regex typo (not attached vs no longer attached).
+
+  Reverting the over-eager exit clear first:
+● Update(paomcp\tools\backends\gdb.py)
+  ⎿  Added 4 lines, removed 3 lines
+      303              self._state = "exited"
+      304              self._inferior_pid = None
+      305              self._inferior_epoch += 1
+      306 -            # Forget the prior inferior's stop records so a la
+          -ter query cannot                                              
+      307 -            # resurrect a stale crash identity from a process 
+          -that has exited.                                              
+      308 -            self._clear_stop_records()                        
+      306 +            # Stop records deliberately survive exit so a cras
+          +h can still be                                                
+      307 +            # inspected post-mortem; ``is_live`` (derived from
+          + state + epoch)                                               
+      308 +            # already prevents a dead record from being treate
+          +d as a current                                                
+      309 +            # crash, so the history is retained rather than cl
+          +eared here.                                                   
+      310              logger.debug("Inferior state: EXITED")
+      311  
+      312          elif message == "thread-group-started":
+
+● Fix my foundation test regex:
+
+● Update(tests\test_foundation.py)
+  ⎿  Added 1 line, removed 1 line
+      108  
+      109  
+      110  def test_live_inferior_guard_require_live_raises():
+      111 -    with pytest.raises(LiveInferiorError, match="not attached"
+          -):                                                            
+      111 +    with pytest.raises(LiveInferiorError, match="no longer att
+          +ached"):                                                      
+      112          LiveInferiorGuard.require_live({"is_live": False}, 123
+           )
+      113      record = LiveInferiorGuard.require_live({"is_live": True, 
+           "id": "x"}, 123)
+      114      assert record["id"] == "x"
+
+● Now the _FakeGdb in test_stage1_foundation. Let me see how it's defined so I
+  make it accept the kwarg.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && grep -n "class _FakeGdb\|def
+      __init__\|GdbController\|monkeypatch\|_FakeGdb"
+      tests/test_stage1_foundation.py | head)
+  ⎿  361:class _FakeGdb:
+     362:    def __init__(self) -> None:
+     378:    def __init__(self, gdb: _FakeGdb, state: Any) -> None:
+     … +11 lines (ctrl+o to expand)
+
+  Read 1 file (ctrl+o to expand)
+
+● Update(tests\test_stage1_foundation.py)
+  ⎿  Added 2 lines, removed 1 line
+      359  
+      360  
+      361  class _FakeGdb:
+      362 -    def __init__(self) -> None:                               
+      362 +    def __init__(self, *args: Any, **kwargs: Any) -> None:    
+      363          self.initialized = False
+      364          self.closed = False
+      365 +        self.fsize_limit_bytes = kwargs.get("fsize_limit_bytes
+          +")                                                            
+      366  
+      367      def get_state(self) -> str:
+      368          return "stopped"
+
+● Full gate again — should be clean now.
+
+● Bash(cd "D:/workspace/tools_dev/pwny-mcp" && echo "===== PYTEST =====" &&
+      ./.venv/Scripts/python.exe -m pytest -q 2>&1 | tail -12 && echo "=====
+      BLACK =====" && ./.v…)
+  ⎿  ===== PYTEST =====
+     ......................................................................
+     .. [ 38%]
+     … +12 lines (ctrl+o to expand)
+
+● Full gate green across the board. Phase 4 complete.
+
+● Done. The S5 re-architecture is complete and the full gate is green.
+
+  What shipped
+
+  Phase 1 — reusable foundation (paomcp/tools/backends/foundation.py, new)
+  - build_backend_response — the single inner-envelope builder, replacing
+  hand-rolled {success, command, state, parser_version, parsed, raw_responses}
+  dicts. S6/S7/S8 conform to one shape.
+  - LiveInferiorGuard — the staleness rule (is_live + live pid) extracted from
+  the two crash sites, ready for heap/ROP snapshots.
+  - parse_int / mapping_for — shared address parsing + half-open containment.
+  - crash.py now consumes all of these; behavior preserved.
+
+  Phase 2 — kernel cap + hard writer quiescence (Blocker B & C)
+  - _ResourceLimitedController subclasses pygdbmi to inject a POSIX preexec_fn:
+  setsid() + RLIMIT_FSIZE. GDB now takes SIGXFSZ at exactly the cap — zero
+  overshoot, kernel-enforced. Gated on os.name != "nt".
+  - GdbController.kill_process_group() + wait_for_writer_quiescence() — SIGKILL
+  the gdb session so its core fd is closed before staging is unlinked.
+  generate_core_file now escalates signal → wait → kill on every abnormal exit.
+  The deleted-fd disk leak is structurally impossible.
+  - ArtifactStore.dir_quota_enforcer — documented no-op seam for
+  loopback-fs/cgroup absolute enforcement.
+  - FSIZE cap wired from PAO_GDB_FSIZE_LIMIT_BYTES / PAO_MAX_CORE_DUMP_BYTES at
+  session spawn.
+
+  Phase 3 — correctness fixes
+  - #1 stale prior-epoch stop: run_until_crash gates the crash branch on
+  is_live; a dead record is downgraded with a warning, never snapshotted. (I
+  reverted an over-eager "clear records on exit" — it broke intentional
+  post-mortem inspection that a test documents. The is_live gate alone is the
+  correct fix.)
+  - #3 _validate_elf_core now parses the full ELF32/64 header and requires a
+  program-header table that fits in the file — 18-byte stubs rejected.
+  - #4 was already corrected in the tree (leading_n/trailing_n + endian-aware
+  low/high).
+
+  Phase 4 — tests: new test_foundation.py (11 cases) + the existing S5
+  additions. 186 passed, black clean, mypy clean (54 files), git diff --check 
+  clean.
+
+  One honest caveat
+
+  The RLIMIT + hard-kill path is POSIX-only, and this is a Windows dev box — so
+  the real-GDB proof of Blocker B/C (tests/docker_stage5_smoke.py with an
+  undersized cap forcing SIGXFSZ) can only run under Docker/Linux. The
+  unit-level contract is proven here (signal→wait→kill ordering asserted), but
+  the on-metal SIGXFSZ abort + staging-cleanup + free-space-restoration case
+  needs a Linux run before you call Blocker B fully closed. Everything else is
+  verified green.
+
+  Nothing's committed — it's all in the working tree, same as before. Want me to
+  run the Docker smoke test if you've got a Linux runtime handy, or stage a
+  commit?
+
+✻ Crunched for 8m 13s

@@ -27,7 +27,11 @@ class PythonTools:
         "pwntools",
     ]
 
-    def __init__(self, workspace_dir: Optional[str] = None):
+    def __init__(
+        self,
+        workspace_dir: Optional[str] = None,
+        venv_path: Optional[str] = None,
+    ):
         """
         Initialize Python tools with a single shared venv.
         """
@@ -37,7 +41,12 @@ class PythonTools:
         os.makedirs(self.workspace_dir, exist_ok=True)
         self.scripts_dir = os.path.join(self.workspace_dir, "scripts")
         os.makedirs(self.scripts_dir, exist_ok=True)
-        self.venv_path = os.path.join(self.workspace_dir, "shared_venv")
+        configured_venv = venv_path or os.environ.get("PAO_PYTHON_VENV")
+        self.venv_path = os.path.abspath(
+            configured_venv
+            if configured_venv
+            else os.path.join(self.workspace_dir, "shared_venv")
+        )
         logger.info(f"Python workspace initialized at: {self.workspace_dir}")
 
         # Initialize the shared venv

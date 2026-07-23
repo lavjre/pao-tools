@@ -11,8 +11,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Pao Tools Server")
     parser.add_argument(
         "--host",
-        default="0.0.0.0",
-        help="Host address for the main MCP server (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help="Host address for the main MCP server (default: 127.0.0.1)",
     )
     parser.add_argument(
         "--port",

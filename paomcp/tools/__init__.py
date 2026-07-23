@@ -7,6 +7,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     from . import (
         artifacts,
         compatibility,
+        crash,
         decompiler,
         debug,
         debugger_memory,
@@ -23,6 +24,7 @@ def register_all_tools(mcp: FastMCP) -> None:
 
     artifacts.register(mcp)
     compatibility.register(mcp)
+    crash.register(mcp)
     decompiler.register(mcp)
     debug.register(mcp)
     debugger_memory.register(mcp)

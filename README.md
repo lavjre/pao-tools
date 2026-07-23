@@ -16,6 +16,7 @@ analysis workflows.
 - Typed breakpoint/watchpoint CRUD, registers, expressions, memory search/write,
   disassembly, thread selection, and event-oriented stepping
 - Typed frames/inferiors, register groups, debugger snapshots, and reversible patches
+- Typed fatal-signal records, crash snapshots, cyclic offsets, core artifacts, and reports
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
@@ -100,12 +101,13 @@ Build and run the server:
 ```bash
 docker build -t pao-tools:latest . --platform linux/amd64
 
-docker run --rm -p 5500:5500 \
+docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
+  -v "pao-runtime:/var/lib/pao" \
   pao-tools:latest
 ```
 
@@ -142,10 +144,23 @@ uv run python -m paomcp
 ## Runtime layout
 
 - `/workspace`: target binaries, scripts, build output, and cloned repositories
-- `/tmp/pao/sessions`: debugger and exploit-session runtime files
-- `/tmp/pao/processes`: managed process logs
-- `/tmp/pao/python`: shared Python virtual environment
-- `/tmp/pao/artifacts`: complete large-response payloads and metadata
+- `/var/lib/pao/sessions`: debugger and exploit-session runtime files in Docker
+- `/var/lib/pao/processes`: managed process logs in Docker
+- `/var/lib/pao/python`: mutable Python scripts and runtime state in Docker
+- `/var/lib/pao/artifacts`: complete payloads, core files, and metadata in Docker
+- `/opt/pao-python/shared_venv`: image-baked Python helper environment
+
+Local runs still default to the platform temporary directory unless
+`PAO_RUNTIME_ROOT` is set. Core capture uses the GDB CLI fallback
+`generate-core-file` because GDB/MI has no dedicated core-generation command.
+On Linux the response records whether the temporary `RLIMIT_FSIZE` cap was applied
+and restored. Core capture fails closed when that kernel hard cap cannot be applied;
+polling is secondary detection, not a zero-overshoot boundary. Core files can
+contain credentials and other process-memory secrets, so restrict access to the
+runtime volume and configure retention accordingly. Use only one server process per
+artifact volume because store locking is process-local. The staging pathname also
+does not isolate an actively hostile same-UID inferior; use a disposable VM or
+stronger process/filesystem isolation for those targets.
 
 ## Pwndbg compatibility
 
@@ -157,10 +172,26 @@ are installed in pao-tools.
 
 ## Roadmap
 
-- Crash triage and core-dump analysis
-- ROP gadget and libc workflows
-- Local, remote, SSH, and QEMU target providers
-- Research notes, snapshots, exports, and report generation
+Stages 1-4 established the response/artifact foundation, compatibility and platform
+discovery, typed ELF/static analysis, and the debugger/memory API.
+
+| Stage | Goal | Status |
+| --- | --- | --- |
+| S5 | Typed crash triage: run, snapshot, analyze, classify, compare, cyclic scan, core evidence, and per-crash report artifact | Code and local unit/static validation complete. Release completion still requires the current candidate to pass the live Linux Docker boot, HTTP MCP handshake, and real crash/core smoke gate. |
+| S6 | Typed glibc heap inspection: allocator discovery, arenas, bins/tcache, chunks, safe-linking evidence, and bounded history | Planned |
+| S7 | ROP gadget, libc identification, one-gadget, chain construction, and validation workflows | Planned |
+| S8 | Local, remote, SSH, Docker, and QEMU target providers behind one target contract | Planned |
+| S9 | Research notes, persistent session snapshots, exports, and final multi-artifact reporting | Planned |
+
+The S5 `generate_crash_report` tool is an evidence-preserving report for one exact
+crash. It does not replace the broader cross-session research records and final
+reporting planned for S9.
+
+This roadmap assumes a private, single-user research tool. Authentication, RBAC,
+multi-user tenancy, and public-service audit infrastructure are intentionally out of
+scope. Resource caps, cleanup, artifact integrity, loopback defaults, and debugger
+isolation remain operational safeguards for the owner's machine rather than a
+separate product stage.
 
 ## License
 

@@ -22,7 +22,7 @@ docker build \
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful!${NC}"
     echo -e "${YELLOW}To run the container:${NC}"
-    echo "  docker run -p 5500:5500 --cap-add=SYS_PTRACE --cap-add=SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined pao-tools:latest"
+    echo "  docker run -p 127.0.0.1:5500:5500 --cap-add=SYS_PTRACE --cap-add=SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined pao-tools:latest"
     echo -e "${YELLOW}Or use docker-compose:${NC}"
     echo "  docker-compose up -d"
 else

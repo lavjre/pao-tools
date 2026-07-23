@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM ghcr.io/astral-sh/uv:0.11.21 AS uv
 FROM ubuntu:24.04 AS base
 
 ARG TARGETARCH
@@ -66,6 +66,8 @@ ENV PAO_GHIDRA_VERSION=${GHIDRA_VERSION}
 ENV PAO_GHIDRA_HEADLESS=/opt/ghidra/support/analyzeHeadless
 ENV PAO_GHIDRA_MAXMEM=2G
 ENV PAO_GHIDRA_MAX_CONCURRENT=1
+ENV PAO_RUNTIME_ROOT=/var/lib/pao
+ENV PAO_PYTHON_VENV=/opt/pao-python/shared_venv
 
 # Install systemd so the VM can boot it as PID 1 under Ignite
 RUN apt-get update && apt-get install -y systemd systemd-sysv && \
@@ -77,14 +79,17 @@ COPY pyproject.toml uv.lock ./
 COPY README.md ./
 COPY paomcp ./paomcp
 COPY paocli ./paocli
+COPY tests/docker_stage5_smoke.py ./tests/docker_stage5_smoke.py
 COPY paomcp.service /etc/systemd/system/paomcp.service
 
-# Create workspace directory for command execution
-RUN mkdir -p /workspace
+# Create workspace, persistent runtime, and image-owned helper roots.
+RUN mkdir -p /workspace /var/lib/pao /opt/pao-python
 
 RUN useradd -m -s /bin/bash pao && \
     chown -R pao:pao /app && \
-    chown -R pao:pao /workspace
+    chown -R pao:pao /workspace && \
+    chown -R pao:pao /var/lib/pao && \
+    chown -R pao:pao /opt/pao-python
 
 RUN wget https://github.com/io12/pwninit/releases/download/3.3.1/pwninit -O /usr/local/bin/pwninit && \
     chmod +x /usr/local/bin/pwninit
@@ -100,14 +105,14 @@ ENV PYTHONPATH=/app
 ENV UV_PROJECT_ENVIRONMENT=/app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 
-RUN uv sync
+RUN uv sync --locked
 
 # paocli is vendored in this project and installed by `uv sync`.
 
-# Pre-create the shared PythonTools venv used by Pao Tools to avoid runtime setup
-RUN mkdir -p /tmp/pao/python && \
-    uv venv /tmp/pao/python/shared_venv && \
-    uv pip install --python /tmp/pao/python/shared_venv \
+# Bake the PythonTools helper venv outside PAO_RUNTIME_ROOT. The persistent
+# runtime volume must not mask an updated helper environment after image upgrade.
+RUN uv venv "${PAO_PYTHON_VENV}" && \
+    uv pip install --python "${PAO_PYTHON_VENV}" \
       requests numpy ipython hexdump click pwntools ropper
 
 ENV PROD=true
@@ -115,3 +120,4 @@ ENV PROD=true
 EXPOSE 5500
 # For Firecracker VM: systemd boots as PID 1 and starts paomcp.service
 ENTRYPOINT ["/app/.venv/bin/python", "-m", "paomcp"]
+CMD ["--host", "0.0.0.0"]

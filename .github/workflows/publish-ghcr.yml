@@ -11,6 +11,13 @@ on:
 env:
   PYTHON_VERSION: "3.12"
 
+concurrency:
+  # Release tags share mutable aliases (`latest`, major, and minor). Serialize
+  # every publication in this repository so an older build cannot finish last
+  # and overwrite aliases produced by a newer release.
+  group: publish-ghcr-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -85,6 +92,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      BOOT_CONTAINER: pao-tools-publish-boot-${{ github.run_id }}-${{ github.run_attempt }}
+      BOOT_VOLUME: pao-publish-boot-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      STAGE5_VOLUME: pao-publish-stage5-runtime-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -92,12 +103,6 @@ jobs:
         run: echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -106,16 +111,106 @@ jobs:
           tags: |
             type=raw,value=edge,enable={{is_default_branch}}
             type=sha,format=short,enable={{is_default_branch}},prefix=sha-
+            type=raw,value=manual-${{ github.run_number }},enable=${{ github.event_name == 'workflow_dispatch' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
-      - name: Build and push
+      - name: Build exact image for smoke and publication
         uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          push: false
+          load: true
+          tags: |
+            pao-tools:publish-smoke
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Boot default entrypoint and probe health
+        run: |
+          docker run -d --name "$BOOT_CONTAINER" \
+            --cap-add=SYS_PTRACE \
+            --cap-add=SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -v "${BOOT_VOLUME}:/var/lib/pao" \
+            pao-tools:publish-smoke
+
+          healthy=0
+          for attempt in $(seq 1 60); do
+            if docker exec "$BOOT_CONTAINER" \
+              curl -fsS http://127.0.0.1:5500/healthz >/dev/null 2>&1; then
+              healthy=1
+              break
+            fi
+            if [[ "$(docker inspect -f '{{.State.Running}}' "$BOOT_CONTAINER")" != "true" ]]; then
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$healthy" != "1" ]]; then
+            docker logs "$BOOT_CONTAINER"
+            exit 1
+          fi
+          docker exec "$BOOT_CONTAINER" \
+            curl -fsS http://127.0.0.1:5500/healthz
+          docker exec -i "$BOOT_CONTAINER" /app/.venv/bin/python - <<'PY'
+          import asyncio
+
+          from fastmcp import Client
+
+          EXPECTED_STAGE5_TOOLS = {
+              "run_until_crash",
+              "capture_crash_snapshot",
+              "analyze_crash",
+              "classify_crash",
+              "compare_crashes",
+              "find_cyclic_offset",
+              "capture_core_dump",
+              "generate_crash_report",
+          }
+
+
+          async def verify_stage5_tools() -> None:
+              async with Client("http://127.0.0.1:5500/mcp") as client:
+                  tools = await client.list_tools()
+              names = {tool.name for tool in tools}
+              missing = EXPECTED_STAGE5_TOOLS - names
+              if missing:
+                  raise RuntimeError(
+                      f"HTTP MCP is missing Stage 5 tools: {sorted(missing)}"
+                  )
+              print(f"HTTP MCP Stage 5 tools ready: {sorted(EXPECTED_STAGE5_TOOLS)}")
+
+
+          asyncio.run(verify_stage5_tools())
+          PY
+      - name: Remove entrypoint smoke resources
+        if: always()
+        run: |
+          docker rm -f "$BOOT_CONTAINER" || true
+          docker volume rm -f "$BOOT_VOLUME" || true
+      - name: Run stage5 smoke test
+        run: |
+          docker run --rm \
+            --cap-add=SYS_PTRACE \
+            --cap-add=SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -v "${STAGE5_VOLUME}:/var/lib/pao" \
+            --entrypoint /app/.venv/bin/python \
+            pao-tools:publish-smoke \
+            /app/tests/docker_stage5_smoke.py
+      - name: Remove smoke evidence volume
+        if: always()
+        run: docker volume rm -f "$STAGE5_VOLUME" || true
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the smoke-tested image
+        run: docker push --all-tags "${IMAGE_NAME}"

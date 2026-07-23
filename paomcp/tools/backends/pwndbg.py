@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from paomcp.tools.backends.compatibility import PwndbgCompatibility
+from paomcp.tools.backends.crash import CrashTriage
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.gdb import GdbController
 from paomcp.tools.backends.inspection import PwndbgInspection
@@ -96,6 +97,12 @@ class PwndbgTools:
             gdb_controller,
             timeout_seconds=self.inspection.timeout_seconds,
             max_memory_write_bytes=max_memory_write_bytes,
+        )
+        self.crash = CrashTriage(
+            gdb_controller,
+            self.debugger,
+            self.inspection,
+            session_state.session_id,
         )
         self.max_memory_patches = (
             max_memory_patches
@@ -1005,6 +1012,109 @@ class PwndbgTools:
                 mapping_result=mapping_result,
                 deadline=deadline,
                 cancellation_check=cancellation_check,
+            )
+        )
+
+    def get_last_stop(
+        self, fatal_signals: Optional[Sequence[str]] = None
+    ) -> Dict[str, Any]:
+        """Return the latest persisted GDB/MI stop record and classification."""
+        self.gdb.initialize()
+        return self._record_debugger(self.crash.get_last_stop(fatal_signals))
+
+    def run_until_crash(
+        self,
+        *,
+        arguments: Optional[Sequence[str]] = None,
+        mode: str = "auto",
+        timeout_seconds: Optional[float] = None,
+        fatal_signals: Optional[Sequence[str]] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run, continue, or wait until a crash, another stop, or normal exit."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.crash.run_until_crash(
+                arguments=arguments,
+                mode=mode,
+                timeout_seconds=timeout_seconds,
+                fatal_signals=fatal_signals,
+                cancellation_check=cancellation_check,
+            )
+        )
+
+    def capture_crash_snapshot(
+        self,
+        expected_crash_id: str,
+        *,
+        stack_bytes: int = 256,
+        disassembly_bytes: int = 64,
+        include_mappings: bool = True,
+        fatal_signals: Optional[Sequence[str]] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Capture a canonical typed snapshot for the exact current crash."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.crash.capture_crash_snapshot(
+                expected_crash_id,
+                stack_bytes=stack_bytes,
+                disassembly_bytes=disassembly_bytes,
+                include_mappings=include_mappings,
+                fatal_signals=fatal_signals,
+                cancellation_check=cancellation_check,
+            )
+        )
+
+    def analyze_crash(
+        self,
+        expected_crash_id: str,
+        *,
+        stack_bytes: int = 256,
+        disassembly_bytes: int = 64,
+        include_mappings: bool = True,
+        refresh: bool = False,
+        fatal_signals: Optional[Sequence[str]] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Analyze one exact crash id with conservative typed evidence."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.crash.analyze_crash(
+                expected_crash_id,
+                stack_bytes=stack_bytes,
+                disassembly_bytes=disassembly_bytes,
+                include_mappings=include_mappings,
+                refresh=refresh,
+                fatal_signals=fatal_signals,
+                cancellation_check=cancellation_check,
+            )
+        )
+
+    def generate_core_file(
+        self,
+        expected_crash_id: str,
+        output_path: str,
+        *,
+        max_size_bytes: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+        min_free_bytes: int = 0,
+        fatal_signals: Optional[Sequence[str]] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Generate a monitored ELF core through the GDB CLI fallback."""
+        self.gdb.initialize()
+        return self._record_debugger(
+            self.crash.generate_core_file(
+                expected_crash_id,
+                output_path,
+                max_size_bytes=max_size_bytes,
+                timeout_seconds=timeout_seconds,
+                min_free_bytes=min_free_bytes,
+                fatal_signals=fatal_signals,
+                cancellation_check=cancellation_check,
+                progress_callback=progress_callback,
             )
         )
 

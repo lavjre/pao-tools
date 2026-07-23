@@ -48,6 +48,7 @@ def _error_code(error_type: Optional[str]) -> str:
         "SessionNotFoundError": "NOT_FOUND",
         "SessionClosedError": "SESSION_CLOSED",
         "ArtifactStorageFullError": "RESOURCE_EXHAUSTED",
+        "ArtifactSizeLimitError": "RESOURCE_EXHAUSTED",
         "ArtifactOwnershipError": "ARTIFACT_ACCESS_DENIED",
         "UnmanagedProcessError": "PROCESS_NOT_MANAGED",
     }
@@ -492,6 +493,12 @@ def run_session_locked(
     with session.lock:
         if session.closing or session.closed:
             raise SessionClosedError(f"Debug session '{session.session_id}' is closed")
+        destroyed = getattr(session.gdb, "is_destroyed", None)
+        if callable(destroyed) and destroyed():
+            session.closed = True
+            raise SessionClosedError(
+                f"Debug session '{session.session_id}' is destroyed and must be recreated"
+            )
         result = action()
         if sync_pid:
             sync_session_pid(session)

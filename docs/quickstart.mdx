@@ -33,7 +33,7 @@ This is the fastest path to a working local `pao-tools` instance.
 <CodeGroup>
 
 ```bash HTTP
-docker run --rm -p 5500:5500 \
+docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \

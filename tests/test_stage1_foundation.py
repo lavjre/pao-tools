@@ -362,16 +362,41 @@ class _FakeGdb:
     def __init__(self) -> None:
         self.initialized = False
         self.closed = False
+        self.destroyed = False
 
     def get_state(self) -> str:
         return "stopped"
+
+    def is_destroyed(self) -> bool:
+        return self.destroyed
 
     def initialize(self) -> dict[str, Any]:
         self.initialized = True
         return {"status": "initialized"}
 
-    def close(self) -> None:
+    def gdb_process_running(self) -> bool:
+        return not self.closed
+
+    def close(self) -> bool:
         self.closed = True
+        return True
+
+
+class _StubbornDestroyedGdb(_FakeGdb):
+    def __init__(self) -> None:
+        super().__init__()
+        self.alive = True
+        self.close_calls = 0
+
+    def gdb_process_running(self) -> bool:
+        return self.alive
+
+    def close(self) -> bool:
+        self.close_calls += 1
+        if self.alive:
+            return False
+        self.closed = True
+        return True
 
 
 class _FakePwndbgTools:
@@ -403,6 +428,330 @@ def test_debug_session_registry_enforces_limit_without_breaking_idempotency(
     assert replacement.session_id == "beta"
     registry.close_all()
     assert getattr(replacement.gdb, "closed") is True
+
+
+def test_ensure_session_creates_missing_explicit_id_instead_of_using_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=2)
+    default = registry.ensure_session()
+
+    explicit = registry.ensure_session("alpha")
+
+    assert explicit.session_id == "alpha"
+    assert explicit is not default
+    assert registry.default_session_id == "default"
+    assert registry.get_session("alpha") is explicit
+
+
+def test_ensure_session_rebuilds_destroyed_explicit_id_with_live_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=2)
+    default = registry.ensure_session()
+    destroyed = registry.create_session("alpha")
+    destroyed.gdb.destroyed = True
+
+    replacement = registry.ensure_session("alpha")
+
+    assert replacement.session_id == "alpha"
+    assert replacement is not destroyed
+    assert replacement is not default
+    assert destroyed.closed is True
+    assert destroyed.gdb.closed is True
+    assert registry.default_session_id == "default"
+    assert registry.ensure_session() is default
+
+
+def test_ensure_session_without_id_reuses_live_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=2)
+    default = registry.ensure_session()
+    registry.create_session("alpha")
+
+    assert default.session_id == "default"
+    assert registry.ensure_session() is default
+
+
+def test_destroyed_live_debugger_tombstone_blocks_capacity_and_id_reuse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _StubbornDestroyedGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    destroyed = registry.create_session("alpha")
+    destroyed.gdb.destroyed = True
+
+    assert registry.get_session("alpha") is None
+    assert registry.status() == {
+        "active": 0,
+        "tombstones": 1,
+        "occupied": 1,
+        "available": 0,
+        "max_sessions": 1,
+        "default_session_id": None,
+    }
+    with pytest.raises(registry_module.SessionLimitError, match="pending"):
+        registry.create_session("alpha")
+    with pytest.raises(registry_module.SessionLimitError, match="limit"):
+        registry.create_session("beta")
+
+    destroyed.gdb.alive = False
+    assert registry.reap_tombstones() == 1
+    assert destroyed.gdb.closed is True
+    replacement = registry.create_session("alpha")
+    assert replacement is not destroyed
+    assert registry.status()["tombstones"] == 0
+
+
+def test_close_session_surfaces_shutdown_pending_and_keeps_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _StubbornDestroyedGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    session = registry.create_session("alpha")
+
+    result = registry.close_session("alpha")
+
+    assert result["success"] is False
+    assert result["code"] == "SHUTDOWN_PENDING"
+    assert result["shutdown_pending"] is True
+    assert session.closed is True
+    assert registry.status()["tombstones"] == 1
+    with pytest.raises(registry_module.SessionLimitError):
+        registry.create_session("beta")
+
+
+def test_destroyed_session_detaches_without_closing_under_active_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    session = registry.create_session("alpha")
+    action_started = threading.Event()
+    release_action = threading.Event()
+
+    def action() -> None:
+        action_started.set()
+        assert release_action.wait(timeout=2)
+
+    action_thread = threading.Thread(
+        target=lambda: run_session_locked(session, action, sync_pid=False)
+    )
+    action_thread.start()
+    assert action_started.wait(timeout=1)
+    session.gdb.destroyed = True
+
+    assert registry.get_session("alpha") is None
+    assert session.gdb.closed is False
+    assert registry.status()["tombstones"] == 1
+
+    release_action.set()
+    action_thread.join(timeout=1)
+    assert action_thread.is_alive() is False
+    assert registry.reap_tombstones() == 1
+    assert session.gdb.closed is True
+
+
+def test_close_session_times_out_without_holding_registry_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    session = registry.create_session("alpha")
+    action_started = threading.Event()
+    release_action = threading.Event()
+    close_results: list[dict[str, Any]] = []
+    cleanup_calls: list[str] = []
+
+    def action() -> None:
+        action_started.set()
+        assert release_action.wait(timeout=2)
+
+    action_thread = threading.Thread(
+        target=lambda: run_session_locked(session, action, sync_pid=False)
+    )
+    close_thread = threading.Thread(
+        target=lambda: close_results.append(
+            registry.close_session(
+                "alpha",
+                on_closing=lambda _session: cleanup_calls.append("cleaned"),
+                lock_timeout_sec=0.2,
+            )
+        )
+    )
+    action_thread.start()
+    assert action_started.wait(timeout=1)
+    close_thread.start()
+
+    deadline = time.monotonic() + 1
+    while not session.closing and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert session.closing is True
+
+    status_started = time.monotonic()
+    assert registry.status()["tombstones"] == 1
+    assert time.monotonic() - status_started < 0.1
+
+    close_thread.join(timeout=1)
+    assert close_thread.is_alive() is False
+    assert close_results[0]["success"] is False
+    assert close_results[0]["code"] == "SHUTDOWN_PENDING"
+    assert close_results[0]["action_lock_busy"] is True
+    assert session.gdb.closed is False
+    assert cleanup_calls == []
+
+    release_action.set()
+    action_thread.join(timeout=1)
+    assert action_thread.is_alive() is False
+    assert registry.reap_tombstones() == 1
+    assert session.gdb.closed is True
+    assert cleanup_calls == ["cleaned"]
+
+
+def test_close_session_reports_associated_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    session = registry.create_session("alpha")
+    cleanup = {
+        "success": False,
+        "type": "ManagedProcessCleanupError",
+        "error": "one managed process remains alive",
+    }
+
+    result = registry.close_session("alpha", on_closing=lambda _session: cleanup)
+
+    assert result["success"] is False
+    assert result["code"] == "SESSION_CLEANUP_FAILED"
+    assert result["shutdown_pending"] is False
+    assert result["cleanup"] == cleanup
+    assert session.gdb.closed is True
+    assert registry.status()["tombstones"] == 0
+
+
+@pytest.mark.parametrize(
+    "cleanup",
+    [
+        {
+            "session_id": "alpha",
+            "attempted_count": 1,
+            "closed_count": 0,
+            "failure_count": 1,
+            "failures": [
+                {
+                    "pid": 123,
+                    "type": "TimeoutExpired",
+                    "error": "process remained alive",
+                }
+            ],
+        },
+        {
+            "session_id": "alpha",
+            "attempted_count": 1,
+            "closed_count": 0,
+            "failure_count": 0,
+            "failures": [{"pid": 123}],
+        },
+    ],
+)
+def test_close_session_understands_managed_process_cleanup_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    cleanup,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    registry.create_session("alpha")
+
+    result = registry.close_session("alpha", on_closing=lambda _session: cleanup)
+
+    assert result["success"] is False
+    assert result["code"] == "SESSION_CLEANUP_FAILED"
+    assert result["cleanup"] == cleanup
+
+
+def test_session_lock_rejects_poisoned_controller_before_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setattr(registry_module, "GdbController", _FakeGdb)
+    monkeypatch.setattr(registry_module, "PwndbgTools", _FakePwndbgTools)
+    paths = build_runtime_paths(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+    registry = registry_module.DebugSessionRegistry(paths, max_sessions=1)
+    session = registry.create_session("alpha")
+    session.gdb.destroyed = True
+    dispatched = False
+
+    def action() -> None:
+        nonlocal dispatched
+        dispatched = True
+
+    with pytest.raises(registry_module.SessionClosedError, match="destroyed"):
+        run_session_locked(session, action, sync_pid=False)
+
+    assert dispatched is False
+    assert session.closed is True
 
 
 def test_debug_session_close_waits_for_active_action_and_rejects_stale_reference(

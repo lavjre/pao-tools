@@ -1,23 +1,150 @@
 steps:
-  - name: 'gcr.io/cloud-builders/docker'
-    entrypoint: 'bash'
+  - id: verify-python
+    name: "ghcr.io/astral-sh/uv:0.11.21"
+    entrypoint: "sh"
     args:
-      - '-c'
+      - "-ceu"
       - |
-        docker pull us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools || true
+        uv sync --locked --extra dev
+        uv run black --check .
+        uv run mypy paomcp --ignore-missing-imports --disable-error-code=import-untyped
+        uv run pytest -v
 
-  - name: 'gcr.io/cloud-builders/docker'
+  - id: pull-cache
+    name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
     args:
-      [
-        'build',
-        '--cache-from=us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools',
-        '-t',
-        'us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools',
-        '.'
-      ]
+      - "-ceu"
+      - |
+        docker pull \
+          "us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:latest" \
+          || true
+
+  # Build one local candidate. Remote tags are deliberately added only after
+  # both runtime gates pass, and Cloud Build publishes `images` only if every
+  # step succeeds.
+  - id: build-candidate
+    name: "gcr.io/cloud-builders/docker"
+    env:
+      - "DOCKER_BUILDKIT=1"
+    args:
+      - "build"
+      - "--platform=linux/amd64"
+      - "--cache-from=us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:latest"
+      - "--tag=pao-tools:cloudbuild-$BUILD_ID"
+      - "."
+
+  - id: boot-default-entrypoint
+    name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        BOOT_CONTAINER="pao-tools-cloud-boot-$BUILD_ID"
+        BOOT_VOLUME="pao-cloud-boot-runtime-$BUILD_ID"
+        cleanup() {
+          docker rm -f "$${BOOT_CONTAINER}" >/dev/null 2>&1 || true
+          docker volume rm -f "$${BOOT_VOLUME}" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        docker run -d --name "$${BOOT_CONTAINER}" \
+          --cap-add=SYS_PTRACE \
+          --cap-add=SYS_ADMIN \
+          --security-opt seccomp=unconfined \
+          --security-opt apparmor=unconfined \
+          -v "$${BOOT_VOLUME}:/var/lib/pao" \
+          "pao-tools:cloudbuild-$BUILD_ID"
+
+        healthy=0
+        for attempt in $$(seq 1 60); do
+          if docker exec "$${BOOT_CONTAINER}" \
+            curl -fsS http://127.0.0.1:5500/healthz >/dev/null 2>&1; then
+            healthy=1
+            break
+          fi
+          if [[ "$$(docker inspect -f '{{.State.Running}}' "$${BOOT_CONTAINER}")" != "true" ]]; then
+            break
+          fi
+          sleep 2
+        done
+        if [[ "$${healthy}" != "1" ]]; then
+          docker logs "$${BOOT_CONTAINER}"
+          exit 1
+        fi
+        docker exec "$${BOOT_CONTAINER}" \
+          curl -fsS http://127.0.0.1:5500/healthz
+        docker exec -i "$${BOOT_CONTAINER}" /app/.venv/bin/python - <<'PY'
+        import asyncio
+
+        from fastmcp import Client
+
+        EXPECTED_STAGE5_TOOLS = {
+            "run_until_crash",
+            "capture_crash_snapshot",
+            "analyze_crash",
+            "classify_crash",
+            "compare_crashes",
+            "find_cyclic_offset",
+            "capture_core_dump",
+            "generate_crash_report",
+        }
+
+
+        async def verify_stage5_tools() -> None:
+            async with Client("http://127.0.0.1:5500/mcp") as client:
+                tools = await client.list_tools()
+            names = {tool.name for tool in tools}
+            missing = EXPECTED_STAGE5_TOOLS - names
+            if missing:
+                raise RuntimeError(
+                    f"HTTP MCP is missing Stage 5 tools: {sorted(missing)}"
+                )
+            print(f"HTTP MCP Stage 5 tools ready: {sorted(EXPECTED_STAGE5_TOOLS)}")
+
+
+        asyncio.run(verify_stage5_tools())
+        PY
+
+  - id: stage5-runtime-smoke
+    name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        STAGE5_VOLUME="pao-cloud-stage5-runtime-$BUILD_ID"
+        cleanup() {
+          docker volume rm -f "$${STAGE5_VOLUME}" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        docker run --rm \
+          --cap-add=SYS_PTRACE \
+          --cap-add=SYS_ADMIN \
+          --security-opt seccomp=unconfined \
+          --security-opt apparmor=unconfined \
+          -v "$${STAGE5_VOLUME}:/var/lib/pao" \
+          --entrypoint /app/.venv/bin/python \
+          "pao-tools:cloudbuild-$BUILD_ID" \
+          /app/tests/docker_stage5_smoke.py
+
+  - id: tag-verified-image
+    name: "gcr.io/cloud-builders/docker"
+    args:
+      - "tag"
+      - "pao-tools:cloudbuild-$BUILD_ID"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:build-$BUILD_ID"
+
+  - id: tag-verified-latest
+    name: "gcr.io/cloud-builders/docker"
+    args:
+      - "tag"
+      - "pao-tools:cloudbuild-$BUILD_ID"
+      - "us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:latest"
 
 images:
-  - 'us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools'
+  - "us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:build-$BUILD_ID"
+  - "us-central1-docker.pkg.dev/$PROJECT_ID/pao-tools/pao-tools:latest"
 
 options:
   logging: CLOUD_LOGGING_ONLY

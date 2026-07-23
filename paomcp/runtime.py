@@ -66,7 +66,7 @@ def run_stdio() -> None:
 
 
 def run_http(
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 5500,
     attach_host: str = "127.0.0.1",
     attach_port: int = 5501,

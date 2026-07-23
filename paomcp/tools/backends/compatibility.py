@@ -154,7 +154,9 @@ class PwndbgCompatibility:
         command_result = self.list_commands()
         category_result = self.list_categories()
         version_result = self.gdb.execute_command("version")
+        core_help_result = self.gdb.execute_command("help generate-core-file")
         version_output = self._raw_output(version_result)
+        core_help_output = self._raw_output(core_help_result)
         versions = self._parse_versions(version_output)
         names = {item["name"] for item in command_result["parsed"].get("commands", [])}
         groups = {
@@ -175,6 +177,16 @@ class PwndbgCompatibility:
             )
         if critical_missing:
             warnings.append("Missing core commands: " + ", ".join(critical_missing))
+        generate_core_file_available = bool(
+            core_help_result.get("success")
+            and core_help_output.strip()
+            and "undefined command" not in core_help_output.lower()
+        )
+        if not generate_core_file_available:
+            warnings.append(
+                "GDB built-in generate-core-file is unavailable; typed core capture "
+                "will be disabled"
+            )
         report = {
             "success": bool(
                 command_result["success"] and version_result.get("success")
@@ -187,6 +199,13 @@ class PwndbgCompatibility:
             "command_count": len(names),
             "categories": category_result["parsed"]["categories"],
             "command_groups": groups,
+            "gdb_features": {
+                "generate_core_file": {
+                    "available": generate_core_file_available,
+                    "source": "gdb-cli",
+                    "command": "generate-core-file",
+                }
+            },
             "executables": {
                 name: shutil.which(name)
                 for name in ("pwndbg", "gdb", "gdbserver", "ropper", "ROPgadget")
@@ -196,6 +215,7 @@ class PwndbgCompatibility:
                 "version": version_output,
                 "commands": command_result["raw_output"],
                 "categories": category_result["raw_output"],
+                "generate_core_file_help": core_help_output,
             },
         }
         self._cached_capabilities = report

@@ -1,6 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This script predates the S8 target-provider and S10 authentication/isolation
+# work. It creates an unauthenticated public LoadBalancer and does not define the
+# privileged Kubernetes securityContext required by the debugger. Keep it
+# fail-closed unless an operator explicitly acknowledges those limitations.
+LEGACY_UNSAFE_ACK="I_UNDERSTAND_PAO_LEGACY_PUBLIC_DEPLOY_IS_UNSAFE"
+if [[ "${PAO_ACK_LEGACY_UNSAFE_PUBLIC_DEPLOY:-}" != "$LEGACY_UNSAFE_ACK" ]]; then
+  cat >&2 <<EOF
+ERROR: deploy.sh is a deprecated, unsafe legacy deployment path and is disabled.
+
+It publishes the unauthenticated MCP endpoint through a public LoadBalancer and
+does not configure the debugger privileges/isolation required for a supported
+Kubernetes runtime. Complete the S8 target-provider and S10 authentication/
+isolation design before using this path in production.
+
+For a disposable, network-isolated test only, acknowledge the risk explicitly:
+  export PAO_ACK_LEGACY_UNSAFE_PUBLIC_DEPLOY=$LEGACY_UNSAFE_ACK
+EOF
+  exit 64
+fi
+
+cat >&2 <<'EOF'
+WARNING: proceeding with the deprecated legacy public deployment.
+The MCP endpoint has no authentication, and this script intentionally does not
+grant SYS_PTRACE/SYS_ADMIN or an unconfined security profile. Debugger operations
+may fail. Do not use this path for production or on an untrusted network.
+EOF
+
 CLUSTER=${PAO_CLUSTER:-pao-cluster}
 REGION=${PAO_REGION:-us-central1}
 PROJECT=${PAO_GCP_PROJECT:?Set PAO_GCP_PROJECT to your Google Cloud project id}
@@ -21,7 +48,6 @@ else
   kubectl create deployment "$DEPLOY" --image="$IMAGE"
 fi
 
-# ← add this
 kubectl set resources deployment/"$DEPLOY" \
   --containers="$DEPLOY" \
   --requests=cpu=500m,memory=512Mi \

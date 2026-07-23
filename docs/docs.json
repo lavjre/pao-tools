@@ -78,6 +78,7 @@
 							"tool-reference/elf-runtime",
 							"tool-reference/debugger-memory",
 							"tool-reference/debugger-completion",
+							"tool-reference/crash-triage",
 							"tool-reference/debug-sessions",
 							"tool-reference/inspection",
 							"tool-reference/attach-api"
