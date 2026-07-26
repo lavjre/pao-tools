@@ -29,6 +29,7 @@ from .rop import (
 from .subproc import SubprocessTools
 from .targets import (
     AttachPidProvider,
+    GdbserverProvider,
     LocalProcessProvider,
     TargetError,
     TargetHandle,
@@ -36,6 +37,7 @@ from .targets import (
     TargetRegistry,
     TargetSpec,
     TargetState,
+    TcpRemoteProvider,
 )
 
 __all__ = [
@@ -70,4 +72,6 @@ __all__ = [
     "TargetRegistry",
     "LocalProcessProvider",
     "AttachPidProvider",
+    "GdbserverProvider",
+    "TcpRemoteProvider",
 ]

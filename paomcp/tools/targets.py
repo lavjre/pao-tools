@@ -152,6 +152,58 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def connect_target(
+        target_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Bring a remote-kind target's transport up (alias for start).
+
+        For remote providers (gdbserver, tcp_remote) this probes / spawns
+        the connection endpoint without touching the debugger.  Prefer
+        this over ``start_target`` for remote workflows so the verb
+        matches the intent.
+        """
+        services = get_services(ctx)
+        return services.target_registry.connect_target_response(target_id=target_id)
+
+    @mcp.tool()
+    @catch_errors()
+    async def disconnect_target(
+        target_id: str,
+        timeout_sec: float = 10.0,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Tear down the target's transport without freeing its registry slot.
+
+        Semantics mirror ``stop_target`` for remote kinds -- SIGTERM the
+        owned gdbserver, or (for ``tcp_remote``) simply detach without
+        touching the remote process.  Follow with ``reconnect_target``
+        if you plan to reuse the same target id.
+        """
+        services = get_services(ctx)
+        return services.target_registry.disconnect_target_response(
+            target_id=target_id, timeout_sec=timeout_sec
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def reconnect_target(
+        target_id: str,
+        timeout_sec: float = 10.0,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Disconnect then re-connect a target in one call.
+
+        Useful when a remote gdbserver's session drifts (target
+        crashed, connection stalled) but the spec is still valid.
+        """
+        services = get_services(ctx)
+        return services.target_registry.reconnect_target_response(
+            target_id=target_id, timeout_sec=timeout_sec
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def attach_debugger(
         target_id: str,
         session_id: Optional[str] = None,
