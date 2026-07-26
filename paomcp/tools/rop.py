@@ -327,5 +327,94 @@ def register(mcp: FastMCP) -> None:
             arch=arch,
         )
 
+    @mcp.tool()
+    @catch_errors()
+    async def validate_rop_chain(
+        chain: List[Mapping[str, Any]],
+        executable_mappings: Optional[List[Mapping[str, Any]]] = None,
+        bad_bytes: Optional[List[Any]] = None,
+        arch: str = "x86_64",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Static pass / fail / unknown verdict for a ROP chain.
+
+        Runs three checks and surfaces per-slot evidence for each:
+
+        * ``exec_mapping``     -- every gadget / target address lies
+          in an executable mapping.  Skipped with ``verdict="unknown"``
+          when ``executable_mappings`` is omitted (rather than silently
+          claiming pass).
+        * ``bad_bytes``        -- every encoded pointer (gadget,
+          target, immediate) is free of every forbidden byte value.
+        * ``register_clobber`` -- borrows the S7.3 constraint analyzer;
+          surfaces risky overwrites as a warn-level signal but does
+          not fail the chain by itself (a chain may deliberately
+          reload a register).
+
+        Overall ``verdict``: ``fail`` if any check failed, ``unknown``
+        if any check was skipped, otherwise ``pass``.  Dynamic
+        sandbox validation against a running debugger inferior is
+        deliberately deferred to a future extension rather than
+        faked here.
+
+        Args:
+            chain: Chain entries (as returned by ``build_rop_chain``).
+            executable_mappings: Optional vmmap-style list of
+                ``{start, end, permissions, file}`` mappings from the
+                target process; without them the exec-mapping check
+                returns ``unknown``.
+            bad_bytes: Optional forbidden byte values (int 0-255 or
+                ``"0x0a"`` strings).
+            arch: Target architecture.
+        """
+        services = get_services(ctx)
+        return services.rop_tools.validate_rop_chain(
+            chain=list(chain),
+            executable_mappings=list(executable_mappings or []),
+            bad_bytes=bad_bytes,
+            arch=arch,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def export_chain(
+        chain: List[Mapping[str, Any]],
+        format: str = "raw",
+        arch: str = "x86_64",
+        variable_name: str = "chain",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Serialize a chain into a raw / python / pwntools payload.
+
+        Formats:
+
+        * ``raw``       -- hex-encoded little-endian packed bytes
+          (drop straight into a payload buffer).
+        * ``python``    -- a self-contained ``struct.pack``-based
+          Python 3 snippet (no pwntools dependency).
+        * ``pwntools``  -- a ``p64(...)``-based snippet a caller can
+          paste into a pwntools exploit template; also sets
+          ``context.arch`` for you.
+
+        Every non-``raw`` output annotates each slot with the chain
+        entry's ``purpose`` field so the resulting snippet is
+        self-documenting.
+
+        Args:
+            chain: Chain entries.
+            format: One of ``"raw"``, ``"python"``, ``"pwntools"``.
+            arch: Target architecture (drives pointer width and
+                ``context.arch`` for pwntools output).
+            variable_name: Name of the Python variable holding the
+                payload in generated snippets.  Ignored for ``raw``.
+        """
+        services = get_services(ctx)
+        return services.rop_tools.export_chain(
+            chain=list(chain),
+            format=format,
+            arch=arch,
+            variable_name=variable_name,
+        )
+
 
 __all__ = ["register"]

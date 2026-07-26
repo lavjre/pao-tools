@@ -55,6 +55,10 @@ ONE_GADGET_SCHEMA = "pao.one-gadgets.v1"
 ROP_CHAIN_SCHEMA = "pao.rop-chain.v1"
 SIGRETURN_FRAME_SCHEMA = "pao.sigreturn-frame.v1"
 CHAIN_CONSTRAINTS_SCHEMA = "pao.chain-constraints.v1"
+CHAIN_VALIDATION_SCHEMA = "pao.chain-validation.v1"
+CHAIN_EXPORT_SCHEMA = "pao.chain-export.v1"
+
+CHAIN_EXPORT_FORMATS: Tuple[str, ...] = ("raw", "python", "pwntools")
 
 DEFAULT_ONE_GADGET_TIMEOUT_SEC = 30.0
 
@@ -2088,6 +2092,309 @@ class ChainBuilder:
         )
 
 
+class ChainValidatorError(RuntimeError):
+    """Raised when a chain validation input is malformed."""
+
+
+class ChainValidator:
+    """Static validation and export for typed ROP chains.
+
+    Validation is deliberately static: we check every gadget address
+    lands in an executable mapping, verify no encoded pointer contains
+    a forbidden byte, and surface a register-clobber summary drawn from
+    the S7.3 :meth:`ChainBuilder.explain_chain_constraints` analyzer.
+    Dynamic sandbox validation (execute the chain against a real
+    debugger inferior) requires a live target and is documented as a
+    future S7 extension rather than faked here.
+
+    Export supports three formats:
+
+    * ``raw``     -- hex-encoded little-endian pointer blob
+    * ``python``  -- ``struct.pack``-flavored snippet suitable for
+                     a Python 3 script (no pwntools dependency)
+    * ``pwntools`` -- a ``p64(...)`` payload string a caller can
+                      paste into a pwntools exploit template
+    """
+
+    def __init__(self, builder: Optional[ChainBuilder] = None) -> None:
+        self._builder = builder if builder is not None else ChainBuilder()
+
+    # ------------------------------------------------------------------
+    # Pure helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _mapping_contains(mapping: Mapping[str, Any], address: int) -> bool:
+        start = parse_int(mapping.get("start"))
+        end = parse_int(mapping.get("end"))
+        if start is None or end is None:
+            return False
+        return start <= address < end
+
+    @staticmethod
+    def _mapping_is_executable(mapping: Mapping[str, Any]) -> bool:
+        # Accept either a boolean field or a POSIX-style "r-xp" string.
+        if mapping.get("executable") is True:
+            return True
+        perms = str(mapping.get("permissions") or mapping.get("perms") or "")
+        return "x" in perms.lower()
+
+    @classmethod
+    def _classify_address(
+        cls,
+        address: int,
+        executable_mappings: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        matches: List[Mapping[str, Any]] = [
+            m for m in executable_mappings if cls._mapping_contains(m, address)
+        ]
+        if not matches:
+            return {"in_mapping": False, "executable": False, "mapping": None}
+        # If multiple overlap, prefer the executable one.
+        executable_hits = [m for m in matches if cls._mapping_is_executable(m)]
+        chosen = executable_hits[0] if executable_hits else matches[0]
+        return {
+            "in_mapping": True,
+            "executable": cls._mapping_is_executable(chosen),
+            "mapping": {
+                "start": parse_int(chosen.get("start")),
+                "end": parse_int(chosen.get("end")),
+                "file": chosen.get("file"),
+                "permissions": chosen.get("permissions") or chosen.get("perms"),
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Public typed operations
+    # ------------------------------------------------------------------
+    def validate_rop_chain(
+        self,
+        *,
+        chain: Sequence[Mapping[str, Any]],
+        executable_mappings: Optional[Sequence[Mapping[str, Any]]] = None,
+        bad_bytes: Optional[Sequence[Any]] = None,
+        arch: str = "x86_64",
+    ) -> Dict[str, Any]:
+        """Return a static pass / fail / unknown verdict for ``chain``.
+
+        Checks (each surfaces per-slot evidence):
+
+        * ``exec_mapping``  -- every gadget/target address lies in an
+          executable mapping (skipped with ``unknown`` when the caller
+          omits ``executable_mappings``)
+        * ``bad_bytes``     -- every gadget/target/immediate address,
+          when packed little-endian for the arch's pointer width, is
+          free of every forbidden byte
+        * ``register_clobber`` -- borrowed from
+          :meth:`ChainBuilder.explain_chain_constraints`; surfaces
+          risky overwrites but does not fail the chain by itself
+          because a plausible chain may deliberately reload a register.
+        """
+        canonical_arch = self._builder._canonical_arch(arch)
+        try:
+            pointer_bytes = self._builder._pointer_bytes(canonical_arch)
+        except ChainBuilderError as exc:
+            raise ChainValidatorError(str(exc)) from exc
+        normalized_bad_bytes = GadgetIndex._normalize_bad_bytes(bad_bytes)
+        executable_mappings_list = list(executable_mappings or [])
+        exec_check: Dict[str, Any] = {
+            "name": "exec_mapping",
+            "verdict": "unknown" if not executable_mappings_list else "pass",
+            "issues": [],
+            "checked_slots": [],
+        }
+        bad_byte_check: Dict[str, Any] = {
+            "name": "bad_bytes",
+            "verdict": "pass",
+            "issues": [],
+            "bad_bytes": normalized_bad_bytes,
+        }
+        for index, entry in enumerate(chain):
+            kind = entry.get("kind")
+            address: Optional[int] = None
+            if kind in ("gadget", "target"):
+                address = parse_int(entry.get("address"))
+            elif kind == "immediate":
+                address = parse_int(entry.get("value"))
+            if address is None:
+                continue
+            if kind in ("gadget", "target") and executable_mappings_list:
+                classification = self._classify_address(
+                    address, executable_mappings_list
+                )
+                classification["slot_index"] = index
+                classification["address"] = address
+                exec_check["checked_slots"].append(classification)
+                if not classification["in_mapping"]:
+                    exec_check["issues"].append(
+                        {
+                            "slot_index": index,
+                            "address": address,
+                            "reason": "address is outside every provided mapping",
+                        }
+                    )
+                elif not classification["executable"]:
+                    exec_check["issues"].append(
+                        {
+                            "slot_index": index,
+                            "address": address,
+                            "reason": "address is in a non-executable mapping",
+                        }
+                    )
+            if normalized_bad_bytes:
+                if GadgetIndex._address_contains_bad_byte(
+                    address, pointer_bytes, normalized_bad_bytes
+                ):
+                    bad_byte_check["issues"].append(
+                        {
+                            "slot_index": index,
+                            "address": address,
+                            "kind": kind,
+                            "reason": "encoded pointer contains a forbidden byte",
+                        }
+                    )
+        if exec_check["issues"]:
+            exec_check["verdict"] = "fail"
+        if bad_byte_check["issues"]:
+            bad_byte_check["verdict"] = "fail"
+
+        clobber_response = self._builder.explain_chain_constraints(
+            chain=chain, arch=canonical_arch
+        )
+        clobber_parsed = clobber_response["parsed"]
+        clobber_check = {
+            "name": "register_clobber",
+            "verdict": ("warn" if clobber_parsed.get("risky_overwrites") else "pass"),
+            "risky_overwrites": clobber_parsed.get("risky_overwrites") or [],
+        }
+
+        checks = [exec_check, bad_byte_check, clobber_check]
+        verdicts = {c["verdict"] for c in checks}
+        if "fail" in verdicts:
+            overall = "fail"
+        elif "unknown" in verdicts:
+            overall = "unknown"
+        else:
+            overall = "pass"
+        return build_backend_response(
+            "validate_rop_chain",
+            parsed={
+                "schema": CHAIN_VALIDATION_SCHEMA,
+                "arch": canonical_arch,
+                "pointer_bytes": pointer_bytes,
+                "slot_count": len(chain),
+                "verdict": overall,
+                "checks": checks,
+            },
+            raw_responses=[],
+            state="STATIC",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def export_chain(
+        self,
+        *,
+        chain: Sequence[Mapping[str, Any]],
+        format: str = "raw",
+        arch: str = "x86_64",
+        variable_name: str = "chain",
+    ) -> Dict[str, Any]:
+        """Serialize a chain into a raw / python / pwntools payload."""
+        if format not in CHAIN_EXPORT_FORMATS:
+            raise ChainValidatorError(
+                f"unsupported export format {format!r}; expected one of "
+                f"{CHAIN_EXPORT_FORMATS}"
+            )
+        canonical_arch = self._builder._canonical_arch(arch)
+        try:
+            pointer_bytes = self._builder._pointer_bytes(canonical_arch)
+        except ChainBuilderError as exc:
+            raise ChainValidatorError(str(exc)) from exc
+        try:
+            raw_bytes = self._builder._encode_entries(chain, pointer_bytes)
+        except ChainBuilderError as exc:
+            raise ChainValidatorError(str(exc)) from exc
+        text: str
+        if format == "raw":
+            text = raw_bytes.hex()
+        elif format == "python":
+            struct_fmt = "<Q" if pointer_bytes == 8 else "<I"
+            lines = ["import struct", "", f'{variable_name} = b""']
+            for entry in chain:
+                kind = entry.get("kind")
+                if kind == "raw_bytes":
+                    payload = entry.get("bytes") or b""
+                    if isinstance(payload, str):
+                        payload = bytes.fromhex(payload)
+                    lines.append(f"{variable_name} += bytes.fromhex({payload.hex()!r})")
+                    continue
+                raw_value = (
+                    entry.get("address")
+                    if kind in ("gadget", "target")
+                    else entry.get("value")
+                )
+                value = parse_int(raw_value)
+                if value is None:
+                    raise ChainValidatorError(
+                        f"chain entry #{len(lines)} is missing a numeric "
+                        f"address/value for kind={kind!r}"
+                    )
+                purpose = entry.get("purpose") or kind
+                lines.append(
+                    f"{variable_name} += struct.pack({struct_fmt!r}, {value:#x})"
+                    f"  # {purpose}"
+                )
+            text = "\n".join(lines)
+        else:  # pwntools
+            pack_fn = "p64" if pointer_bytes == 8 else "p32"
+            lines = [
+                "from pwn import *",
+                "",
+                f"context.arch = {'amd64' if canonical_arch == 'x86_64' else canonical_arch!r}",
+                "",
+                f'{variable_name} = b""',
+            ]
+            for entry in chain:
+                kind = entry.get("kind")
+                if kind == "raw_bytes":
+                    payload = entry.get("bytes") or b""
+                    if isinstance(payload, str):
+                        payload = bytes.fromhex(payload)
+                    lines.append(f"{variable_name} += bytes.fromhex({payload.hex()!r})")
+                    continue
+                raw_value = (
+                    entry.get("address")
+                    if kind in ("gadget", "target")
+                    else entry.get("value")
+                )
+                value = parse_int(raw_value)
+                if value is None:
+                    raise ChainValidatorError(
+                        f"chain entry #{len(lines)} is missing a numeric "
+                        f"address/value for kind={kind!r}"
+                    )
+                purpose = entry.get("purpose") or kind
+                lines.append(f"{variable_name} += {pack_fn}({value:#x})  # {purpose}")
+            text = "\n".join(lines)
+        return build_backend_response(
+            "export_chain",
+            parsed={
+                "schema": CHAIN_EXPORT_SCHEMA,
+                "arch": canonical_arch,
+                "pointer_bytes": pointer_bytes,
+                "format": format,
+                "slot_count": len(chain),
+                "raw_bytes_length": len(raw_bytes),
+                "raw_bytes": raw_bytes.hex(),
+                "text": text,
+            },
+            raw_responses=[],
+            state="STATIC",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+
 class RopTools:
     """Facade grouping every S7 typed backend under one session attribute."""
 
@@ -2096,10 +2403,14 @@ class RopTools:
         gadgets: Optional[GadgetIndex] = None,
         libc: Optional[LibcIdentifier] = None,
         chains: Optional[ChainBuilder] = None,
+        validator: Optional[ChainValidator] = None,
     ) -> None:
         self.gadgets = gadgets if gadgets is not None else GadgetIndex()
         self.libc = libc if libc is not None else LibcIdentifier()
         self.chains = chains if chains is not None else ChainBuilder(self.gadgets)
+        self.validator = (
+            validator if validator is not None else ChainValidator(self.chains)
+        )
 
     # ---- S7.1 gadget indexing ----------------------------------------
     def find_gadgets(self, **kwargs: Any) -> Dict[str, Any]:
@@ -2128,6 +2439,13 @@ class RopTools:
     def explain_chain_constraints(self, **kwargs: Any) -> Dict[str, Any]:
         return self.chains.explain_chain_constraints(**kwargs)
 
+    # ---- S7.4 chain validation + export ------------------------------
+    def validate_rop_chain(self, **kwargs: Any) -> Dict[str, Any]:
+        return self.validator.validate_rop_chain(**kwargs)
+
+    def export_chain(self, **kwargs: Any) -> Dict[str, Any]:
+        return self.validator.export_chain(**kwargs)
+
 
 __all__ = [
     "GadgetIndex",
@@ -2137,6 +2455,8 @@ __all__ = [
     "LibcIdentifierError",
     "ChainBuilder",
     "ChainBuilderError",
+    "ChainValidator",
+    "ChainValidatorError",
     "SymbolExtractor",
     "OneGadgetRunner",
     "RopTools",
@@ -2148,6 +2468,9 @@ __all__ = [
     "ROP_CHAIN_SCHEMA",
     "SIGRETURN_FRAME_SCHEMA",
     "CHAIN_CONSTRAINTS_SCHEMA",
+    "CHAIN_VALIDATION_SCHEMA",
+    "CHAIN_EXPORT_SCHEMA",
+    "CHAIN_EXPORT_FORMATS",
     "DEFAULT_MAX_GADGETS",
     "MAX_MAX_GADGETS",
     "DEFAULT_MAX_INSTRUCTIONS",

@@ -18,6 +18,8 @@ from .python import PythonTools
 from .rop import (
     ChainBuilder,
     ChainBuilderError,
+    ChainValidator,
+    ChainValidatorError,
     GadgetIndex,
     GadgetIndexError,
     LibcIdentifier,
@@ -47,5 +49,7 @@ __all__ = [
     "LibcIdentifierError",
     "ChainBuilder",
     "ChainBuilderError",
+    "ChainValidator",
+    "ChainValidatorError",
     "RopTools",
 ]
