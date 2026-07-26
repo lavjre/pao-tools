@@ -25,6 +25,7 @@ from .research import (
     ResearchSnapshot,
     TimelineEvent,
 )
+from .research_bundle import BundleError, ResearchBundle
 from .rop import (
     ChainBuilder,
     ChainBuilderError,
@@ -100,4 +101,6 @@ __all__ = [
     "ResearchSession",
     "ResearchSnapshot",
     "TimelineEvent",
+    "BundleError",
+    "ResearchBundle",
 ]

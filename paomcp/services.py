@@ -12,6 +12,7 @@ from paomcp.tools.backends import (
     GhidraDecompiler,
     GitTools,
     PythonTools,
+    ResearchBundle,
     ResearchRegistry,
     RopTools,
     SubprocessTools,
@@ -37,6 +38,7 @@ class AppServices:
     rop_tools: RopTools
     target_registry: TargetRegistry
     research_registry: ResearchRegistry
+    research_bundle: ResearchBundle
     paopipe_sessions: Dict[str, PaoPipe] = field(default_factory=dict)
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -117,7 +119,10 @@ def create_services(
         debugger_compatibility=debugger_compatibility,
         rop_tools=RopTools(),
         target_registry=TargetRegistry(),
-        research_registry=ResearchRegistry(),
+        research_registry=(research_registry := ResearchRegistry()),
+        research_bundle=ResearchBundle(
+            research_registry, artifact_store=artifact_store
+        ),
     )
     artifact_store.start_cleanup_worker()
     return services

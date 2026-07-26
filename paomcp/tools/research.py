@@ -335,5 +335,83 @@ def register(mcp: FastMCP) -> None:
             session_id=session_id, before=before, after=after
         )
 
+    @mcp.tool()
+    @catch_errors()
+    async def export_research_session(
+        session_id: str,
+        destination: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Serialize a research session (+ referenced artifacts) into a zip.
+
+        The bundle contains ``manifest.json`` (full session payload
+        including notes, hypotheses, evidence, snapshots and timeline),
+        ``integrity.json`` (SHA-256 per artifact) and one
+        content-addressed file per referenced artifact under
+        ``artifacts/``.  Crash / heap / tool_result / external / note
+        references stay as opaque strings in the manifest -- they
+        point at stores the recipient may or may not have; the
+        bundle records the reference so a later report can still
+        cite them without duplicating their bytes.
+
+        Args:
+            session_id: Research session to export.
+            destination: Local file path for the ``.zip`` bundle.
+        """
+        services = get_services(ctx)
+        return services.research_bundle.export_response(
+            session_id=session_id, destination=destination
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def import_research_session(
+        source_path: str,
+        artifact_destination_dir: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Verify then rehydrate a research bundle into a fresh session.
+
+        The imported session gets a NEW ``session_id`` so an import
+        never clobbers an existing session; the origin id is recorded
+        in ``metadata.imported_from``.  Every note / hypothesis /
+        evidence / snapshot / timeline id is remapped so
+        cross-references stay internally consistent.  When
+        ``artifact_destination_dir`` is set, referenced artifacts are
+        extracted there (named by their SHA-256) so the caller can
+        re-ingest them into the local artifact store.
+
+        Args:
+            source_path: Local path to the bundle ``.zip``.
+            artifact_destination_dir: Optional directory to extract
+                artifact payloads into.  Omit to skip extraction.
+        """
+        services = get_services(ctx)
+        return services.research_bundle.import_response(
+            source_path=source_path,
+            artifact_destination_dir=artifact_destination_dir,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def verify_research_bundle(
+        source_path: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Verify a research bundle without importing it.
+
+        Checks: the zip opens cleanly and carries manifest.json +
+        integrity.json; every artifact listed in the integrity file
+        exists and its SHA-256 matches; no unexpected top-level files
+        are present.  Returns ``verdict = "valid"`` or ``"invalid"``
+        with a per-problem list so a caller can decide whether to
+        import.
+
+        Args:
+            source_path: Local path to the bundle ``.zip``.
+        """
+        services = get_services(ctx)
+        return services.research_bundle.verify_response(source_path=source_path)
+
 
 __all__ = ["register"]
