@@ -147,6 +147,13 @@ class TargetSpec:
     qemu_binary: Optional[str] = None
     qemu_ld_prefix: Optional[str] = None
     qemu_extra_args: List[str] = field(default_factory=list)
+    # QEMU system
+    kernel_path: Optional[str] = None
+    initrd_path: Optional[str] = None
+    disk_path: Optional[str] = None
+    kernel_cmdline: Optional[str] = None
+    qemu_memory: Optional[str] = None
+    qemu_machine: Optional[str] = None
     # Metadata (informational)
     arch: Optional[str] = None
     platform: Optional[str] = None
@@ -182,6 +189,12 @@ class TargetSpec:
             "docker_workdir",
             "qemu_binary",
             "qemu_ld_prefix",
+            "kernel_path",
+            "initrd_path",
+            "disk_path",
+            "kernel_cmdline",
+            "qemu_memory",
+            "qemu_machine",
             "arch",
             "platform",
             "notes",
@@ -259,9 +272,15 @@ class TargetSpec:
                     "qemu_user requires 'qemu_binary' (e.g. 'qemu-x86_64')"
                 )
         elif kind == TargetKind.QEMU_SYSTEM:
-            # QEMU system deferred to a later stage; the field validator
-            # is honest that we do not yet support it.
-            raise TargetError("qemu_system provider is not implemented in this stage")
+            if not self.qemu_binary:
+                raise TargetError(
+                    "qemu_system requires 'qemu_binary' " "(e.g. 'qemu-system-x86_64')"
+                )
+            if not (self.kernel_path or self.disk_path):
+                raise TargetError(
+                    "qemu_system requires at least one of 'kernel_path' or "
+                    "'disk_path'"
+                )
 
 
 @dataclass
@@ -1357,6 +1376,155 @@ class QemuUserProvider:
         }
 
 
+class QemuSystemProvider:
+    """Boot a full-system QEMU VM with a paused gdb stub bound to a TCP port.
+
+    ``start`` spawns ``qemu-system-<arch> -gdb tcp:host:port -S
+    [-M machine] [-m memory] [-kernel K] [-initrd I] [-append CMD]
+    [-drive file=DISK,format=raw] [-nographic] [extra]`` -- the ``-S``
+    flag holds the guest CPU at the reset vector so :meth:`attach_debugger`
+    is guaranteed a stopped guest to attach to.  ``attach_debugger``
+    uses the shared ``_attach_via_gdb_remote`` helper so the wire
+    contract matches every other remote provider.
+
+    A caller is responsible for providing a functional VM
+    configuration (kernel / initrd / disk); we do not synthesize one.
+    Windows hosts have no qemu-system binaries, so real end-to-end
+    exercise happens from WSL / Linux.  The spec validation and error
+    paths are covered here regardless of host.
+    """
+
+    kind = TargetKind.QEMU_SYSTEM
+
+    def __init__(
+        self,
+        *,
+        listen_timeout_sec: float = DEFAULT_QEMU_LISTEN_TIMEOUT_SEC,
+    ) -> None:
+        self._listen_timeout_sec = listen_timeout_sec
+
+    @staticmethod
+    def _build_argv(spec: TargetSpec, host: str, port: int) -> List[str]:
+        if not spec.qemu_binary:
+            raise TargetError(
+                "qemu_system spec requires 'qemu_binary' " "(e.g. 'qemu-system-x86_64')"
+            )
+        argv: List[str] = [
+            spec.qemu_binary,
+            "-gdb",
+            f"tcp:{host}:{port}",
+            "-S",  # freeze the guest at boot so attach never races
+            "-nographic",
+        ]
+        if spec.qemu_machine:
+            argv += ["-M", spec.qemu_machine]
+        if spec.qemu_memory:
+            argv += ["-m", spec.qemu_memory]
+        if spec.kernel_path:
+            argv += ["-kernel", os.path.abspath(spec.kernel_path)]
+        if spec.initrd_path:
+            argv += ["-initrd", os.path.abspath(spec.initrd_path)]
+        if spec.kernel_cmdline:
+            argv += ["-append", spec.kernel_cmdline]
+        if spec.disk_path:
+            argv += [
+                "-drive",
+                f"file={os.path.abspath(spec.disk_path)},format=raw",
+            ]
+        argv += list(spec.qemu_extra_args or [])
+        return argv
+
+    def start(self, handle: TargetHandle) -> None:
+        with handle._lock:
+            spec = handle.spec
+            for path_attr in ("kernel_path", "initrd_path", "disk_path"):
+                path = getattr(spec, path_attr)
+                if path and not os.path.isfile(path):
+                    raise TargetError(
+                        f"qemu_system {path_attr} '{path}' does not exist"
+                    )
+            host = spec.host or "127.0.0.1"
+            port = spec.port or _find_free_tcp_port(host)
+            argv = self._build_argv(spec, host, port)
+            handle._set_state(TargetState.STARTING)
+            env_full = dict(os.environ)
+            env_full.update(spec.env or {})
+            try:
+                handle.process = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=spec.working_dir or None,
+                    env=env_full,
+                    start_new_session=True,
+                )
+                handle.host = host
+                handle.port = port
+                handle.metadata["run_argv"] = argv
+                handle.started_at = datetime.now(timezone.utc).isoformat()
+                if not _wait_for_tcp_listen(
+                    host, port, timeout_sec=self._listen_timeout_sec
+                ):
+                    raise TargetError(
+                        f"qemu-system did not open gdb stub on {host}:{port} "
+                        f"within {self._listen_timeout_sec:.1f}s"
+                    )
+                handle._set_state(TargetState.RUNNING)
+            except Exception as exc:
+                handle._record_error(exc)
+                raise
+
+    def stop(
+        self,
+        handle: TargetHandle,
+        *,
+        timeout_sec: float = DEFAULT_TARGET_STOP_TIMEOUT_SEC,
+    ) -> None:
+        LocalProcessProvider().stop(handle, timeout_sec=timeout_sec)
+
+    def attach_debugger(
+        self, handle: TargetHandle, gdb: GdbController
+    ) -> Dict[str, Any]:
+        with handle._lock:
+            if handle.host is None or handle.port is None:
+                raise TargetError(
+                    f"qemu_system target '{handle.target_id}' is not listening; "
+                    "call start_target first"
+                )
+            attach_result, context = _attach_via_gdb_remote(
+                gdb, handle.host, handle.port
+            )
+            if attach_result.get("success"):
+                handle._set_state(TargetState.ATTACHED)
+                handle.attached_at = datetime.now(timezone.utc).isoformat()
+            else:
+                handle._set_state(TargetState.ERROR)
+                handle.error = attach_result.get("error") or "qemu-system attach failed"
+                handle.error_type = attach_result.get("type") or "QemuSystemAttachError"
+            return {
+                "attach": attach_result,
+                "context": context,
+                "state": handle.state.value,
+                "host": handle.host,
+                "port": handle.port,
+            }
+
+    def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]:
+        return {
+            "start": True,
+            "stop": True,
+            "attach_debugger": True,
+            "file_sync": False,
+            "reconnect": True,
+            "port_forward": False,
+            "notes": (
+                "spawns qemu-system-<arch> with '-gdb tcp:host:port -S' and "
+                "attaches via '-target-select remote host:port'"
+            ),
+        }
+
+
 class TargetRegistry:
     """Thread-safe, session-scoped, bounded target registry.
 
@@ -1383,6 +1551,7 @@ class TargetRegistry:
             TargetKind.SSH: SshProvider(),
             TargetKind.DOCKER: DockerProvider(),
             TargetKind.QEMU_USER: QemuUserProvider(),
+            TargetKind.QEMU_SYSTEM: QemuSystemProvider(),
         }
         self._lock = threading.RLock()
 
@@ -1824,6 +1993,7 @@ __all__ = [
     "DockerProvider",
     "DockerRunner",
     "QemuUserProvider",
+    "QemuSystemProvider",
     "DEFAULT_DOCKER_TIMEOUT_SEC",
     "DEFAULT_QEMU_LISTEN_TIMEOUT_SEC",
     "DEFAULT_SSH_CONNECT_TIMEOUT_SEC",

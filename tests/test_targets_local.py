@@ -90,9 +90,9 @@ class TestSpecFromConfig:
         with pytest.raises(TargetError, match="unknown target kind"):
             TargetSpec.from_config("teleporter", {})
 
-    def test_qemu_system_is_explicitly_unsupported_here(self) -> None:
-        with pytest.raises(TargetError, match="qemu_system.*not implemented"):
-            TargetSpec.from_config("qemu_system", {"binary_path": "/kernel"})
+    def test_qemu_system_requires_kernel_or_disk(self) -> None:
+        with pytest.raises(TargetError, match="kernel_path.*disk_path"):
+            TargetSpec.from_config("qemu_system", {"qemu_binary": "qemu-system-x86_64"})
 
 
 # ---------------------------------------------------------------------------

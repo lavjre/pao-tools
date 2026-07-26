@@ -32,6 +32,7 @@ from .targets import (
     DockerProvider,
     GdbserverProvider,
     LocalProcessProvider,
+    QemuSystemProvider,
     QemuUserProvider,
     SshProvider,
     TargetError,
@@ -80,4 +81,5 @@ __all__ = [
     "SshProvider",
     "DockerProvider",
     "QemuUserProvider",
+    "QemuSystemProvider",
 ]
