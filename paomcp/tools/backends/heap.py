@@ -1878,6 +1878,20 @@ FASTBIN_INSPECTION_SCHEMA = "pao.glibc-fastbins.v1"
 # malicious/broken heap.  Sized generously so real workloads never hit it.
 DEFAULT_MAX_CHUNKS_PER_FASTBIN = 128
 
+# glibc's per-thread tcache is capped at TCACHE_MAX_BINS singly-linked
+# chains, one per aligned size class up to ~1 KiB (64-bit) / ~0.5 KiB
+# (32-bit).  The value is compile-time in glibc and has been stable at 64
+# across every version that ships tcache (2.26+).
+TCACHE_MAX_BINS = 64
+
+TCACHE_INSPECTION_SCHEMA = "pao.glibc-tcache.v1"
+
+# Per-bin traversal cap for tcache chains.  Real tcache bins hold at most
+# tcache_count (default 7) chunks in normal operation but corruption can
+# lengthen a chain arbitrarily, so a bound is required.  Sized generously
+# above the real limit.
+DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN = 64
+
 
 class GlibcBins:
     """Walk glibc bin chains (fastbins today; tcache/regular bins later).
@@ -2276,6 +2290,468 @@ class GlibcBins:
             warnings=warnings or None,
         )
 
+    # ------------------------------------------------------------------
+    # Stage 6.3c -- glibc tcache traversal
+    # ------------------------------------------------------------------
+    @staticmethod
+    def tcache_size_for_index(index: int, pointer_bits: int) -> int:
+        """Expected chunk size for tcache bin ``index`` on the target.
+
+        Matches glibc's ``csize2tidx`` inverse: same size formula as
+        fastbins (``(2 + i) * MALLOC_ALIGNMENT``) but with a wider index
+        range (0..TCACHE_MAX_BINS-1 = 0..63 vs fastbins' 0..9).  On
+        64-bit that yields 0x20/0x30/.../0x410; on 32-bit 0x10/.../0x208.
+        """
+        if pointer_bits not in (32, 64):
+            raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
+        if index < 0 or index >= TCACHE_MAX_BINS:
+            raise ValueError(
+                f"tcache index out of range [0, {TCACHE_MAX_BINS}): {index!r}"
+            )
+        malloc_alignment = 2 * (pointer_bits // 8)
+        return (2 + index) * malloc_alignment
+
+    def _walk_tcache_chain(
+        self,
+        head_user_address: int,
+        mappings: Sequence[Mapping[str, Any]],
+        pointer_bits: int,
+        byteorder: str,
+        safe_linking: str,
+        max_chunks: int,
+        cancellation_check: Optional[Callable[[], None]],
+    ) -> Dict[str, Any]:
+        """Walk a tcache chain from a head USER address.
+
+        Unlike a fastbin chain (whose head is a chunk address), a tcache
+        head is the address of a ``tcache_entry`` -- i.e. the user pointer
+        of the containing chunk.  ``next`` is at offset 0 of the entry,
+        which coincides with the chunk's ``fd`` slot.  Both the header
+        (at user - 2*SIZE_SZ) and the next pointer (at user + 0) are read
+        so the entry carries the chunk size alongside the chain link.
+        """
+        size_sz = pointer_bits // 8
+        header_size = 2 * size_sz
+        chain: List[Dict[str, Any]] = []
+        visited: Dict[int, int] = {}
+        cycle_detected = False
+        truncated = False
+        current: int = head_user_address
+
+        while current != 0:
+            if cancellation_check is not None:
+                cancellation_check()
+            if current in visited:
+                cycle_detected = True
+                break
+            if len(chain) >= max_chunks:
+                truncated = True
+                break
+            visited[current] = len(chain)
+            chunk_address = current - header_size
+            entry: Dict[str, Any] = {
+                "index": len(chain),
+                "user_address": current,
+                "chunk_address": chunk_address,
+                "in_mapping": mapping_for(current, mappings) is not None,
+            }
+            header, header_err = self._read_bytes(chunk_address, header_size)
+            if header_err is not None or len(header) < header_size:
+                entry["chunk_readable"] = False
+                entry["chunk_read_error"] = header_err or "short read"
+                entry["size_field"] = None
+                entry["size"] = None
+            else:
+                entry["chunk_readable"] = True
+                size_field = int.from_bytes(
+                    header[size_sz : 2 * size_sz], byteorder  # type: ignore[arg-type]
+                )
+                entry["size_field"] = size_field
+                entry["size"] = size_field & ~SIZE_BITS_MASK
+
+            next_bytes, next_err = self._read_bytes(current, size_sz)
+            if next_err is not None or len(next_bytes) < size_sz:
+                entry["next_raw"] = None
+                entry["next_decoded"] = None
+                entry["next_read_error"] = next_err or "short read"
+                entry["safe_linking_applied"] = False
+                chain.append(entry)
+                break
+            next_raw = int.from_bytes(next_bytes, byteorder)  # type: ignore[arg-type]
+            entry["next_raw"] = next_raw
+            if safe_linking == "enabled":
+                entry["next_decoded"] = self.decode_safe_linked(next_raw, current)
+                entry["safe_linking_applied"] = True
+            else:
+                entry["next_decoded"] = next_raw
+                entry["safe_linking_applied"] = False
+            chain.append(entry)
+            current = entry["next_decoded"]
+
+        return {
+            "chunks": chain,
+            "length": len(chain),
+            "truncated": truncated,
+            "cycle_detected": cycle_detected,
+        }
+
+    def inspect_tcache(
+        self,
+        *,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Walk the per-thread tcache bins and their singly-linked chains.
+
+        Requires libc debug symbols to resolve the thread-local ``tcache``
+        pointer, ``sizeof(struct tcache_perthread_struct)`` and the
+        ``counts``/``entries`` field offsets (plus the size of a single
+        counts element -- ``uint8_t`` before glibc 2.30, ``uint16_t``
+        from 2.30 onwards).  With stripped libc the tool returns
+        ``verdict = "unresolvable"`` rather than guessing.
+
+        When the thread-local ``tcache`` is NULL (thread has not touched
+        tcache yet) the tool returns ``verdict = "uninitialized"`` with
+        empty bins -- a legitimate, not-error state.
+        """
+        if max_chunks_per_bin <= 0:
+            raise ValueError(
+                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
+            )
+
+        classification, mappings, profile, component_status = self._prepare_context(
+            cancellation_check
+        )
+        if classification["family"] != "glibc":
+            return self.arenas._unsupported_response(
+                "inspect_tcache",
+                TCACHE_INSPECTION_SCHEMA,
+                classification,
+                profile,
+                extra={
+                    "tcache_address": None,
+                    "bins": [],
+                    "component_status": component_status,
+                },
+            )
+
+        resolver = TcacheLayoutResolver(self.debugger)
+        layout = resolver.resolve()
+
+        tcache_address = layout.get("tcache_address")
+        struct_size = layout.get("struct_size")
+        counts_offset = layout["offsets"].get("counts")
+        entries_offset = layout["offsets"].get("entries")
+        counts_entry_size = layout.get("counts_entry_size")
+
+        if (
+            tcache_address is None
+            or struct_size is None
+            or struct_size <= 0
+            or counts_offset is None
+            or entries_offset is None
+            or counts_entry_size is None
+            or counts_entry_size <= 0
+        ):
+            return build_backend_response(
+                "inspect_tcache",
+                parsed={
+                    "schema": TCACHE_INSPECTION_SCHEMA,
+                    "tcache_address": tcache_address,
+                    "layout": layout,
+                    "allocator": {
+                        "family": classification["family"],
+                        "version": classification.get("version"),
+                        "confidence": classification.get("confidence"),
+                    },
+                    "target_profile": profile,
+                    "bins": [],
+                    "component_status": component_status,
+                    "supported": True,
+                    "verdict": "unresolvable",
+                    "reason": (
+                        "tcache address, struct size or field offsets could "
+                        "not be resolved via debug symbols"
+                    ),
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[
+                    "libc debug symbols are required to locate the tcache "
+                    "thread-local and its layout; install libc6-dbg / "
+                    "glibc-debuginfo or use a libc built with -g"
+                ],
+            )
+
+        pointer_bits = profile.get("pointer_bits")
+        if pointer_bits not in (32, 64):
+            raise RuntimeError(
+                "Cannot walk tcache without a resolved pointer width; "
+                f"target_profile returned pointer_bits={pointer_bits!r}"
+            )
+        size_sz = pointer_bits // 8
+        byteorder = (
+            profile.get("byteorder")
+            if profile.get("byteorder") in ("little", "big")
+            else "little"
+        )
+        assert byteorder is not None
+        safe_linking = classification.get("safe_linking", "unknown")
+
+        warnings: List[str] = []
+        if profile.get("byteorder") not in ("little", "big"):
+            warnings.append(
+                "byteorder could not be resolved from the target; parsed "
+                "with little-endian default"
+            )
+        if safe_linking == "unknown":
+            warnings.append(
+                "safe-linking applicability is unknown (libc version was "
+                "not resolved); next pointers reported as raw with no decode"
+            )
+
+        layout_out: Dict[str, Any] = {
+            "tcache_address": tcache_address,
+            "struct_size": struct_size,
+            "counts_offset": counts_offset,
+            "counts_entry_size": counts_entry_size,
+            "entries_offset": entries_offset,
+            "entries_entry_size": layout.get("entries_entry_size"),
+            "unresolved_fields": layout.get("unresolved_fields", []),
+            "resolution_source": layout.get("resolution_source"),
+        }
+        allocator_out = {
+            "family": classification["family"],
+            "version": classification.get("version"),
+            "confidence": classification.get("confidence"),
+            "safe_linking": safe_linking,
+        }
+        safe_linking_out = {
+            "state": safe_linking,
+            "applied": safe_linking == "enabled",
+        }
+
+        if tcache_address == 0:
+            # Thread has never allocated a chunk in the tcache range yet.
+            # This is a well-defined empty state, NOT an error.
+            empty_bins: List[Dict[str, Any]] = [
+                {
+                    "index": i,
+                    "size_class": self.tcache_size_for_index(i, pointer_bits),
+                    "count": 0,
+                    "head": None,
+                    "chain": [],
+                    "length": 0,
+                    "truncated": False,
+                    "cycle_detected": False,
+                }
+                for i in range(TCACHE_MAX_BINS)
+            ]
+            return build_backend_response(
+                "inspect_tcache",
+                parsed={
+                    "schema": TCACHE_INSPECTION_SCHEMA,
+                    "tcache_address": 0,
+                    "layout": layout_out,
+                    "allocator": allocator_out,
+                    "safe_linking": safe_linking_out,
+                    "target_profile": profile,
+                    "bins": empty_bins,
+                    "max_chunks_per_bin": max_chunks_per_bin,
+                    "component_status": component_status,
+                    "supported": True,
+                    "verdict": "uninitialized",
+                    "reason": (
+                        "tcache thread-local is NULL; the thread has not "
+                        "populated tcache yet"
+                    ),
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+
+        if cancellation_check is not None:
+            cancellation_check()
+        raw, err = self._read_bytes(tcache_address, struct_size)
+        if err is not None or len(raw) < struct_size:
+            warnings.append(f"tcache struct read: {err or 'short read'}")
+            return build_backend_response(
+                "inspect_tcache",
+                parsed={
+                    "schema": TCACHE_INSPECTION_SCHEMA,
+                    "tcache_address": tcache_address,
+                    "layout": layout_out,
+                    "allocator": allocator_out,
+                    "safe_linking": safe_linking_out,
+                    "target_profile": profile,
+                    "bins": [],
+                    "raw_hex": raw.hex(),
+                    "component_status": component_status,
+                    "supported": True,
+                    "verdict": "unreadable",
+                    "reason": err or "short read",
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings,
+            )
+
+        # Decode counts[] and entries[] from the read bytes.
+        counts: List[Optional[int]] = []
+        for i in range(TCACHE_MAX_BINS):
+            offset = counts_offset + i * counts_entry_size
+            end = offset + counts_entry_size
+            if end > len(raw):
+                counts.append(None)
+            else:
+                counts.append(int.from_bytes(raw[offset:end], byteorder))  # type: ignore[arg-type]
+        heads: List[Optional[int]] = []
+        for i in range(TCACHE_MAX_BINS):
+            offset = entries_offset + i * size_sz
+            end = offset + size_sz
+            if end > len(raw):
+                heads.append(None)
+            else:
+                heads.append(int.from_bytes(raw[offset:end], byteorder))  # type: ignore[arg-type]
+
+        bins_out: List[Dict[str, Any]] = []
+        for i in range(TCACHE_MAX_BINS):
+            head = heads[i]
+            bin_entry: Dict[str, Any] = {
+                "index": i,
+                "size_class": self.tcache_size_for_index(i, pointer_bits),
+                "count": counts[i],
+                "head": head,
+                "chain": [],
+                "length": 0,
+                "truncated": False,
+                "cycle_detected": False,
+            }
+            if head is None or head == 0:
+                bins_out.append(bin_entry)
+                continue
+            walk = self._walk_tcache_chain(
+                head,
+                mappings,
+                pointer_bits,
+                byteorder,
+                safe_linking,
+                max_chunks_per_bin,
+                cancellation_check,
+            )
+            bin_entry["chain"] = walk["chunks"]
+            bin_entry["length"] = walk["length"]
+            bin_entry["truncated"] = walk["truncated"]
+            bin_entry["cycle_detected"] = walk["cycle_detected"]
+            bins_out.append(bin_entry)
+
+        return build_backend_response(
+            "inspect_tcache",
+            parsed={
+                "schema": TCACHE_INSPECTION_SCHEMA,
+                "tcache_address": tcache_address,
+                "layout": layout_out,
+                "allocator": allocator_out,
+                "safe_linking": safe_linking_out,
+                "target_profile": profile,
+                "bins": bins_out,
+                "max_chunks_per_bin": max_chunks_per_bin,
+                "raw_hex": raw.hex(),
+                "component_status": component_status,
+                "supported": True,
+                "verdict": "parsed",
+            },
+            raw_responses=[],
+            state=self.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings or None,
+        )
+
+
+class TcacheLayoutResolver:
+    """Resolve the per-thread ``tcache`` pointer and struct layout via GDB.
+
+    Uses ``-data-evaluate-expression`` to interrogate the running inferior
+    for the thread-local ``tcache`` symbol address, the size of
+    ``struct tcache_perthread_struct``, the offsets of its ``counts`` and
+    ``entries`` fields, and the size of a single counts element (glibc
+    2.29- stores ``uint8_t counts[]`` while 2.30+ stores ``uint16_t
+    counts[]``).  Requires libc debug symbols; with a stripped libc each
+    unresolved value is reported explicitly rather than guessed.
+    """
+
+    FIELD_NAMES: Tuple[str, ...] = ("counts", "entries")
+
+    def __init__(self, debugger: DebuggerOperations) -> None:
+        self.debugger = debugger
+
+    def _eval_int(self, expression: str) -> Optional[int]:
+        result = self.debugger.evaluate_expression(expression)
+        if not result.get("success"):
+            return None
+        parsed = result.get("parsed") or {}
+        return parse_int(parsed.get("value"))
+
+    @staticmethod
+    def _offset_expression(field_name: str) -> str:
+        # Use the ((T*)0)->field trick so offset resolution succeeds even
+        # when tcache is NULL (thread has not yet allocated).
+        return (
+            "(unsigned long)((char*)&((struct tcache_perthread_struct*)0)->"
+            f"{field_name}-(char*)0)"
+        )
+
+    def resolve(self) -> Dict[str, Any]:
+        """Return the resolved layout or explicit unresolved fields."""
+        tcache_address = self._eval_int("(void*)tcache")
+        struct_size = self._eval_int(
+            "(unsigned long)sizeof(struct tcache_perthread_struct)"
+        )
+        counts_entry_size = self._eval_int(
+            "(unsigned long)sizeof(((struct tcache_perthread_struct*)0)->counts[0])"
+        )
+        entries_entry_size = self._eval_int(
+            "(unsigned long)sizeof(((struct tcache_perthread_struct*)0)->entries[0])"
+        )
+
+        offsets: Dict[str, Optional[int]] = {}
+        unresolved_fields: List[str] = []
+        for name in self.FIELD_NAMES:
+            value = self._eval_int(self._offset_expression(name))
+            if value is None:
+                unresolved_fields.append(name)
+            offsets[name] = value
+
+        # Fallback: if we know both offsets and struct is well-formed
+        # (counts comes first), derive the counts element size from the
+        # gap.  This lets us succeed even when the direct sizeof-of-element
+        # query fails while the struct offsets resolved cleanly.
+        counts_off = offsets.get("counts")
+        entries_off = offsets.get("entries")
+        if (
+            counts_entry_size is None
+            and counts_off is not None
+            and entries_off is not None
+            and entries_off > counts_off
+        ):
+            derived = (entries_off - counts_off) // TCACHE_MAX_BINS
+            if derived > 0:
+                counts_entry_size = derived
+
+        return {
+            "tcache_address": tcache_address,
+            "struct_size": struct_size,
+            "counts_entry_size": counts_entry_size,
+            "entries_entry_size": entries_entry_size,
+            "offsets": offsets,
+            "unresolved_fields": unresolved_fields,
+            "resolution_source": "gdb_debug_symbols",
+        }
+
 
 class HeapTools:
     """Facade that groups every heap-inspection component under one object.
@@ -2406,6 +2882,18 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.3c glibc tcache traversal ---------------------------------
+    def inspect_tcache(
+        self,
+        *,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        return self.bins.inspect_tcache(
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+
 
 __all__ = [
     "AllocatorDiscovery",
@@ -2413,6 +2901,7 @@ __all__ = [
     "GlibcArenas",
     "GlibcBins",
     "ArenaLayoutResolver",
+    "TcacheLayoutResolver",
     "HeapTools",
     "ALLOCATOR_DETECTION_SCHEMA",
     "ALLOCATOR_CAPABILITIES_SCHEMA",
@@ -2422,6 +2911,9 @@ __all__ = [
     "ARENA_INSPECTION_SCHEMA",
     "FASTBIN_INSPECTION_SCHEMA",
     "DEFAULT_MAX_CHUNKS_PER_FASTBIN",
+    "TCACHE_INSPECTION_SCHEMA",
+    "DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN",
+    "TCACHE_MAX_BINS",
     "SAFE_LINKING_MIN_VERSION",
     "ALLOCATOR_RUNTIME_COMMANDS",
     "PREV_INUSE",

@@ -287,6 +287,52 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def inspect_tcache(
+        session_id: str,
+        max_chunks_per_bin: int = 64,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Walk the per-thread glibc tcache bins and their singly-linked chains.
+
+        Reads the thread-local ``tcache`` pointer, resolves the layout of
+        ``struct tcache_perthread_struct`` (counts/entries offsets plus
+        the counts element size which changed from ``uint8_t`` to
+        ``uint16_t`` between glibc 2.29 and 2.30), then reads all 64
+        counts and entries in a single struct-sized gulp.  Each nonzero
+        entries[i] chain is walked via ``tcache_entry.next``; when
+        safe-linking is active (glibc >= 2.32) ``next`` is decoded via
+        ``PROTECT_PTR``.  Cycle detection + per-bin cap (default 64)
+        prevent a corrupted heap from hanging the tool.
+
+        A NULL ``tcache`` thread-local yields
+        ``verdict = "uninitialized"`` (legitimate empty state, not an
+        error).  Missing debug symbols yield
+        ``verdict = "unresolvable"``.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            max_chunks_per_bin: Per-tcache-bin traversal cap.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_tcache(
+                max_chunks_per_bin=max_chunks_per_bin,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
     async def validate_chunk(
         session_id: str,
         address: str,

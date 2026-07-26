@@ -11,6 +11,7 @@ from .heap import (
     GlibcBins,
     GlibcHeap,
     HeapTools,
+    TcacheLayoutResolver,
 )
 from .pwndbg import PwndbgTools
 from .python import PythonTools
@@ -25,6 +26,7 @@ __all__ = [
     "GlibcBins",
     "GlibcHeap",
     "HeapTools",
+    "TcacheLayoutResolver",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",
