@@ -204,6 +204,57 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def sync_target_files(
+        target_id: str,
+        source: str,
+        destination: str,
+        direction: str = "download",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Transfer one file between the caller and the remote target.
+
+        ``direction`` is ``"download"`` (remote ``source`` -> local
+        ``destination``) or ``"upload"`` (local ``source`` -> remote
+        ``destination``).  Only providers whose ``capabilities.file_sync``
+        is true accept this operation; today that means the ``ssh``
+        provider.  Fails with a typed error otherwise rather than
+        silently no-op-ing.
+        """
+        services = get_services(ctx)
+        return services.target_registry.sync_target_files_response(
+            target_id=target_id,
+            source=source,
+            destination=destination,
+            direction=direction,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def fetch_runtime_libraries(
+        target_id: str,
+        destination_dir: str,
+        candidate_paths: Optional[list] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Pull the target's libc / dynamic loader for offline analysis.
+
+        For an ``ssh`` target this SFTPs each candidate path (default
+        set covers glibc + musl on both x86_64 and i386) into
+        ``destination_dir`` when the remote file exists.  The response
+        distinguishes ``fetched`` from ``missing`` paths so a caller
+        knows which candidates the target actually has.  Pair with
+        ``identify_libc`` (S7.2) to score leaks against the pulled
+        libc.
+        """
+        services = get_services(ctx)
+        return services.target_registry.fetch_runtime_libraries_response(
+            target_id=target_id,
+            destination_dir=destination_dir,
+            candidate_paths=candidate_paths,
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def attach_debugger(
         target_id: str,
         session_id: Optional[str] = None,

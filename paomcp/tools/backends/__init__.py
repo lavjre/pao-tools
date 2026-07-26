@@ -31,6 +31,7 @@ from .targets import (
     AttachPidProvider,
     GdbserverProvider,
     LocalProcessProvider,
+    SshProvider,
     TargetError,
     TargetHandle,
     TargetKind,
@@ -74,4 +75,5 @@ __all__ = [
     "AttachPidProvider",
     "GdbserverProvider",
     "TcpRemoteProvider",
+    "SshProvider",
 ]

@@ -59,12 +59,24 @@ TARGET_STOP_SCHEMA = "pao.target-stop.v1"
 TARGET_ATTACH_SCHEMA = "pao.target-attach.v1"
 TARGET_CONNECT_SCHEMA = "pao.target-connect.v1"
 TARGET_DISCONNECT_SCHEMA = "pao.target-disconnect.v1"
+TARGET_FILE_SYNC_SCHEMA = "pao.target-file-sync.v1"
+TARGET_FETCH_LIBS_SCHEMA = "pao.target-fetch-libs.v1"
 
 DEFAULT_MAX_TARGETS_PER_SESSION = 8
 DEFAULT_TARGET_START_TIMEOUT_SEC = 15.0
 DEFAULT_TARGET_STOP_TIMEOUT_SEC = 10.0
 DEFAULT_GDBSERVER_LISTEN_TIMEOUT_SEC = 10.0
 DEFAULT_TCP_PROBE_TIMEOUT_SEC = 3.0
+DEFAULT_SSH_CONNECT_TIMEOUT_SEC = 10.0
+DEFAULT_LIBC_FETCH_PATHS: Tuple[str, ...] = (
+    "/lib/x86_64-linux-gnu/libc.so.6",
+    "/lib64/libc.so.6",
+    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/lib64/ld-linux-x86-64.so.2",
+    "/lib/ld-musl-x86_64.so.1",
+    "/lib/i386-linux-gnu/libc.so.6",
+    "/lib/ld-linux.so.2",
+)
 
 
 class TargetKind(str, Enum):
@@ -807,6 +819,230 @@ class TcpRemoteProvider:
         }
 
 
+class SshClientFactory(Protocol):
+    """Injection point for tests -- returns something paramiko-shaped."""
+
+    def __call__(self) -> Any: ...
+
+
+def _default_ssh_client_factory() -> Any:
+    """Return a real paramiko ``SSHClient`` with a permissive host-key policy.
+
+    The permissive policy is deliberate for research workflows against
+    scratch VMs; a production caller should replace this factory with
+    a strict-host-key one.
+    """
+    import paramiko  # type: ignore[import-untyped]
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    return client
+
+
+class SshProvider:
+    """Manage an SSH session over paramiko and expose file-sync ops.
+
+    ``attach_debugger`` is intentionally *not* supported directly on
+    this provider -- remote debugging over SSH is properly done by
+    booting a gdbserver on the remote box and using
+    :class:`TcpRemoteProvider` (optionally through an SSH tunnel) to
+    attach.  What ``SshProvider`` uniquely offers is typed file
+    transfer (upload / download) and the ``fetch_runtime_libraries``
+    convenience that pulls the target's libc / dynamic loader so an
+    offline S7 identify_libc has something to score against.
+
+    The paramiko client is injected via ``client_factory`` so tests
+    can swap in a fake without needing a real SSH server on the box.
+    """
+
+    kind = TargetKind.SSH
+
+    def __init__(
+        self,
+        *,
+        client_factory: SshClientFactory = _default_ssh_client_factory,
+        connect_timeout_sec: float = DEFAULT_SSH_CONNECT_TIMEOUT_SEC,
+    ) -> None:
+        self._client_factory = client_factory
+        self._connect_timeout_sec = connect_timeout_sec
+        self._clients: Dict[str, Any] = {}
+        self._clients_lock = threading.RLock()
+
+    def _client_for(self, handle: TargetHandle) -> Any:
+        with self._clients_lock:
+            existing = self._clients.get(handle.target_id)
+            if existing is not None:
+                return existing
+            spec = handle.spec
+            client = self._client_factory()
+            kwargs: Dict[str, Any] = {
+                "hostname": spec.host,
+                "port": int(spec.port) if spec.port else 22,
+                "username": spec.ssh_user,
+                "timeout": self._connect_timeout_sec,
+                "allow_agent": False,
+                "look_for_keys": False,
+            }
+            if spec.ssh_key_path:
+                kwargs["key_filename"] = spec.ssh_key_path
+            if spec.ssh_password:
+                kwargs["password"] = spec.ssh_password
+            client.connect(**kwargs)
+            self._clients[handle.target_id] = client
+            return client
+
+    def start(self, handle: TargetHandle) -> None:
+        with handle._lock:
+            spec = handle.spec
+            if not spec.host or not spec.ssh_user:
+                raise TargetError("ssh spec requires 'host' and 'ssh_user'")
+            if not (spec.ssh_key_path or spec.ssh_password):
+                raise TargetError("ssh spec requires 'ssh_key_path' or 'ssh_password'")
+            handle._set_state(TargetState.STARTING)
+            try:
+                client = self._client_for(handle)
+                # Sanity-check the transport so a broken handshake fails
+                # at start(), not at first exec.
+                transport = (
+                    client.get_transport() if hasattr(client, "get_transport") else None
+                )
+                if transport is not None and hasattr(transport, "is_active"):
+                    if not transport.is_active():
+                        raise TargetError("ssh transport is not active after connect")
+                handle.host = spec.host
+                handle.port = int(spec.port) if spec.port else 22
+                handle.started_at = datetime.now(timezone.utc).isoformat()
+                handle._set_state(TargetState.CONNECTED)
+            except Exception as exc:
+                handle._record_error(exc)
+                raise
+
+    def stop(
+        self,
+        handle: TargetHandle,
+        *,
+        timeout_sec: float = DEFAULT_TARGET_STOP_TIMEOUT_SEC,
+    ) -> None:
+        with handle._lock:
+            with self._clients_lock:
+                client = self._clients.pop(handle.target_id, None)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            handle._set_state(TargetState.DETACHED)
+            handle.stopped_at = datetime.now(timezone.utc).isoformat()
+
+    def attach_debugger(
+        self, handle: TargetHandle, gdb: GdbController
+    ) -> Dict[str, Any]:
+        raise TargetError(
+            "ssh provider does not attach a debugger directly; "
+            "spawn gdbserver on the remote and use a tcp_remote target "
+            "(optionally through an SSH tunnel) to attach"
+        )
+
+    def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]:
+        return {
+            "start": True,
+            "stop": True,
+            "attach_debugger": False,
+            "file_sync": True,
+            "reconnect": True,
+            "port_forward": True,
+            "notes": (
+                "SSH transport for file sync + remote command exec; "
+                "attach_debugger deferred to a tcp_remote target"
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # File sync
+    # ------------------------------------------------------------------
+    def sync_file(
+        self,
+        handle: TargetHandle,
+        *,
+        source: str,
+        destination: str,
+        direction: str = "download",
+    ) -> Dict[str, Any]:
+        if direction not in ("download", "upload"):
+            raise TargetError(
+                f"direction must be 'download' or 'upload', got {direction!r}"
+            )
+        client = self._client_for(handle)
+        sftp = client.open_sftp()
+        try:
+            if direction == "download":
+                local_dir = os.path.dirname(destination)
+                if local_dir:
+                    os.makedirs(local_dir, exist_ok=True)
+                sftp.get(source, destination)
+                info = os.stat(destination)
+                return {
+                    "direction": "download",
+                    "remote_path": source,
+                    "local_path": os.path.abspath(destination),
+                    "bytes": info.st_size,
+                }
+            # upload
+            sftp.put(source, destination)
+            return {
+                "direction": "upload",
+                "local_path": os.path.abspath(source),
+                "remote_path": destination,
+                "bytes": os.path.getsize(source),
+            }
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+
+    def fetch_runtime_libraries(
+        self,
+        handle: TargetHandle,
+        *,
+        destination_dir: str,
+        candidate_paths: Sequence[str] = DEFAULT_LIBC_FETCH_PATHS,
+    ) -> Dict[str, Any]:
+        os.makedirs(destination_dir, exist_ok=True)
+        client = self._client_for(handle)
+        sftp = client.open_sftp()
+        fetched: List[Dict[str, Any]] = []
+        missing: List[str] = []
+        try:
+            for remote_path in candidate_paths:
+                try:
+                    sftp.stat(remote_path)
+                except (FileNotFoundError, IOError):
+                    missing.append(remote_path)
+                    continue
+                local_name = os.path.basename(remote_path)
+                local_path = os.path.join(destination_dir, local_name)
+                sftp.get(remote_path, local_path)
+                fetched.append(
+                    {
+                        "remote_path": remote_path,
+                        "local_path": os.path.abspath(local_path),
+                        "bytes": os.path.getsize(local_path),
+                    }
+                )
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        return {
+            "destination_dir": os.path.abspath(destination_dir),
+            "fetched": fetched,
+            "missing": missing,
+            "candidate_paths": list(candidate_paths),
+        }
+
+
 class TargetRegistry:
     """Thread-safe, session-scoped, bounded target registry.
 
@@ -830,6 +1066,7 @@ class TargetRegistry:
             TargetKind.ATTACH_PID: AttachPidProvider(),
             TargetKind.GDBSERVER: GdbserverProvider(),
             TargetKind.TCP_REMOTE: TcpRemoteProvider(),
+            TargetKind.SSH: SshProvider(),
         }
         self._lock = threading.RLock()
 
@@ -1151,6 +1388,76 @@ class TargetRegistry:
         self.disconnect_target_response(target_id=target_id, timeout_sec=timeout_sec)
         return self.connect_target_response(target_id=target_id)
 
+    def sync_target_files_response(
+        self,
+        *,
+        target_id: str,
+        source: str,
+        destination: str,
+        direction: str = "download",
+    ) -> Dict[str, Any]:
+        handle = self.get(target_id)
+        provider = self.provider_for(handle.kind)
+        sync_fn = getattr(provider, "sync_file", None)
+        if not callable(sync_fn):
+            raise TargetError(
+                f"provider '{handle.kind.value}' does not support file sync"
+            )
+        payload = sync_fn(
+            handle, source=source, destination=destination, direction=direction
+        )
+        return build_backend_response(
+            "sync_target_files",
+            parsed={
+                "schema": TARGET_FILE_SYNC_SCHEMA,
+                "target_id": target_id,
+                "kind": handle.kind.value,
+                "result": payload,
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def fetch_runtime_libraries_response(
+        self,
+        *,
+        target_id: str,
+        destination_dir: str,
+        candidate_paths: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        handle = self.get(target_id)
+        provider = self.provider_for(handle.kind)
+        fetch_fn = getattr(provider, "fetch_runtime_libraries", None)
+        if not callable(fetch_fn):
+            raise TargetError(
+                f"provider '{handle.kind.value}' does not support "
+                "fetch_runtime_libraries"
+            )
+        payload = fetch_fn(
+            handle,
+            destination_dir=destination_dir,
+            candidate_paths=(
+                list(candidate_paths)
+                if candidate_paths is not None
+                else DEFAULT_LIBC_FETCH_PATHS
+            ),
+        )
+        return build_backend_response(
+            "fetch_runtime_libraries",
+            parsed={
+                "schema": TARGET_FETCH_LIBS_SCHEMA,
+                "target_id": target_id,
+                "kind": handle.kind.value,
+                "result": payload,
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
     def attach_debugger_response(
         self, *, target_id: str, gdb: GdbController
     ) -> Dict[str, Any]:
@@ -1196,6 +1503,10 @@ __all__ = [
     "AttachPidProvider",
     "GdbserverProvider",
     "TcpRemoteProvider",
+    "SshProvider",
+    "SshClientFactory",
+    "DEFAULT_SSH_CONNECT_TIMEOUT_SEC",
+    "DEFAULT_LIBC_FETCH_PATHS",
     "DEFAULT_MAX_TARGETS_PER_SESSION",
     "DEFAULT_TARGET_START_TIMEOUT_SEC",
     "DEFAULT_TARGET_STOP_TIMEOUT_SEC",
@@ -1210,4 +1521,6 @@ __all__ = [
     "TARGET_ATTACH_SCHEMA",
     "TARGET_CONNECT_SCHEMA",
     "TARGET_DISCONNECT_SCHEMA",
+    "TARGET_FILE_SYNC_SCHEMA",
+    "TARGET_FETCH_LIBS_SCHEMA",
 ]
