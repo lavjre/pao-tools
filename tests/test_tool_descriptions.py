@@ -66,11 +66,12 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 98
+    assert len(tools) == 100
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
     assert {"detect_allocator", "get_allocator_capabilities"} <= tool_names
+    assert {"inspect_chunk", "validate_chunk"} <= tool_names
     legacy_prefix = "".join(("pwn", "cli"))
     assert all(legacy_prefix not in name for name in tool_names)
     removed_backend = "".join(("ret", "dec"))

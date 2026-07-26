@@ -107,5 +107,98 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def inspect_chunk(
+        session_id: str,
+        address: str,
+        address_kind: str = "user",
+        include_next: bool = True,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Read + parse a glibc malloc_chunk at ``address`` with full evidence.
+
+        Reads the ``2 * pointer_size`` chunk header from the live inferior,
+        decodes ``prev_size``/``size``/flags (``PREV_INUSE``, ``IS_MMAPPED``,
+        ``NON_MAIN_ARENA``) with per-field raw hex evidence, and returns the
+        chunk vs user address, the physical next/previous chunk addresses, and
+        structural checks (alignment, minimum chunk size, mapping containment).
+
+        When ``include_next`` is true the physically next chunk's header is
+        also read so the allocation status of this chunk can be inferred from
+        that chunk's ``PREV_INUSE`` bit; ``IS_MMAPPED`` chunks report
+        ``allocated`` by construction because they stand outside heap arenas.
+        The tool refuses to parse a non-glibc target and returns
+        ``verdict = "unsupported"``.
+
+        Args:
+            session_id: Debugger session whose live inferior should be inspected.
+            address: Chunk or user pointer as a hex/decimal string.
+            address_kind: ``"user"`` (default -- ``address`` is a pointer
+                returned by ``malloc``) or ``"chunk"`` (``address`` is the
+                chunk header address).
+            include_next: Read the physically next chunk to infer allocation
+                status.  Set to ``false`` to skip the extra read.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_chunk(
+                address=address,
+                address_kind=address_kind,
+                include_next=include_next,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def validate_chunk(
+        session_id: str,
+        address: str,
+        address_kind: str = "user",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Return a conservative structural verdict for a glibc chunk.
+
+        Runs the same read + parse as ``inspect_chunk`` and summarizes the
+        outcome as one of ``unsupported`` (non-glibc target), ``unreadable``
+        (header could not be read), ``corrupted`` (alignment / minimum-size /
+        containment check failed), ``suspicious`` (header in a mapping but the
+        declared size extends past its end), or ``valid`` (every check passed).
+        The response includes the individual check results and the list of
+        failed check names so a heuristic is never promoted to a fact.
+
+        Args:
+            session_id: Debugger session whose live inferior should be inspected.
+            address: Chunk or user pointer as a hex/decimal string.
+            address_kind: ``"user"`` (default) or ``"chunk"``.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.validate_chunk(
+                address=address,
+                address_kind=address_kind,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]
