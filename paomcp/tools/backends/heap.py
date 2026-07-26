@@ -72,13 +72,30 @@ _FAMILY_FILENAME_PATTERNS: Dict[str, Tuple[re.Pattern[str], ...]] = {
         re.compile(r"(?:^|/)ld-musl-[^/]*\.so", re.IGNORECASE),
         re.compile(r"(?:^|/)libc\.musl-[^/]*\.so", re.IGNORECASE),
     ),
-    "jemalloc": (re.compile(r"(?:^|/)libjemalloc\.so", re.IGNORECASE),),
+    "jemalloc": (
+        re.compile(r"(?:^|/)libjemalloc\.so", re.IGNORECASE),
+        re.compile(r"(?:^|/)libjemalloc-[^/]*\.so", re.IGNORECASE),
+    ),
+    "scudo": (
+        # Standalone Scudo runtime (llvm compiler-rt) and the Android/Fuchsia
+        # ``libc.so`` that folds Scudo in are the two shipping shapes.  A bare
+        # ``libc.so`` alone is not a scudo signal -- the specific
+        # ``libclang_rt.scudo*`` and Android's ``bionic/*/libc.so`` are.
+        re.compile(r"(?:^|/)libclang_rt\.scudo[^/]*\.so", re.IGNORECASE),
+        re.compile(r"(?:^|/)libscudo[^/]*\.so", re.IGNORECASE),
+        re.compile(r"(?:^|/)bionic/[^/]*/libc\.so", re.IGNORECASE),
+    ),
     "glibc": (
         re.compile(r"(?:^|/)libc\.so\.6(?:$|\.)", re.IGNORECASE),
         re.compile(r"(?:^|/)libc-2\.\d+(?:\.\d+)?\.so", re.IGNORECASE),
         re.compile(r"(?:^|/)libc\.so(?:$|\.)", re.IGNORECASE),
     ),
 }
+
+# musl swapped from an oldmalloc allocator to mallocng in 1.2.0.  Only the
+# variant name is version-gated here; safe-linking remains a glibc-only
+# concept and is reported as ``not_applicable`` for every other family.
+MUSL_MALLOCNG_MIN_VERSION: Tuple[int, int] = (1, 2)
 
 _FILENAME_VERSION_PATTERN = re.compile(
     r"libc-(\d+)\.(\d+)(?:\.\d+)?\.so", re.IGNORECASE
@@ -160,6 +177,26 @@ class AllocatorDiscovery:
         return "enabled" if version >= SAFE_LINKING_MIN_VERSION else "disabled"
 
     @classmethod
+    def _allocator_variant(
+        cls, family: str, version: Optional[Tuple[int, int]]
+    ) -> Optional[str]:
+        """Return the concrete allocator variant when the family has more than one.
+
+        * ``glibc``  -> always ``"ptmalloc2"``
+        * ``musl``   -> ``"mallocng"`` (>= 1.2), ``"oldmalloc"`` (< 1.2), or
+                        ``None`` when the version is unresolved
+        * ``jemalloc`` / ``scudo`` / ``unknown`` -> ``None`` (single variant
+          today, or the variant is unknowable from mapping evidence alone)
+        """
+        if family == "glibc":
+            return "ptmalloc2"
+        if family == "musl":
+            if version is None:
+                return None
+            return "mallocng" if version >= MUSL_MALLOCNG_MIN_VERSION else "oldmalloc"
+        return None
+
+    @classmethod
     def classify(
         cls,
         mappings: Sequence[Mapping[str, Any]],
@@ -172,10 +209,13 @@ class AllocatorDiscovery:
         with at least ``file``) and ``libcinfo`` is the parsed ``libcinfo``
         payload (may be ``None`` when unavailable).
 
-        Returns a dict describing the detected ``family``, its ``version`` (when
-        known), a ``confidence`` label, the concrete ``evidence`` list, and the
-        ``safe_linking`` applicability.  Confidence is never higher than the
-        evidence supports:
+        Recognized families: ``glibc``, ``musl``, ``jemalloc``, ``scudo`` and
+        the sentinel ``unknown``.  The returned ``variant`` disambiguates
+        allocators that ship more than one implementation over their
+        lifetime (``ptmalloc2`` for glibc, ``mallocng`` vs ``oldmalloc``
+        for musl >= 1.2 / < 1.2); other families report ``None``.
+
+        Confidence is never higher than the evidence supports:
 
         * ``confirmed``  -- a matching mapping *and* a resolved version
         * ``likely``     -- a matching mapping with no version
@@ -237,6 +277,7 @@ class AllocatorDiscovery:
         if not distinct:
             return {
                 "family": "unknown",
+                "variant": None,
                 "version": None,
                 "confidence": "unknown",
                 "safe_linking": "unknown",
@@ -276,6 +317,7 @@ class AllocatorDiscovery:
 
         return {
             "family": primary,
+            "variant": cls._allocator_variant(primary, version),
             "version": cls._format_version(version),
             "version_source": version_source,
             "confidence": confidence,
@@ -3204,6 +3246,7 @@ class GlibcHeapCorruption:
     def _allocator_summary(classification: Mapping[str, Any]) -> Dict[str, Any]:
         return {
             "family": classification.get("family"),
+            "variant": classification.get("variant"),
             "version": classification.get("version"),
             "confidence": classification.get("confidence"),
             "safe_linking": classification.get("safe_linking"),
@@ -4286,6 +4329,7 @@ class HeapHistory:
         epoch = self.gdb.get_inferior_epoch()
         allocator_summary = {
             "family": classification.get("family"),
+            "variant": classification.get("variant"),
             "version": classification.get("version"),
             "confidence": classification.get("confidence"),
             "safe_linking": classification.get("safe_linking"),
@@ -4833,6 +4877,7 @@ __all__ = [
     "DEFAULT_MAX_HEAP_SNAPSHOTS",
     "DEFAULT_MAX_HEAP_SNAPSHOT_BYTES",
     "SAFE_LINKING_MIN_VERSION",
+    "MUSL_MALLOCNG_MIN_VERSION",
     "ALLOCATOR_RUNTIME_COMMANDS",
     "PREV_INUSE",
     "IS_MMAPPED",
