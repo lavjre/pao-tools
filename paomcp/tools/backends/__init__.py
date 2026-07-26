@@ -15,6 +15,14 @@ from .heap import (
 )
 from .pwndbg import PwndbgTools
 from .python import PythonTools
+from .research import (
+    ResearchError,
+    ResearchEvidence,
+    ResearchHypothesis,
+    ResearchNote,
+    ResearchRegistry,
+    ResearchSession,
+)
 from .rop import (
     ChainBuilder,
     ChainBuilderError,
@@ -82,4 +90,10 @@ __all__ = [
     "DockerProvider",
     "QemuUserProvider",
     "QemuSystemProvider",
+    "ResearchError",
+    "ResearchEvidence",
+    "ResearchHypothesis",
+    "ResearchNote",
+    "ResearchRegistry",
+    "ResearchSession",
 ]

@@ -20,6 +20,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         paocli,
         python_env,
         repos,
+        research,
         rop,
         static_analysis,
         targets,
@@ -40,6 +41,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     repos.register(mcp)
     python_env.register(mcp)
     paocli.register(mcp)
+    research.register(mcp)
     rop.register(mcp)
     static_analysis.register(mcp)
     targets.register(mcp)
