@@ -272,10 +272,21 @@ def ropper_gadget_loader(
 
 
 def _extract_instruction(line: Any) -> Optional[str]:
-    """Pull the mnemonic/operand text out of a ropper line."""
+    """Pull the mnemonic/operand text out of a ropper line.
+
+    Ropper's newer releases emit each instruction as a tuple of
+    ``(address, full_text, mnemonic, operands)``; older releases emit
+    a plain ``"0x400123: mnemonic operands"`` string.  Both shapes are
+    normalized here to a single ``"mnemonic operands"`` line.
+    """
     if isinstance(line, (list, tuple)):
-        # ropper occasionally returns (address, text) tuples per line
-        text = line[-1] if line else ""
+        # (address, full_text, mnemonic, operands) -- prefer full_text
+        if len(line) >= 2:
+            text = line[1]
+        elif line:
+            text = line[-1]
+        else:
+            text = ""
     else:
         text = line
     text = str(text).strip()
