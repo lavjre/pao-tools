@@ -29,8 +29,10 @@ from .rop import (
 from .subproc import SubprocessTools
 from .targets import (
     AttachPidProvider,
+    DockerProvider,
     GdbserverProvider,
     LocalProcessProvider,
+    QemuUserProvider,
     SshProvider,
     TargetError,
     TargetHandle,
@@ -76,4 +78,6 @@ __all__ = [
     "GdbserverProvider",
     "TcpRemoteProvider",
     "SshProvider",
+    "DockerProvider",
+    "QemuUserProvider",
 ]
