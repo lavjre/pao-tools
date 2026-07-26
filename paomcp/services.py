@@ -14,6 +14,7 @@ from paomcp.tools.backends import (
     PythonTools,
     RopTools,
     SubprocessTools,
+    TargetRegistry,
 )
 from paomcp.utils.paths import DEFAULT_WORKSPACE, RuntimePaths, build_runtime_paths
 
@@ -33,6 +34,7 @@ class AppServices:
     operation_registry: OperationRegistry
     debugger_compatibility: Dict[str, Any]
     rop_tools: RopTools
+    target_registry: TargetRegistry
     paopipe_sessions: Dict[str, PaoPipe] = field(default_factory=dict)
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -112,6 +114,7 @@ def create_services(
         operation_registry=operation_registry,
         debugger_compatibility=debugger_compatibility,
         rop_tools=RopTools(),
+        target_registry=TargetRegistry(),
     )
     artifact_store.start_cleanup_worker()
     return services

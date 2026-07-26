@@ -27,6 +27,16 @@ from .rop import (
     RopTools,
 )
 from .subproc import SubprocessTools
+from .targets import (
+    AttachPidProvider,
+    LocalProcessProvider,
+    TargetError,
+    TargetHandle,
+    TargetKind,
+    TargetRegistry,
+    TargetSpec,
+    TargetState,
+)
 
 __all__ = [
     "GdbController",
@@ -52,4 +62,12 @@ __all__ = [
     "ChainValidator",
     "ChainValidatorError",
     "RopTools",
+    "TargetKind",
+    "TargetState",
+    "TargetError",
+    "TargetSpec",
+    "TargetHandle",
+    "TargetRegistry",
+    "LocalProcessProvider",
+    "AttachPidProvider",
 ]
