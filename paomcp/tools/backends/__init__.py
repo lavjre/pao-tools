@@ -22,6 +22,7 @@ from .research import (
     ResearchNote,
     ResearchRegistry,
     ResearchSession,
+    ResearchSnapshot,
 )
 from .rop import (
     ChainBuilder,
@@ -96,4 +97,5 @@ __all__ = [
     "ResearchNote",
     "ResearchRegistry",
     "ResearchSession",
+    "ResearchSnapshot",
 ]

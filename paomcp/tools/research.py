@@ -184,5 +184,74 @@ def register(mcp: FastMCP) -> None:
             rationale=rationale,
         )
 
+    @mcp.tool()
+    @catch_errors()
+    async def create_named_snapshot(
+        session_id: str,
+        name: str,
+        slots: Optional[Mapping[str, Any]] = None,
+        description: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Capture a named checkpoint into a research session.
+
+        Slots are opaque JSON-serializable payloads the caller
+        assembles from live-tool outputs.  Recognized slot names:
+        ``registers``, ``memory``, ``mappings``, ``heap_snapshot``,
+        ``backtrace``, ``notes``, ``metadata``.  Unknown slot names
+        are rejected so a typo does not silently vanish into the
+        record.
+
+        A typical CTF pattern: capture one snapshot right before the
+        vulnerable call and one right after the crash; call
+        ``compare_snapshots`` to see exactly which registers /
+        mappings / heap chunks moved.
+
+        Args:
+            session_id: Research session that owns the snapshot.
+            name: Human-readable label (required).
+            slots: Optional mapping of slot -> payload.
+            description: Optional longer description.
+        """
+        services = get_services(ctx)
+        return services.research_registry.create_snapshot_response(
+            session_id=session_id,
+            name=name,
+            slots=dict(slots) if slots else None,
+            description=description,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_snapshots(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List every named snapshot in a research session (summaries only)."""
+        services = get_services(ctx)
+        return services.research_registry.list_snapshots_response(session_id=session_id)
+
+    @mcp.tool()
+    @catch_errors()
+    async def compare_snapshots(
+        session_id: str,
+        before: str,
+        after: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Structural diff of two named snapshots in one research session.
+
+        The diff walks the union of slot names and reports one of
+        ``absent``, ``unchanged``, ``added``, ``removed`` or
+        ``changed`` per slot.  For dict slots (e.g. ``registers``)
+        the ``changed`` payload lists added / removed / changed keys.
+        For list slots it reports lengths plus symmetric-difference
+        membership.  Diffing a snapshot against itself is rejected.
+        """
+        services = get_services(ctx)
+        return services.research_registry.compare_snapshots_response(
+            session_id=session_id, before=before, after=after
+        )
+
 
 __all__ = ["register"]

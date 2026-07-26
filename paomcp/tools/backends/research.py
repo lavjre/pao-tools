@@ -34,11 +34,15 @@ RESEARCH_SESSION_LIST_SCHEMA = "pao.research-session-list.v1"
 RESEARCH_NOTE_SCHEMA = "pao.research-note.v1"
 RESEARCH_EVIDENCE_SCHEMA = "pao.research-evidence.v1"
 RESEARCH_HYPOTHESIS_SCHEMA = "pao.research-hypothesis.v1"
+RESEARCH_SNAPSHOT_SCHEMA = "pao.research-snapshot.v1"
+RESEARCH_SNAPSHOT_LIST_SCHEMA = "pao.research-snapshot-list.v1"
+RESEARCH_SNAPSHOT_DIFF_SCHEMA = "pao.research-snapshot-diff.v1"
 
 DEFAULT_MAX_RESEARCH_SESSIONS = 32
 DEFAULT_MAX_NOTES_PER_SESSION = 500
 DEFAULT_MAX_EVIDENCE_PER_SESSION = 1000
 DEFAULT_MAX_HYPOTHESES_PER_SESSION = 100
+DEFAULT_MAX_SNAPSHOTS_PER_SESSION = 64
 
 HYPOTHESIS_STATES: Tuple[str, ...] = (
     "proposed",
@@ -54,6 +58,20 @@ EVIDENCE_KINDS: Tuple[str, ...] = (
     "tool_result",
     "note",
     "external",
+)
+
+# Slot names a research snapshot may carry.  A caller supplies any
+# subset; each slot is an opaque JSON-serializable payload the caller
+# controls.  ``compare_snapshots`` walks the union of slot names and
+# produces a structural diff for each.
+SNAPSHOT_SLOTS: Tuple[str, ...] = (
+    "registers",  # {name: hex_or_int_value}
+    "memory",  # [{address, bytes_hex, length}]
+    "mappings",  # [{start, end, permissions, file}]
+    "heap_snapshot",  # {snapshot_id, ...}  (typically a S6.5 heap snapshot id)
+    "backtrace",  # [{level, pc, function, ...}]
+    "notes",  # freeform markdown
+    "metadata",  # freeform dict for target identity / ASLR base / etc.
 )
 
 
@@ -134,6 +152,38 @@ class ResearchHypothesis:
 
 
 @dataclass
+class ResearchSnapshot:
+    """A named checkpoint bundling caller-supplied slots at one instant.
+
+    Slots are intentionally opaque -- a caller composes them from the
+    outputs of live tools (registers from ``get_registers``, memory
+    from ``read_memory``, mappings from ``memory_maps``, a heap id
+    from ``capture_heap_snapshot``) so this backend does not have to
+    know how to talk to a debugger.  The value of the snapshot is
+    the *name*, the *timestamp*, and the ability to diff two of them
+    later.
+    """
+
+    snapshot_id: str
+    name: str
+    slots: Dict[str, Any] = field(default_factory=dict)
+    description: Optional[str] = None
+    created_at: str = field(default_factory=_now_iso)
+
+    def to_dict(self, *, include_slots: bool = True) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "snapshot_id": self.snapshot_id,
+            "name": self.name,
+            "description": self.description,
+            "created_at": self.created_at,
+            "slot_names": sorted(self.slots.keys()),
+        }
+        if include_slots:
+            payload["slots"] = dict(self.slots)
+        return payload
+
+
+@dataclass
 class ResearchSession:
     """One research workspace: notes + hypotheses + evidence graph."""
 
@@ -146,6 +196,7 @@ class ResearchSession:
     notes: Dict[str, ResearchNote] = field(default_factory=dict)
     evidence: Dict[str, ResearchEvidence] = field(default_factory=dict)
     hypotheses: Dict[str, ResearchHypothesis] = field(default_factory=dict)
+    snapshots: Dict[str, ResearchSnapshot] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
     _lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False
@@ -165,12 +216,16 @@ class ResearchSession:
             "note_count": len(self.notes),
             "evidence_count": len(self.evidence),
             "hypothesis_count": len(self.hypotheses),
+            "snapshot_count": len(self.snapshots),
             "metadata": dict(self.metadata),
         }
         if include_children:
             payload["notes"] = [note.to_dict() for note in self.notes.values()]
             payload["evidence"] = [item.to_dict() for item in self.evidence.values()]
             payload["hypotheses"] = [hyp.to_dict() for hyp in self.hypotheses.values()]
+            payload["snapshots"] = [
+                snap.to_dict(include_slots=False) for snap in self.snapshots.values()
+            ]
         return payload
 
 
@@ -184,12 +239,14 @@ class ResearchRegistry:
         max_notes_per_session: int = DEFAULT_MAX_NOTES_PER_SESSION,
         max_evidence_per_session: int = DEFAULT_MAX_EVIDENCE_PER_SESSION,
         max_hypotheses_per_session: int = DEFAULT_MAX_HYPOTHESES_PER_SESSION,
+        max_snapshots_per_session: int = DEFAULT_MAX_SNAPSHOTS_PER_SESSION,
     ) -> None:
         for name, value in (
             ("max_sessions", max_sessions),
             ("max_notes_per_session", max_notes_per_session),
             ("max_evidence_per_session", max_evidence_per_session),
             ("max_hypotheses_per_session", max_hypotheses_per_session),
+            ("max_snapshots_per_session", max_snapshots_per_session),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -197,6 +254,7 @@ class ResearchRegistry:
         self._max_notes = max_notes_per_session
         self._max_evidence = max_evidence_per_session
         self._max_hypotheses = max_hypotheses_per_session
+        self._max_snapshots = max_snapshots_per_session
         self._sessions: Dict[str, ResearchSession] = {}
         self._lock = threading.RLock()
 
@@ -386,6 +444,130 @@ class ResearchRegistry:
             return hypothesis
 
     # ------------------------------------------------------------------
+    # Snapshots
+    # ------------------------------------------------------------------
+    def create_snapshot(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        slots: Optional[Mapping[str, Any]] = None,
+        description: Optional[str] = None,
+    ) -> ResearchSnapshot:
+        if not isinstance(name, str) or not name.strip():
+            raise ResearchError("snapshot name must be a non-empty string")
+        slots_dict = dict(slots or {})
+        unknown = sorted(set(slots_dict.keys()) - set(SNAPSHOT_SLOTS))
+        if unknown:
+            raise ResearchError(
+                f"unknown snapshot slots {unknown}; expected any of "
+                f"{list(SNAPSHOT_SLOTS)}"
+            )
+        session = self.get_session(session_id)
+        with session._lock:
+            if len(session.snapshots) >= self._max_snapshots:
+                raise ResearchError(
+                    f"session '{session_id}' already has "
+                    f"{self._max_snapshots} snapshots (cap)"
+                )
+            snapshot = ResearchSnapshot(
+                snapshot_id=uuid.uuid4().hex[:12],
+                name=name.strip(),
+                slots=slots_dict,
+                description=description,
+            )
+            session.snapshots[snapshot.snapshot_id] = snapshot
+            session._touch()
+            return snapshot
+
+    def list_snapshots(self, *, session_id: str) -> List[ResearchSnapshot]:
+        session = self.get_session(session_id)
+        with session._lock:
+            return list(session.snapshots.values())
+
+    def get_snapshot(self, *, session_id: str, snapshot_id: str) -> ResearchSnapshot:
+        session = self.get_session(session_id)
+        with session._lock:
+            snapshot = session.snapshots.get(snapshot_id)
+            if snapshot is None:
+                raise ResearchError(f"snapshot '{snapshot_id}' not found in session")
+            return snapshot
+
+    @staticmethod
+    def _diff_slot(before: Any, after: Any) -> Dict[str, Any]:
+        """Structural diff shared across every snapshot slot."""
+        if before is None and after is None:
+            return {"status": "absent", "before": None, "after": None}
+        if before is None:
+            return {"status": "added", "before": None, "after": after}
+        if after is None:
+            return {"status": "removed", "before": before, "after": None}
+        if before == after:
+            return {"status": "unchanged", "value": before}
+        # Both dicts: compute added / removed / changed key sets.
+        if isinstance(before, dict) and isinstance(after, dict):
+            before_keys = set(before.keys())
+            after_keys = set(after.keys())
+            added_keys = sorted(after_keys - before_keys)
+            removed_keys = sorted(before_keys - after_keys)
+            changed_keys = sorted(
+                k for k in before_keys & after_keys if before[k] != after[k]
+            )
+            return {
+                "status": "changed",
+                "kind": "dict",
+                "added": {k: after[k] for k in added_keys},
+                "removed": {k: before[k] for k in removed_keys},
+                "changed": {
+                    k: {"before": before[k], "after": after[k]} for k in changed_keys
+                },
+            }
+        # Lists: report simple length + membership deltas.  A fuller
+        # per-element diff (LCS / Myers) is intentionally deferred
+        # -- callers building on this either know the slot's shape
+        # (registers dict) or want the raw values back for their own
+        # diff.
+        if isinstance(before, list) and isinstance(after, list):
+            before_set = {repr(x) for x in before}
+            after_set = {repr(x) for x in after}
+            return {
+                "status": "changed",
+                "kind": "list",
+                "before_length": len(before),
+                "after_length": len(after),
+                "only_in_before": sorted(before_set - after_set),
+                "only_in_after": sorted(after_set - before_set),
+            }
+        return {
+            "status": "changed",
+            "kind": "scalar",
+            "before": before,
+            "after": after,
+        }
+
+    def compare_snapshots(
+        self, *, session_id: str, before: str, after: str
+    ) -> Dict[str, Any]:
+        if before == after:
+            raise ResearchError(
+                f"cannot compare a snapshot against itself ('{before}')"
+            )
+        before_snap = self.get_snapshot(session_id=session_id, snapshot_id=before)
+        after_snap = self.get_snapshot(session_id=session_id, snapshot_id=after)
+        slot_names = sorted(set(before_snap.slots) | set(after_snap.slots))
+        diff: Dict[str, Any] = {}
+        for slot in slot_names:
+            diff[slot] = self._diff_slot(
+                before_snap.slots.get(slot), after_snap.slots.get(slot)
+            )
+        return {
+            "before": before_snap.to_dict(include_slots=False),
+            "after": after_snap.to_dict(include_slots=False),
+            "slot_names": slot_names,
+            "diff": diff,
+        }
+
+    # ------------------------------------------------------------------
     # High-level response wrappers used by the tool layer
     # ------------------------------------------------------------------
     def create_session_response(
@@ -531,6 +713,67 @@ class ResearchRegistry:
             warnings=None,
         )
 
+    def create_snapshot_response(
+        self,
+        *,
+        session_id: str,
+        name: str,
+        slots: Optional[Mapping[str, Any]] = None,
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        snapshot = self.create_snapshot(
+            session_id=session_id,
+            name=name,
+            slots=slots,
+            description=description,
+        )
+        return build_backend_response(
+            "create_named_snapshot",
+            parsed={
+                "schema": RESEARCH_SNAPSHOT_SCHEMA,
+                "session_id": session_id,
+                "snapshot": snapshot.to_dict(),
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def list_snapshots_response(self, *, session_id: str) -> Dict[str, Any]:
+        snapshots = self.list_snapshots(session_id=session_id)
+        return build_backend_response(
+            "list_snapshots",
+            parsed={
+                "schema": RESEARCH_SNAPSHOT_LIST_SCHEMA,
+                "session_id": session_id,
+                "snapshots": [s.to_dict(include_slots=False) for s in snapshots],
+                "count": len(snapshots),
+                "max_snapshots": self._max_snapshots,
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def compare_snapshots_response(
+        self, *, session_id: str, before: str, after: str
+    ) -> Dict[str, Any]:
+        diff = self.compare_snapshots(session_id=session_id, before=before, after=after)
+        return build_backend_response(
+            "compare_snapshots",
+            parsed={
+                "schema": RESEARCH_SNAPSHOT_DIFF_SCHEMA,
+                "session_id": session_id,
+                **diff,
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
     def update_hypothesis_state_response(
         self,
         *,
@@ -564,17 +807,23 @@ __all__ = [
     "ResearchNote",
     "ResearchEvidence",
     "ResearchHypothesis",
+    "ResearchSnapshot",
     "ResearchSession",
     "ResearchRegistry",
     "HYPOTHESIS_STATES",
     "EVIDENCE_KINDS",
+    "SNAPSHOT_SLOTS",
     "DEFAULT_MAX_RESEARCH_SESSIONS",
     "DEFAULT_MAX_NOTES_PER_SESSION",
     "DEFAULT_MAX_EVIDENCE_PER_SESSION",
     "DEFAULT_MAX_HYPOTHESES_PER_SESSION",
+    "DEFAULT_MAX_SNAPSHOTS_PER_SESSION",
     "RESEARCH_SESSION_SCHEMA",
     "RESEARCH_SESSION_LIST_SCHEMA",
     "RESEARCH_NOTE_SCHEMA",
     "RESEARCH_EVIDENCE_SCHEMA",
     "RESEARCH_HYPOTHESIS_SCHEMA",
+    "RESEARCH_SNAPSHOT_SCHEMA",
+    "RESEARCH_SNAPSHOT_LIST_SCHEMA",
+    "RESEARCH_SNAPSHOT_DIFF_SCHEMA",
 ]
