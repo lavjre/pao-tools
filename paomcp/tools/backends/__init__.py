@@ -8,6 +8,7 @@ from .heap import (
     AllocatorDiscovery,
     ArenaLayoutResolver,
     GlibcArenas,
+    GlibcBins,
     GlibcHeap,
     HeapTools,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "AllocatorDiscovery",
     "ArenaLayoutResolver",
     "GlibcArenas",
+    "GlibcBins",
     "GlibcHeap",
     "HeapTools",
     "PwndbgTools",

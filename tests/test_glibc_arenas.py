@@ -180,10 +180,25 @@ class ArenaFakeGdb:
     def read_memory_bytes(self, address: str, num_bytes: int) -> Dict[str, Any]:
         self.read_calls.append((address, num_bytes))
         addr_int = int(address, 16)
+        # Exact-address hit (fast path used by direct chunk placements).
         data = self._memory.get(addr_int)
-        if data is None:
+        take: Optional[bytes] = None
+        if data is not None:
+            take = data[:num_bytes]
+        else:
+            # Range fallback: a read at [addr, addr+num_bytes) that falls
+            # entirely inside a placed region succeeds -- matches real gdb
+            # semantics and lets tests place one big struct then read at
+            # arbitrary field offsets.
+            for base, region in self._memory.items():
+                if base <= addr_int < base + len(region):
+                    offset = addr_int - base
+                    end = offset + num_bytes
+                    if end <= len(region):
+                        take = region[offset:end]
+                        break
+        if take is None:
             return {"success": False, "state": self.state, "responses": []}
-        take = data[:num_bytes]
         return {
             "success": True,
             "state": self.state,

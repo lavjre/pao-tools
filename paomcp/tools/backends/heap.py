@@ -1866,6 +1866,417 @@ class GlibcArenas:
         )
 
 
+# ----------------------------------------------------------------------
+# Stage 6.3b -- glibc fastbin traversal
+# ----------------------------------------------------------------------
+
+FASTBIN_INSPECTION_SCHEMA = "pao.glibc-fastbins.v1"
+
+# Default per-fastbin chain length cap.  Real fastbins hold ~7 chunks at
+# most in normal operation but corruption can create arbitrarily long
+# chains, so a bound is necessary to keep the tool safe against a
+# malicious/broken heap.  Sized generously so real workloads never hit it.
+DEFAULT_MAX_CHUNKS_PER_FASTBIN = 128
+
+
+class GlibcBins:
+    """Walk glibc bin chains (fastbins today; tcache/regular bins later).
+
+    Reads chunk headers and fd pointers directly from the live inferior and
+    decodes ``PROTECT_PTR``-encoded fd pointers when safe-linking is active
+    (glibc >= 2.32).  Every chain walk is bounded and cycle-detected so a
+    corrupted allocator cannot hang the tool.
+    """
+
+    def __init__(
+        self,
+        gdb: GdbController,
+        inspection: PwndbgInspection,
+        debugger: DebuggerOperations,
+        session_id: str,
+        *,
+        discovery: "AllocatorDiscovery",
+        arenas: "GlibcArenas",
+    ) -> None:
+        self.gdb = gdb
+        self.inspection = inspection
+        self.debugger = debugger
+        self.session_id = session_id
+        self.discovery = discovery
+        self.arenas = arenas
+
+    # ------------------------------------------------------------------
+    # Pure helpers (no debugger required)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def fastbin_size_for_index(index: int, pointer_bits: int) -> int:
+        """Expected chunk size for fastbinsY[index] on the target.
+
+        Matches glibc's ``fastbin_index`` inverse: the first slot holds
+        chunks of ``2 * MALLOC_ALIGNMENT`` bytes and each subsequent slot
+        adds ``MALLOC_ALIGNMENT``.  On 64-bit that yields the classic
+        0x20/0x30/.../0xb0 size ladder; on 32-bit it is 0x10/0x18/.../0x58.
+        """
+        if pointer_bits not in (32, 64):
+            raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
+        if index < 0 or index >= NFASTBINS:
+            raise ValueError(f"fastbin index out of range [0, {NFASTBINS}): {index!r}")
+        malloc_alignment = 2 * (pointer_bits // 8)  # 16 on 64-bit, 8 on 32-bit
+        return (2 + index) * malloc_alignment
+
+    @staticmethod
+    def decode_safe_linked(encoded: int, position: int) -> int:
+        """glibc ``PROTECT_PTR``: decoded = encoded XOR (position >> 12).
+
+        ``position`` is the address of the fd/next field itself (i.e. where
+        the encoded pointer is *stored*), not the address of the chunk that
+        holds it -- match the macro's ``pos`` argument exactly.
+        """
+        return encoded ^ (position >> 12)
+
+    # ------------------------------------------------------------------
+    # Live-target helpers
+    # ------------------------------------------------------------------
+    def _require_live(self) -> Dict[str, Any]:
+        record = self.gdb.get_last_stop_record()
+        return LiveInferiorGuard.require_live(
+            record,
+            self.gdb.get_inferior_pid(),
+            detail=(
+                "Bin inspection requires a live, stopped inferior; run the "
+                "target to a stop before inspecting the heap"
+            ),
+        )
+
+    def _read_bytes(self, address: int, byte_count: int) -> Tuple[bytes, Optional[str]]:
+        result = self.gdb.read_memory_bytes(f"0x{address:x}", byte_count)
+        if not result.get("success"):
+            return b"", "memory read failed"
+        contents = DebuggerOperations._memory_contents(result)
+        if contents is None:
+            return b"", "memory read returned no contents"
+        try:
+            raw = bytes.fromhex(contents)
+        except ValueError as exc:
+            return b"", f"invalid hex contents: {exc}"
+        if len(raw) < byte_count:
+            return raw, f"short read: expected {byte_count} bytes, got {len(raw)}"
+        return raw, None
+
+    def _walk_fastbin_chain(
+        self,
+        head_address: int,
+        mappings: Sequence[Mapping[str, Any]],
+        pointer_bits: int,
+        byteorder: str,
+        safe_linking: str,
+        max_chunks: int,
+        cancellation_check: Optional[Callable[[], None]],
+    ) -> Dict[str, Any]:
+        """Walk a singly-linked fastbin chain starting at ``head_address``."""
+        size_sz = pointer_bits // 8
+        header_size = 2 * size_sz
+        chain: List[Dict[str, Any]] = []
+        visited: Dict[int, int] = {}
+        cycle_detected = False
+        truncated = False
+        current: int = head_address
+
+        while current != 0:
+            if cancellation_check is not None:
+                cancellation_check()
+            if current in visited:
+                cycle_detected = True
+                break
+            if len(chain) >= max_chunks:
+                truncated = True
+                break
+            visited[current] = len(chain)
+            entry: Dict[str, Any] = {
+                "index": len(chain),
+                "chunk_address": current,
+                "in_mapping": mapping_for(current, mappings) is not None,
+            }
+            header, err = self._read_bytes(current, header_size)
+            if err is not None or len(header) < header_size:
+                entry["readable"] = False
+                entry["read_error"] = err or "short read"
+                chain.append(entry)
+                break
+            entry["readable"] = True
+            size_field = int.from_bytes(
+                header[size_sz : 2 * size_sz], byteorder  # type: ignore[arg-type]
+            )
+            entry["size_field"] = size_field
+            entry["size"] = size_field & ~SIZE_BITS_MASK
+            entry["prev_inuse"] = bool(size_field & PREV_INUSE)
+
+            fd_address = current + 2 * size_sz
+            fd_bytes, fd_err = self._read_bytes(fd_address, size_sz)
+            entry["fd_position"] = fd_address
+            if fd_err is not None or len(fd_bytes) < size_sz:
+                entry["fd_raw"] = None
+                entry["fd_decoded"] = None
+                entry["fd_read_error"] = fd_err or "short read"
+                entry["safe_linking_applied"] = False
+                chain.append(entry)
+                break
+
+            fd_raw = int.from_bytes(fd_bytes, byteorder)  # type: ignore[arg-type]
+            entry["fd_raw"] = fd_raw
+            if safe_linking == "enabled":
+                entry["fd_decoded"] = self.decode_safe_linked(fd_raw, fd_address)
+                entry["safe_linking_applied"] = True
+            else:
+                entry["fd_decoded"] = fd_raw
+                entry["safe_linking_applied"] = False
+            chain.append(entry)
+            current = entry["fd_decoded"]
+
+        return {
+            "chunks": chain,
+            "length": len(chain),
+            "truncated": truncated,
+            "cycle_detected": cycle_detected,
+        }
+
+    # ------------------------------------------------------------------
+    # Context preparation (mirrors GlibcArenas._prepare_context)
+    # ------------------------------------------------------------------
+    def _prepare_context(
+        self,
+        cancellation_check: Optional[Callable[[], None]],
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+        self._require_live()
+        mappings, libcinfo_parsed, component_status = self.discovery.collect_evidence(
+            cancellation_check
+        )
+        classification = AllocatorDiscovery.classify(mappings, libcinfo_parsed)
+        profile = self.discovery.target_profile(mappings)
+        return classification, mappings, profile, component_status
+
+    # ------------------------------------------------------------------
+    # Public typed operations
+    # ------------------------------------------------------------------
+    def inspect_fastbins(
+        self,
+        *,
+        arena_address: Optional[str] = None,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_FASTBIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Walk the 10 fastbin chains rooted in an arena's ``fastbinsY`` array.
+
+        ``arena_address`` may be ``None`` (inspect main_arena) or the address
+        of a non-main arena obtained via ``list_arenas``.  Each fastbin's
+        chain is walked to completion or ``max_chunks_per_bin`` chunks --
+        whichever comes first -- with cycle detection.  When the target's
+        glibc has safe-linking enabled (>= 2.32) fd pointers are decoded via
+        ``PROTECT_PTR`` so the chain addresses are usable directly.
+        """
+        if max_chunks_per_bin <= 0:
+            raise ValueError(
+                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
+            )
+
+        classification, mappings, profile, component_status = self._prepare_context(
+            cancellation_check
+        )
+        if classification["family"] != "glibc":
+            return self.arenas._unsupported_response(
+                "inspect_fastbins",
+                FASTBIN_INSPECTION_SCHEMA,
+                classification,
+                profile,
+                extra={"fastbins": [], "component_status": component_status},
+            )
+
+        layout = self.arenas.resolver.resolve()
+        fastbins_offset = layout["offsets"].get("fastbinsY")
+        target_address: Optional[int]
+        if arena_address is None:
+            target_address = layout.get("arena_address")
+        else:
+            target_address = parse_int(arena_address)
+            if target_address is None:
+                raise ValueError(
+                    f"arena_address must be an integer, got {arena_address!r}"
+                )
+
+        if target_address is None or fastbins_offset is None:
+            return self.arenas._unresolvable_response(
+                "inspect_fastbins",
+                FASTBIN_INSPECTION_SCHEMA,
+                layout,
+                classification,
+                profile,
+                reason=(
+                    "arena address or fastbinsY field offset could not be "
+                    "resolved via debug symbols"
+                ),
+                extra={
+                    "arena_address": target_address,
+                    "fastbins": [],
+                    "component_status": component_status,
+                },
+            )
+
+        pointer_bits = profile.get("pointer_bits")
+        if pointer_bits not in (32, 64):
+            raise RuntimeError(
+                "Cannot walk fastbins without a resolved pointer width; "
+                f"target_profile returned pointer_bits={pointer_bits!r}"
+            )
+        size_sz = pointer_bits // 8
+        byteorder = (
+            profile.get("byteorder")
+            if profile.get("byteorder") in ("little", "big")
+            else "little"
+        )
+        assert byteorder is not None
+        safe_linking = classification.get("safe_linking", "unknown")
+
+        warnings: List[str] = []
+        if profile.get("byteorder") not in ("little", "big"):
+            warnings.append(
+                "byteorder could not be resolved from the target; parsed "
+                "with little-endian default"
+            )
+        if safe_linking == "unknown":
+            warnings.append(
+                "safe-linking applicability is unknown (libc version was "
+                "not resolved); fd pointers reported as raw with no decode"
+            )
+
+        # Read the whole fastbinsY block in a single 10*size_sz gulp so the
+        # chain walks see a consistent snapshot of the heads.
+        if cancellation_check is not None:
+            cancellation_check()
+        heads_block, heads_err = self._read_bytes(
+            target_address + fastbins_offset, NFASTBINS * size_sz
+        )
+        if heads_err is not None or len(heads_block) < NFASTBINS * size_sz:
+            warnings.append(f"fastbinsY read: {heads_err or 'short read'}")
+            fastbins_out: List[Dict[str, Any]] = []
+            for i in range(NFASTBINS):
+                fastbins_out.append(
+                    {
+                        "index": i,
+                        "size_class": self.fastbin_size_for_index(i, pointer_bits),
+                        "head": None,
+                        "head_raw_hex": None,
+                        "chain": [],
+                        "length": 0,
+                        "truncated": False,
+                        "cycle_detected": False,
+                        "read_error": heads_err or "short read",
+                    }
+                )
+            parsed = {
+                "schema": FASTBIN_INSPECTION_SCHEMA,
+                "arena_address": target_address,
+                "is_main_arena": target_address == layout.get("arena_address"),
+                "layout": {
+                    "arena_address": layout.get("arena_address"),
+                    "fastbinsY_offset": fastbins_offset,
+                    "resolution_source": layout.get("resolution_source"),
+                    "unresolved_fields": layout.get("unresolved_fields", []),
+                },
+                "allocator": {
+                    "family": classification["family"],
+                    "version": classification.get("version"),
+                    "confidence": classification.get("confidence"),
+                    "safe_linking": safe_linking,
+                },
+                "safe_linking": {
+                    "state": safe_linking,
+                    "applied": safe_linking == "enabled",
+                },
+                "target_profile": profile,
+                "fastbins": fastbins_out,
+                "component_status": component_status,
+                "supported": True,
+                "verdict": "unreadable",
+                "reason": heads_err or "short read",
+            }
+            return build_backend_response(
+                "inspect_fastbins",
+                parsed=parsed,
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+
+        fastbins_out = []
+        for i in range(NFASTBINS):
+            slot_bytes = heads_block[i * size_sz : (i + 1) * size_sz]
+            head_ptr = int.from_bytes(slot_bytes, byteorder)  # type: ignore[arg-type]
+            bin_entry: Dict[str, Any] = {
+                "index": i,
+                "size_class": self.fastbin_size_for_index(i, pointer_bits),
+                "head": head_ptr,
+                "head_raw_hex": slot_bytes.hex(),
+                "chain": [],
+                "length": 0,
+                "truncated": False,
+                "cycle_detected": False,
+            }
+            if head_ptr == 0:
+                fastbins_out.append(bin_entry)
+                continue
+            walk = self._walk_fastbin_chain(
+                head_ptr,
+                mappings,
+                pointer_bits,
+                byteorder,
+                safe_linking,
+                max_chunks_per_bin,
+                cancellation_check,
+            )
+            bin_entry["chain"] = walk["chunks"]
+            bin_entry["length"] = walk["length"]
+            bin_entry["truncated"] = walk["truncated"]
+            bin_entry["cycle_detected"] = walk["cycle_detected"]
+            fastbins_out.append(bin_entry)
+
+        parsed = {
+            "schema": FASTBIN_INSPECTION_SCHEMA,
+            "arena_address": target_address,
+            "is_main_arena": target_address == layout.get("arena_address"),
+            "layout": {
+                "arena_address": layout.get("arena_address"),
+                "fastbinsY_offset": fastbins_offset,
+                "resolution_source": layout.get("resolution_source"),
+                "unresolved_fields": layout.get("unresolved_fields", []),
+            },
+            "allocator": {
+                "family": classification["family"],
+                "version": classification.get("version"),
+                "confidence": classification.get("confidence"),
+                "safe_linking": safe_linking,
+            },
+            "safe_linking": {
+                "state": safe_linking,
+                "applied": safe_linking == "enabled",
+            },
+            "target_profile": profile,
+            "fastbins": fastbins_out,
+            "max_chunks_per_bin": max_chunks_per_bin,
+            "component_status": component_status,
+            "supported": True,
+            "verdict": "parsed",
+        }
+        return build_backend_response(
+            "inspect_fastbins",
+            parsed=parsed,
+            raw_responses=[],
+            state=self.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings or None,
+        )
+
+
 class HeapTools:
     """Facade that groups every heap-inspection component under one object.
 
@@ -1904,6 +2315,14 @@ class HeapTools:
             debugger,
             session_id,
             discovery=self.discovery,
+        )
+        self.bins = GlibcBins(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
+            arenas=self.arenas,
         )
 
     # ---- S6.1 allocator discovery ------------------------------------
@@ -1973,11 +2392,26 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.3b glibc fastbin traversal --------------------------------
+    def inspect_fastbins(
+        self,
+        *,
+        arena_address: Optional[str] = None,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_FASTBIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        return self.bins.inspect_fastbins(
+            arena_address=arena_address,
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+
 
 __all__ = [
     "AllocatorDiscovery",
     "GlibcHeap",
     "GlibcArenas",
+    "GlibcBins",
     "ArenaLayoutResolver",
     "HeapTools",
     "ALLOCATOR_DETECTION_SCHEMA",
@@ -1986,6 +2420,8 @@ __all__ = [
     "CHUNK_VALIDATION_SCHEMA",
     "ARENA_LIST_SCHEMA",
     "ARENA_INSPECTION_SCHEMA",
+    "FASTBIN_INSPECTION_SCHEMA",
+    "DEFAULT_MAX_CHUNKS_PER_FASTBIN",
     "SAFE_LINKING_MIN_VERSION",
     "ALLOCATOR_RUNTIME_COMMANDS",
     "PREV_INUSE",
