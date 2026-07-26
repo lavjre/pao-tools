@@ -26,6 +26,7 @@ from .research import (
     TimelineEvent,
 )
 from .research_bundle import BundleError, ResearchBundle
+from .research_report import ReportError, ResearchReport
 from .rop import (
     ChainBuilder,
     ChainBuilderError,
@@ -103,4 +104,6 @@ __all__ = [
     "TimelineEvent",
     "BundleError",
     "ResearchBundle",
+    "ReportError",
+    "ResearchReport",
 ]

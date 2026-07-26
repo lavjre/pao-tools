@@ -394,6 +394,43 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def generate_final_report(
+        session_id: str,
+        formats: Optional[List[str]] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Render a research session as a typed final report.
+
+        The report keeps the Stage-9 fact / heuristic / hypothesis
+        distinction explicit: crash / heap / tool_result / artifact
+        evidence entries and captured snapshots land in **facts**;
+        notes tagged ``heuristic`` and evidence whose metadata carries
+        ``inference=True`` land in **heuristics**; every
+        ResearchHypothesis lands under **hypotheses** with its state
+        and (optional) rationale.  Known unknowns explicitly enumerate
+        gaps in the record -- proposed hypotheses without rationale,
+        state=unknown hypotheses, missing crash evidence, exploit talk
+        without a ROP hypothesis -- so a reader never mistakes absence
+        for irrelevance.
+
+        Available formats (any subset): ``json`` (machine-readable),
+        ``markdown`` (human narrative), ``html`` (self-contained page
+        wrapping the markdown in a properly-escaped <pre> block; we
+        deliberately do NOT ship a markdown-to-HTML parser).
+
+        Args:
+            session_id: Research session to report on.
+            formats: Optional list of ``json`` / ``markdown`` / ``html``.
+                Defaults to ``["markdown", "json"]``.
+        """
+        services = get_services(ctx)
+        return services.research_report.generate_report_response(
+            session_id=session_id,
+            formats=list(formats) if formats else None,
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def verify_research_bundle(
         source_path: str,
         ctx: Context = CurrentContext(),

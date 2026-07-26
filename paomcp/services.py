@@ -14,6 +14,7 @@ from paomcp.tools.backends import (
     PythonTools,
     ResearchBundle,
     ResearchRegistry,
+    ResearchReport,
     RopTools,
     SubprocessTools,
     TargetRegistry,
@@ -39,6 +40,7 @@ class AppServices:
     target_registry: TargetRegistry
     research_registry: ResearchRegistry
     research_bundle: ResearchBundle
+    research_report: ResearchReport
     paopipe_sessions: Dict[str, PaoPipe] = field(default_factory=dict)
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -123,6 +125,7 @@ def create_services(
         research_bundle=ResearchBundle(
             research_registry, artifact_store=artifact_store
         ),
+        research_report=ResearchReport(research_registry),
     )
     artifact_store.start_cleanup_worker()
     return services
