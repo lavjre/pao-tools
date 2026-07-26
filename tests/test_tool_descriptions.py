@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 144
+    assert len(tools) == 146
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -118,6 +118,10 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "create_named_snapshot",
         "list_snapshots",
         "compare_snapshots",
+    } <= tool_names
+    assert {
+        "append_timeline_event",
+        "get_research_timeline",
     } <= tool_names
     legacy_prefix = "".join(("pwn", "cli"))
     assert all(legacy_prefix not in name for name in tool_names)

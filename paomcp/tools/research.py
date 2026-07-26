@@ -233,6 +233,88 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def append_timeline_event(
+        session_id: str,
+        kind: str,
+        summary: str,
+        ref: Optional[str] = None,
+        hypothesis_id: Optional[str] = None,
+        note_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Record one event on a research session's append-only timeline.
+
+        Notes / snapshots / hypothesis changes / evidence links append
+        their own events automatically; this tool is for the events a
+        caller wants to record explicitly -- most commonly ``tool_call``
+        (a significant tool ran), ``debug_stop`` (target hit a stop of
+        interest), ``crash`` (linked separately from the crash record),
+        ``reproduction`` (managed to reproduce a bug), or ``other``.
+
+        The timeline is bounded to
+        DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION (2000).  On overflow
+        the oldest event is dropped and the new event's metadata
+        carries ``dropped_oldest_for_cap = True`` so the pruning is
+        never silent.
+
+        Args:
+            session_id: Research session to append into.
+            kind: One of tool_call / debug_stop / crash / note /
+                snapshot / hypothesis_change / reproduction / artifact
+                / other.
+            summary: One-line human summary (required).
+            ref: Optional opaque reference (crash id, artifact id,
+                tool-call operation id, ...).
+            hypothesis_id: Optional hypothesis this event bears on;
+                must already exist in the session.
+            note_id: Optional note this event corresponds to; must
+                already exist in the session.
+            snapshot_id: Optional snapshot this event corresponds to;
+                must already exist in the session.
+            metadata: Optional arbitrary metadata dict.
+        """
+        services = get_services(ctx)
+        return services.research_registry.append_timeline_event_response(
+            session_id=session_id,
+            kind=kind,
+            summary=summary,
+            ref=ref,
+            hypothesis_id=hypothesis_id,
+            note_id=note_id,
+            snapshot_id=snapshot_id,
+            metadata=dict(metadata) if metadata else None,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def get_research_timeline(
+        session_id: str,
+        kinds: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Return a research session's timeline, optionally filtered.
+
+        Args:
+            session_id: Research session whose timeline to fetch.
+            kinds: Optional list of event kinds to keep; any other
+                kind is filtered out.  An unknown kind here raises a
+                typed error rather than silently returning nothing.
+            limit: Optional cap on the number of events returned.
+                When set, the *most recent* ``limit`` events are
+                returned (the interesting tail).
+        """
+        services = get_services(ctx)
+        return services.research_registry.get_timeline_response(
+            session_id=session_id,
+            kinds=list(kinds) if kinds else None,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def compare_snapshots(
         session_id: str,
         before: str,

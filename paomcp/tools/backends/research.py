@@ -37,12 +37,15 @@ RESEARCH_HYPOTHESIS_SCHEMA = "pao.research-hypothesis.v1"
 RESEARCH_SNAPSHOT_SCHEMA = "pao.research-snapshot.v1"
 RESEARCH_SNAPSHOT_LIST_SCHEMA = "pao.research-snapshot-list.v1"
 RESEARCH_SNAPSHOT_DIFF_SCHEMA = "pao.research-snapshot-diff.v1"
+RESEARCH_TIMELINE_EVENT_SCHEMA = "pao.research-timeline-event.v1"
+RESEARCH_TIMELINE_SCHEMA = "pao.research-timeline.v1"
 
 DEFAULT_MAX_RESEARCH_SESSIONS = 32
 DEFAULT_MAX_NOTES_PER_SESSION = 500
 DEFAULT_MAX_EVIDENCE_PER_SESSION = 1000
 DEFAULT_MAX_HYPOTHESES_PER_SESSION = 100
 DEFAULT_MAX_SNAPSHOTS_PER_SESSION = 64
+DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION = 2000
 
 HYPOTHESIS_STATES: Tuple[str, ...] = (
     "proposed",
@@ -59,6 +62,21 @@ EVIDENCE_KINDS: Tuple[str, ...] = (
     "note",
     "external",
 )
+
+# Timeline event kinds a caller may append.  A caller-supplied kind
+# outside this vocabulary is rejected so timeline stays queryable.
+TIMELINE_EVENT_KINDS: Tuple[str, ...] = (
+    "tool_call",
+    "debug_stop",
+    "crash",
+    "note",
+    "snapshot",
+    "hypothesis_change",
+    "reproduction",
+    "artifact",
+    "other",
+)
+
 
 # Slot names a research snapshot may carry.  A caller supplies any
 # subset; each slot is an opaque JSON-serializable payload the caller
@@ -152,6 +170,34 @@ class ResearchHypothesis:
 
 
 @dataclass
+class TimelineEvent:
+    """One point on a research session's append-only timeline."""
+
+    event_id: str
+    kind: str  # one of TIMELINE_EVENT_KINDS
+    summary: str
+    created_at: str = field(default_factory=_now_iso)
+    ref: Optional[str] = None
+    hypothesis_id: Optional[str] = None
+    note_id: Optional[str] = None
+    snapshot_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "kind": self.kind,
+            "summary": self.summary,
+            "created_at": self.created_at,
+            "ref": self.ref,
+            "hypothesis_id": self.hypothesis_id,
+            "note_id": self.note_id,
+            "snapshot_id": self.snapshot_id,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass
 class ResearchSnapshot:
     """A named checkpoint bundling caller-supplied slots at one instant.
 
@@ -197,6 +243,7 @@ class ResearchSession:
     evidence: Dict[str, ResearchEvidence] = field(default_factory=dict)
     hypotheses: Dict[str, ResearchHypothesis] = field(default_factory=dict)
     snapshots: Dict[str, ResearchSnapshot] = field(default_factory=dict)
+    timeline: List[TimelineEvent] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     _lock: threading.RLock = field(
         default_factory=threading.RLock, repr=False, compare=False
@@ -217,6 +264,7 @@ class ResearchSession:
             "evidence_count": len(self.evidence),
             "hypothesis_count": len(self.hypotheses),
             "snapshot_count": len(self.snapshots),
+            "timeline_length": len(self.timeline),
             "metadata": dict(self.metadata),
         }
         if include_children:
@@ -240,6 +288,7 @@ class ResearchRegistry:
         max_evidence_per_session: int = DEFAULT_MAX_EVIDENCE_PER_SESSION,
         max_hypotheses_per_session: int = DEFAULT_MAX_HYPOTHESES_PER_SESSION,
         max_snapshots_per_session: int = DEFAULT_MAX_SNAPSHOTS_PER_SESSION,
+        max_timeline_events_per_session: int = DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION,
     ) -> None:
         for name, value in (
             ("max_sessions", max_sessions),
@@ -247,6 +296,7 @@ class ResearchRegistry:
             ("max_evidence_per_session", max_evidence_per_session),
             ("max_hypotheses_per_session", max_hypotheses_per_session),
             ("max_snapshots_per_session", max_snapshots_per_session),
+            ("max_timeline_events_per_session", max_timeline_events_per_session),
         ):
             if value <= 0:
                 raise ValueError(f"{name} must be positive")
@@ -255,6 +305,7 @@ class ResearchRegistry:
         self._max_evidence = max_evidence_per_session
         self._max_hypotheses = max_hypotheses_per_session
         self._max_snapshots = max_snapshots_per_session
+        self._max_timeline = max_timeline_events_per_session
         self._sessions: Dict[str, ResearchSession] = {}
         self._lock = threading.RLock()
 
@@ -302,6 +353,117 @@ class ResearchRegistry:
             return self._sessions.pop(session_id, None)
 
     # ------------------------------------------------------------------
+    # Timeline
+    # ------------------------------------------------------------------
+    def _append_event_locked(
+        self,
+        session: ResearchSession,
+        *,
+        kind: str,
+        summary: str,
+        ref: Optional[str] = None,
+        hypothesis_id: Optional[str] = None,
+        note_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> TimelineEvent:
+        """Append one timeline event; caller must already hold ``session._lock``.
+
+        Timeline is bounded: on overflow the oldest event is dropped so
+        the append is O(1) amortized and a runaway workflow does not
+        allocate unbounded memory.  Oldest-first eviction preserves the
+        most recent history, which is what an investigator wants.
+        """
+        if kind not in TIMELINE_EVENT_KINDS:
+            raise ResearchError(
+                f"event kind {kind!r} must be one of " f"{list(TIMELINE_EVENT_KINDS)}"
+            )
+        if not isinstance(summary, str) or not summary.strip():
+            raise ResearchError("event summary must be a non-empty string")
+        event = TimelineEvent(
+            event_id=uuid.uuid4().hex[:12],
+            kind=kind,
+            summary=summary.strip(),
+            ref=ref,
+            hypothesis_id=hypothesis_id,
+            note_id=note_id,
+            snapshot_id=snapshot_id,
+            metadata=dict(metadata or {}),
+        )
+        session.timeline.append(event)
+        # Cap-driven eviction of the oldest event.  We drop rather than
+        # error because the timeline is auto-populated by note / snapshot
+        # / hypothesis mutations, and a hard error there would break the
+        # underlying operation.
+        if len(session.timeline) > self._max_timeline:
+            del session.timeline[0]
+            # Note the drop in the newest event's metadata so a caller
+            # can tell the timeline was pruned rather than silently
+            # complete.
+            event.metadata["dropped_oldest_for_cap"] = True
+        return event
+
+    def append_timeline_event(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        summary: str,
+        ref: Optional[str] = None,
+        hypothesis_id: Optional[str] = None,
+        note_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> TimelineEvent:
+        session = self.get_session(session_id)
+        with session._lock:
+            if hypothesis_id is not None and hypothesis_id not in session.hypotheses:
+                raise ResearchError(
+                    f"hypothesis '{hypothesis_id}' not found in session"
+                )
+            if note_id is not None and note_id not in session.notes:
+                raise ResearchError(f"note '{note_id}' not found in session")
+            if snapshot_id is not None and snapshot_id not in session.snapshots:
+                raise ResearchError(f"snapshot '{snapshot_id}' not found in session")
+            event = self._append_event_locked(
+                session,
+                kind=kind,
+                summary=summary,
+                ref=ref,
+                hypothesis_id=hypothesis_id,
+                note_id=note_id,
+                snapshot_id=snapshot_id,
+                metadata=metadata,
+            )
+            session._touch()
+            return event
+
+    def get_timeline(
+        self,
+        *,
+        session_id: str,
+        kinds: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[TimelineEvent]:
+        session = self.get_session(session_id)
+        with session._lock:
+            events = list(session.timeline)
+        if kinds:
+            kinds_set = set(kinds)
+            unknown = sorted(kinds_set - set(TIMELINE_EVENT_KINDS))
+            if unknown:
+                raise ResearchError(
+                    f"unknown filter kinds {unknown}; expected any of "
+                    f"{list(TIMELINE_EVENT_KINDS)}"
+                )
+            events = [e for e in events if e.kind in kinds_set]
+        if limit is not None:
+            if limit <= 0:
+                raise ResearchError("limit must be positive when provided")
+            events = events[-limit:]
+        return events
+
+    # ------------------------------------------------------------------
     # Notes
     # ------------------------------------------------------------------
     def add_note(
@@ -332,6 +494,13 @@ class ResearchRegistry:
                 hypothesis_id=hypothesis_id,
             )
             session.notes[note.note_id] = note
+            self._append_event_locked(
+                session,
+                kind="note",
+                summary=note.body[:120],
+                note_id=note.note_id,
+                hypothesis_id=hypothesis_id,
+            )
             session._touch()
             return note
 
@@ -378,6 +547,20 @@ class ResearchRegistry:
                 metadata=dict(metadata or {}),
             )
             session.evidence[evidence.evidence_id] = evidence
+            summary = description or f"linked {kind} '{ref.strip()}'"
+            self._append_event_locked(
+                session,
+                kind=(
+                    "crash"
+                    if kind == "crash"
+                    else "artifact" if kind == "artifact" else "other"
+                ),
+                summary=summary[:120],
+                ref=ref.strip(),
+                hypothesis_id=hypothesis_id,
+                note_id=note_id,
+                metadata={"evidence_id": evidence.evidence_id, "evidence_kind": kind},
+            )
             session._touch()
             return evidence
 
@@ -413,6 +596,13 @@ class ResearchRegistry:
                 rationale=rationale,
             )
             session.hypotheses[hypothesis.hypothesis_id] = hypothesis
+            self._append_event_locked(
+                session,
+                kind="hypothesis_change",
+                summary=f"proposed: {hypothesis.statement[:100]}",
+                hypothesis_id=hypothesis.hypothesis_id,
+                metadata={"transition": ["<none>", state]},
+            )
             session._touch()
             return hypothesis
 
@@ -436,10 +626,18 @@ class ResearchRegistry:
                 raise ResearchError(
                     f"hypothesis '{hypothesis_id}' not found in session"
                 )
+            previous_state = hypothesis.state
             hypothesis.state = state
             if rationale is not None:
                 hypothesis.rationale = rationale
             hypothesis.updated_at = _now_iso()
+            self._append_event_locked(
+                session,
+                kind="hypothesis_change",
+                summary=f"{previous_state} -> {state}: {hypothesis.statement[:80]}",
+                hypothesis_id=hypothesis.hypothesis_id,
+                metadata={"transition": [previous_state, state]},
+            )
             session._touch()
             return hypothesis
 
@@ -477,6 +675,13 @@ class ResearchRegistry:
                 description=description,
             )
             session.snapshots[snapshot.snapshot_id] = snapshot
+            self._append_event_locked(
+                session,
+                kind="snapshot",
+                summary=f"captured snapshot '{snapshot.name}'",
+                snapshot_id=snapshot.snapshot_id,
+                metadata={"slot_names": sorted(slots_dict.keys())},
+            )
             session._touch()
             return snapshot
 
@@ -774,6 +979,66 @@ class ResearchRegistry:
             warnings=None,
         )
 
+    def append_timeline_event_response(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        summary: str,
+        ref: Optional[str] = None,
+        hypothesis_id: Optional[str] = None,
+        note_id: Optional[str] = None,
+        snapshot_id: Optional[str] = None,
+        metadata: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        event = self.append_timeline_event(
+            session_id=session_id,
+            kind=kind,
+            summary=summary,
+            ref=ref,
+            hypothesis_id=hypothesis_id,
+            note_id=note_id,
+            snapshot_id=snapshot_id,
+            metadata=metadata,
+        )
+        return build_backend_response(
+            "append_timeline_event",
+            parsed={
+                "schema": RESEARCH_TIMELINE_EVENT_SCHEMA,
+                "session_id": session_id,
+                "event": event.to_dict(),
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def get_timeline_response(
+        self,
+        *,
+        session_id: str,
+        kinds: Optional[Sequence[str]] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        events = self.get_timeline(session_id=session_id, kinds=kinds, limit=limit)
+        return build_backend_response(
+            "get_research_timeline",
+            parsed={
+                "schema": RESEARCH_TIMELINE_SCHEMA,
+                "session_id": session_id,
+                "filter_kinds": sorted(kinds) if kinds else None,
+                "limit": limit,
+                "events": [e.to_dict() for e in events],
+                "count": len(events),
+                "max_events": self._max_timeline,
+            },
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
     def update_hypothesis_state_response(
         self,
         *,
@@ -810,14 +1075,17 @@ __all__ = [
     "ResearchSnapshot",
     "ResearchSession",
     "ResearchRegistry",
+    "TimelineEvent",
     "HYPOTHESIS_STATES",
     "EVIDENCE_KINDS",
     "SNAPSHOT_SLOTS",
+    "TIMELINE_EVENT_KINDS",
     "DEFAULT_MAX_RESEARCH_SESSIONS",
     "DEFAULT_MAX_NOTES_PER_SESSION",
     "DEFAULT_MAX_EVIDENCE_PER_SESSION",
     "DEFAULT_MAX_HYPOTHESES_PER_SESSION",
     "DEFAULT_MAX_SNAPSHOTS_PER_SESSION",
+    "DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION",
     "RESEARCH_SESSION_SCHEMA",
     "RESEARCH_SESSION_LIST_SCHEMA",
     "RESEARCH_NOTE_SCHEMA",
@@ -826,4 +1094,6 @@ __all__ = [
     "RESEARCH_SNAPSHOT_SCHEMA",
     "RESEARCH_SNAPSHOT_LIST_SCHEMA",
     "RESEARCH_SNAPSHOT_DIFF_SCHEMA",
+    "RESEARCH_TIMELINE_EVENT_SCHEMA",
+    "RESEARCH_TIMELINE_SCHEMA",
 ]
