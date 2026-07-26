@@ -202,5 +202,130 @@ def register(mcp: FastMCP) -> None:
             timeout_sec=timeout_sec,
         )
 
+    @mcp.tool()
+    @catch_errors()
+    async def build_rop_chain(
+        binary_path: str,
+        kind: str,
+        arch: str = "x86_64",
+        image_base: Optional[int] = None,
+        bad_bytes: Optional[List[Any]] = None,
+        target_address: Optional[int] = None,
+        target_symbol: Optional[str] = None,
+        args: Optional[List[int]] = None,
+        align_stack: bool = True,
+        syscall_number: Optional[int] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Assemble a typed ROP chain for a real exploit shape.
+
+        Supported ``kind`` values (x86_64 today):
+
+        * ``ret2libc``    -- loads rdi, rsi, rdx via ``pop <reg> ; ret``
+          gadgets and transfers control to ``target_address`` (compute
+          this via ``identify_libc`` + a libc symbol offset first).  A
+          single ``ret`` gadget is inserted before the target call for
+          16-byte SysV stack alignment unless ``align_stack=False``.
+        * ``ret2syscall`` -- loads rax with ``syscall_number`` then
+          sets rdi, rsi, rdx, r10, r8, r9 (Linux SYSCALL calling
+          convention; SYSCALL clobbers rcx and r11) before executing a
+          ``syscall ; ret`` gadget.
+
+        The returned chain carries the typed entry list, the packed
+        little-endian ``raw_bytes`` a caller can splice directly into
+        an overflow payload, and a ``missing_gadgets`` list plus
+        ``verdict = "missing_gadgets"`` when a required gadget was not
+        available.
+
+        Args:
+            binary_path: Binary to search for chain gadgets.  Usually
+                the target executable itself.
+            kind: ``"ret2libc"`` or ``"ret2syscall"``.
+            arch: Target architecture (only ``"x86_64"`` is supported
+                today; other arches return ``verdict="unsupported_arch"``).
+            image_base: Optional rebase for the gadget search.
+            bad_bytes: Optional forbidden bytes for gadget addresses.
+            target_address: ret2libc: absolute address to call.
+            target_symbol: ret2libc: cosmetic label used in the entry
+                purposes and ``target.symbol`` field.
+            args: Positional arguments (int list) loaded into
+                rdi/rsi/rdx/... in order.
+            align_stack: ret2libc: prepend a bare ``ret`` gadget before
+                the final call so the target sees 16-byte-aligned rsp.
+            syscall_number: ret2syscall: syscall number for rax.
+        """
+        services = get_services(ctx)
+        return services.rop_tools.build_rop_chain(
+            binary_path=binary_path,
+            kind=kind,
+            arch=arch,
+            image_base=image_base,
+            bad_bytes=bad_bytes,
+            target_address=target_address,
+            target_symbol=target_symbol,
+            args=list(args or []),
+            align_stack=align_stack,
+            syscall_number=syscall_number,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def inspect_sigreturn_frame(
+        arch: str = "x86_64",
+        registers: Optional[Mapping[str, int]] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Build a typed sigreturn (SROP) frame with per-register offsets.
+
+        Delegates the byte-level layout to pwntools' ``SigreturnFrame``
+        so the offsets stay authoritative, but presents the result
+        under the typed backend envelope: ``frame_bytes`` (hex-encoded
+        raw bytes), ``frame_size``, ``register_offsets`` (name ->
+        byte offset within the frame), and ``syscall_number`` for
+        rt_sigreturn on the requested arch.  ``x86_64`` and ``i386``
+        are supported today; other arches return
+        ``verdict="unsupported_arch"``.
+
+        Args:
+            arch: Target architecture (``"x86_64"`` or ``"i386"``).
+            registers: Optional mapping of register-name to value; any
+                register slot present in the arch's frame layout may
+                be assigned here (e.g. ``{"rip": 0xdeadbeef, "rsp":
+                0xcafe0000, "rdi": 0}``).
+        """
+        services = get_services(ctx)
+        return services.rop_tools.inspect_sigreturn_frame(
+            arch=arch,
+            registers=dict(registers) if registers else None,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def explain_chain_constraints(
+        chain: List[Mapping[str, Any]],
+        arch: str = "x86_64",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Advisory: per-slot side effects and risky cross-slot overwrites.
+
+        Walks a chain (as returned by ``build_rop_chain``'s ``entries``
+        list) and reports per-slot ``reads`` / ``writes`` / ``clobbers``
+        plus a ``risky_overwrites`` list that flags any register a
+        later gadget writes over after an earlier slot loaded it.
+        Advisory only -- it helps a caller spot a layout that is
+        obviously wrong before running it.
+
+        Args:
+            chain: Sequence of chain entries; each entry is a dict
+                with at minimum a ``kind`` field
+                (``gadget`` / ``immediate`` / ``target``).
+            arch: Target architecture (``"x86_64"`` recommended).
+        """
+        services = get_services(ctx)
+        return services.rop_tools.explain_chain_constraints(
+            chain=list(chain),
+            arch=arch,
+        )
+
 
 __all__ = ["register"]
