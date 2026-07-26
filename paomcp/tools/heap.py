@@ -514,5 +514,181 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def capture_heap_snapshot(
+        session_id: str,
+        name: Optional[str] = None,
+        max_chunks_per_bin: int = 512,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Capture a typed heap snapshot for this session.
+
+        Drives the sibling allocator / arena / bin / tcache inspectors
+        into a single reproducible payload: allocator identity + target
+        profile, per-arena summaries (top, last_remainder, system_mem,
+        next), tcache summary, and a flat chunk ledger (address, size,
+        arena_address, location kind + index) covering every fastbin,
+        regular bin and tcache slot walked.
+
+        Snapshots are stored session-locally under a bounded budget (16
+        entries and 64 MiB total, oldest-first eviction).  Re-capturing
+        under an existing ``name`` evicts the previous entry so the name
+        always points at the latest capture.  A non-glibc allocator
+        yields a stored ``unsupported`` snapshot with an empty ledger.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            name: Optional human-readable name for later
+                ``get_heap_snapshot`` / ``diff_heap_snapshots`` lookups.
+                Omit for anonymous (id-only) captures.
+            max_chunks_per_bin: Per-bin traversal cap applied to fastbins,
+                tcache and regular bins.  Defaults to 512.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.capture_heap_snapshot(
+                name=name,
+                max_chunks_per_bin=max_chunks_per_bin,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_heap_snapshots(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List every stored heap snapshot for a session.
+
+        Returns a per-snapshot descriptor (``snapshot_id``, ``name``,
+        ``captured_at``, ``allocator_family``, ``chunk_count``,
+        ``arena_count``, ``linked_crash_ids``, ``payload_bytes``) plus
+        the current budget usage (count / max_count, bytes / max_bytes).
+
+        Args:
+            session_id: Debugger session whose snapshot store should be
+                enumerated.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.list_heap_snapshots(),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def get_heap_snapshot(
+        session_id: str,
+        identifier: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Fetch a stored heap snapshot by id or name.
+
+        The full snapshot payload is returned, including allocator
+        identity, per-arena summaries, tcache summary, chunk ledger and
+        the current list of ``linked_crash_ids`` (see
+        ``link_snapshot_to_crash``).
+
+        Args:
+            session_id: Debugger session that owns the snapshot store.
+            identifier: Either the snapshot's ``snapshot_id`` (as
+                returned by ``capture_heap_snapshot``) or the human
+                ``name`` it was captured under.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.get_heap_snapshot(identifier=identifier),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def diff_heap_snapshots(
+        session_id: str,
+        before: str,
+        after: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Diff two stored heap snapshots.
+
+        Computes ``new`` / ``removed`` / ``moved`` chunk sets (by
+        chunk_address, with per-chunk location before / after) plus
+        per-arena presence and top-address delta.  Either identifier may
+        be a ``snapshot_id`` or a name.  Diffing a snapshot against
+        itself is rejected.  If either snapshot was captured on a
+        non-glibc allocator the diff returns ``verdict=unsupported``.
+
+        Args:
+            session_id: Debugger session that owns both snapshots.
+            before: Identifier (id or name) of the earlier snapshot.
+            after: Identifier (id or name) of the later snapshot.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.diff_heap_snapshots(before=before, after=after),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def link_snapshot_to_crash(
+        session_id: str,
+        identifier: str,
+        crash_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Annotate a heap snapshot with a related crash id.
+
+        The association is annotation-only: it does not verify that the
+        crash still exists in the crash-history store, and duplicate
+        ``crash_id`` values for the same snapshot are ignored.  The
+        updated ``linked_crash_ids`` list is returned.
+
+        Args:
+            session_id: Debugger session that owns the snapshot.
+            identifier: Either the snapshot's ``snapshot_id`` or its
+                human-readable name.
+            crash_id: Crash id to attach.  Non-empty string required.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.link_snapshot_to_crash(
+                identifier=identifier, crash_id=crash_id
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]
