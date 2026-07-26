@@ -1,8 +1,8 @@
-"""MCP tools for typed ROP gadget indexing (Stage 7.1)."""
+"""MCP tools for typed ROP gadget indexing and libc identification (Stage 7)."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
@@ -139,6 +139,67 @@ def register(mcp: FastMCP) -> None:
             address=address,
             arch=arch,
             image_base=image_base,
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def identify_libc(
+        leaks: Mapping[str, int],
+        candidate_libcs: List[str],
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Score leaked ``{symbol: address}`` pairs against candidate libc files.
+
+        Each candidate is checked with the invariant that every
+        ``leak_address - libc_symbol_offset`` must yield the same base.
+        A candidate is ``consistent`` when at least two leaks agree on
+        a base; ``insufficient`` when only one leak matched;
+        ``inconsistent`` when the bases disagree; ``unreadable`` when
+        the candidate could not be parsed at all.  The top-level
+        verdict aggregates those into ``confirmed`` (single candidate,
+        >= 3 matched leaks), ``likely`` (single candidate, 2 matched),
+        ``ambiguous`` (multiple candidates consistent), ``insufficient``
+        (need more leaks) or ``rejected`` (no candidate matches).
+
+        Args:
+            leaks: Mapping of libc symbol name (``"puts"``, ``"read"``,
+                ...) to the leaked absolute runtime address.
+            candidate_libcs: Ordered list of candidate ``libc.so`` file
+                paths to score.  A common corpus is every version in
+                ``libc-database`` extracted locally.
+        """
+        services = get_services(ctx)
+        return services.rop_tools.identify_libc(
+            leaks=dict(leaks),
+            candidate_libcs=list(candidate_libcs),
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def find_one_gadgets(
+        libc_path: str,
+        timeout_sec: float = 30.0,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Enumerate one-gadget candidates in a libc via the Ruby tool.
+
+        Shells out to the ``one_gadget`` executable when present on
+        PATH.  Returns ``verdict="parsed"`` with per-gadget
+        ``{offset, call, constraints[]}`` on success, ``verdict="empty"``
+        when the tool ran but returned no gadgets,
+        ``verdict="unsupported"`` when the executable is missing (with
+        an install hint), or ``verdict="failed"`` with the tool's
+        stderr on a non-zero exit.
+
+        Args:
+            libc_path: Absolute or workspace-relative path to the libc
+                to scan.
+            timeout_sec: Wall-clock budget for the subprocess call.
+        """
+        services = get_services(ctx)
+        return services.rop_tools.find_one_gadgets(
+            libc_path=libc_path,
+            timeout_sec=timeout_sec,
         )
 
 

@@ -15,7 +15,13 @@ from .heap import (
 )
 from .pwndbg import PwndbgTools
 from .python import PythonTools
-from .rop import GadgetIndex, GadgetIndexError, RopTools
+from .rop import (
+    GadgetIndex,
+    GadgetIndexError,
+    LibcIdentifier,
+    LibcIdentifierError,
+    RopTools,
+)
 from .subproc import SubprocessTools
 
 __all__ = [
@@ -35,5 +41,7 @@ __all__ = [
     "GhidraDecompiler",
     "GadgetIndex",
     "GadgetIndexError",
+    "LibcIdentifier",
+    "LibcIdentifierError",
     "RopTools",
 ]
