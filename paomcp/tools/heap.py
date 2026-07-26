@@ -161,6 +161,85 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def list_arenas(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Enumerate glibc arenas by walking the ``main_arena.next`` chain.
+
+        Requires libc built with debug symbols to resolve ``main_arena`` and
+        the ``malloc_state.next`` field offset; without them the tool
+        returns ``verdict = "unresolvable"`` rather than guessing.  The
+        traversal is bounded (256 arenas max) with cycle detection so a
+        corrupted heap cannot hang the tool.
+
+        Each returned arena carries its address, index in the chain, a
+        ``is_main`` flag, whether the address lies in any known memory
+        mapping, and the next-arena pointer read from live memory.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.list_arenas(
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def inspect_arena(
+        session_id: str,
+        arena_address: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Read and decode a full glibc ``malloc_state`` struct.
+
+        Reads ``sizeof(struct malloc_state)`` bytes at the arena address
+        and decodes each field (mutex, flags, have_fastchunks, fastbinsY,
+        top, last_remainder, bins, binmap, next, next_free,
+        attached_threads, system_mem, max_system_mem) using offsets
+        resolved from libc debug symbols.  Fields whose offset cannot be
+        resolved or whose byte range falls outside the read are reported
+        under ``unreadable_fields`` rather than silently defaulted.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            arena_address: Hex/decimal address of a non-main arena
+                (typically obtained from ``list_arenas``).  Omit to inspect
+                main_arena.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_arena(
+                arena_address=arena_address,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
     async def validate_chunk(
         session_id: str,
         address: str,
