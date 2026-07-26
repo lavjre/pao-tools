@@ -220,3 +220,10 @@ __marimo__/
 
 # This isn't actually reference here, just for development
 .nonce
+
+# Local agent instructions
+CLAUDE.md
+claude/
+
+# Session exports
+session-export-*.zip
