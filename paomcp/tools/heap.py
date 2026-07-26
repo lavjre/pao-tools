@@ -333,6 +333,54 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def inspect_bins(
+        session_id: str,
+        arena_address: Optional[str] = None,
+        max_chunks_per_bin: int = 1024,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Walk all 127 regular glibc bins (unsorted / small / large).
+
+        Reads the arena's ``bins[]`` array (254 pointer slots) in a
+        single gulp for a consistent snapshot, then per bin computes the
+        ``bin_at(m, i)`` synthetic mchunkptr, detects the empty case
+        (fd == bin_head_addr), and walks the doubly-linked chain via
+        ``fd`` until it circles back to the bin head, hits a NULL fd,
+        loops, or reaches the traversal cap.
+
+        Bin categories: index 1 is unsorted, 2..63 are small (one size
+        class per bin), 64..127 are large (each covers a size range).
+        Per chunk the response includes chunk_address, size_field, size,
+        prev_inuse, fd, bk, and in_mapping.  Large bin secondary
+        size-sorted lists (fd_nextsize / bk_nextsize) are deferred.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            arena_address: Optional hex/decimal arena address (from
+                ``list_arenas``).  Omit to inspect main_arena.
+            max_chunks_per_bin: Per-bin traversal cap (default 1024).
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_bins(
+                arena_address=arena_address,
+                max_chunks_per_bin=max_chunks_per_bin,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
     async def validate_chunk(
         session_id: str,
         address: str,

@@ -1892,6 +1892,20 @@ TCACHE_INSPECTION_SCHEMA = "pao.glibc-tcache.v1"
 # above the real limit.
 DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN = 64
 
+# Stage 6.3d -- regular bins (unsorted / small / large).  Bin index 1 is
+# the unsorted bin, 2..63 are the small bins (one fixed size class each),
+# 64..127 are the large bins (each covers a size range with a secondary
+# fd_nextsize/bk_nextsize list, not walked here -- deferred).  The value
+# 127 = NBINS - 1 (bin 0 does not exist) and has been stable in glibc
+# since the introduction of size bins.
+BIN_INSPECTION_SCHEMA = "pao.glibc-bins.v1"
+
+# Per-bin cap for regular-bin traversal.  Large bins can legitimately
+# accumulate thousands of chunks between coalescing passes; 1024 is well
+# above typical steady-state depths while still bounding a corrupted
+# chain that never returns to its bin head.
+DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN = 1024
+
 
 class GlibcBins:
     """Walk glibc bin chains (fastbins today; tcache/regular bins later).
@@ -2671,6 +2685,301 @@ class GlibcBins:
             warnings=warnings or None,
         )
 
+    # ------------------------------------------------------------------
+    # Stage 6.3d -- regular bins (unsorted / small / large)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def bin_category(index: int) -> str:
+        """Return ``unsorted`` / ``small`` / ``large`` for a bin index.
+
+        Bin 1 is the unsorted bin (recently-freed chunks awaiting
+        classification).  Bins 2..63 are the small bins -- one fixed size
+        class each, doubly-linked FIFO order.  Bins 64..127 are the large
+        bins -- each covers a size range and additionally maintains a
+        secondary size-sorted list via fd_nextsize/bk_nextsize (not
+        walked here; deferred to a later stage).
+        """
+        if index == 1:
+            return "unsorted"
+        if 2 <= index <= 63:
+            return "small"
+        if 64 <= index <= NBINS - 1:
+            return "large"
+        raise ValueError(f"bin index out of range [1, {NBINS}): {index!r}")
+
+    def _walk_regular_bin(
+        self,
+        bin_head_address: int,
+        first_fd: int,
+        mappings: Sequence[Mapping[str, Any]],
+        pointer_bits: int,
+        byteorder: str,
+        max_chunks: int,
+        cancellation_check: Optional[Callable[[], None]],
+    ) -> Dict[str, Any]:
+        """Walk a regular bin's doubly-linked chain from ``first_fd``.
+
+        Termination is glibc-canonical: the chain circles back to
+        ``bin_head_address`` (a synthetic mchunkptr whose fd/bk slots ARE
+        the arena's ``bins[]`` entries).  A NULL fd is treated as an
+        additional terminator so a partially-initialized bin cannot
+        endless-loop; a repeated non-head address triggers cycle
+        detection.  Every chunk is read in a single 4*SIZE_SZ gulp so
+        header + fd + bk are all captured from one memory read.
+        """
+        size_sz = pointer_bits // 8
+        header_and_ptrs_size = 4 * size_sz  # prev_size + size + fd + bk
+        chain: List[Dict[str, Any]] = []
+        visited: Dict[int, int] = {}
+        cycle_detected = False
+        truncated = False
+        current: int = first_fd
+
+        while current != bin_head_address:
+            if cancellation_check is not None:
+                cancellation_check()
+            if current == 0:
+                # NULL fd is unusual (bins are usually self-referential
+                # when empty) but treat it as a benign end-of-chain rather
+                # than a crash.
+                break
+            if current in visited:
+                cycle_detected = True
+                break
+            if len(chain) >= max_chunks:
+                truncated = True
+                break
+            visited[current] = len(chain)
+            entry: Dict[str, Any] = {
+                "index": len(chain),
+                "chunk_address": current,
+                "in_mapping": mapping_for(current, mappings) is not None,
+            }
+            buf, err = self._read_bytes(current, header_and_ptrs_size)
+            if err is not None or len(buf) < header_and_ptrs_size:
+                entry["chunk_readable"] = False
+                entry["chunk_read_error"] = err or "short read"
+                chain.append(entry)
+                break
+            entry["chunk_readable"] = True
+            size_field = int.from_bytes(
+                buf[size_sz : 2 * size_sz], byteorder  # type: ignore[arg-type]
+            )
+            entry["size_field"] = size_field
+            entry["size"] = size_field & ~SIZE_BITS_MASK
+            entry["prev_inuse"] = bool(size_field & PREV_INUSE)
+            entry["fd"] = int.from_bytes(
+                buf[2 * size_sz : 3 * size_sz], byteorder  # type: ignore[arg-type]
+            )
+            entry["bk"] = int.from_bytes(
+                buf[3 * size_sz : 4 * size_sz], byteorder  # type: ignore[arg-type]
+            )
+            chain.append(entry)
+            current = entry["fd"]
+
+        return {
+            "chunks": chain,
+            "length": len(chain),
+            "truncated": truncated,
+            "cycle_detected": cycle_detected,
+        }
+
+    def inspect_bins(
+        self,
+        *,
+        arena_address: Optional[str] = None,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Walk all 127 regular bins (unsorted / small / large).
+
+        Reads the whole 254-pointer ``bins[]`` array in a single gulp for
+        a consistent snapshot, then per bin: computes ``bin_at(m, i)``
+        (the synthetic mchunkptr whose fd/bk slots are the arena entries),
+        detects the empty case (fd == bin_head_addr), and walks the
+        doubly-linked chain via ``fd`` with per-chain cycle detection and
+        a per-bin cap.  Each chunk carries both fd and bk for evidence;
+        bk consistency validation is deferred to a corruption classifier.
+        """
+        if max_chunks_per_bin <= 0:
+            raise ValueError(
+                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
+            )
+
+        classification, mappings, profile, component_status = self._prepare_context(
+            cancellation_check
+        )
+        if classification["family"] != "glibc":
+            return self.arenas._unsupported_response(
+                "inspect_bins",
+                BIN_INSPECTION_SCHEMA,
+                classification,
+                profile,
+                extra={"bins": [], "component_status": component_status},
+            )
+
+        layout = self.arenas.resolver.resolve()
+        bins_offset = layout["offsets"].get("bins")
+        target_address: Optional[int]
+        if arena_address is None:
+            target_address = layout.get("arena_address")
+        else:
+            target_address = parse_int(arena_address)
+            if target_address is None:
+                raise ValueError(
+                    f"arena_address must be an integer, got {arena_address!r}"
+                )
+
+        if target_address is None or bins_offset is None:
+            return self.arenas._unresolvable_response(
+                "inspect_bins",
+                BIN_INSPECTION_SCHEMA,
+                layout,
+                classification,
+                profile,
+                reason=(
+                    "arena address or bins field offset could not be "
+                    "resolved via debug symbols"
+                ),
+                extra={
+                    "arena_address": target_address,
+                    "bins": [],
+                    "component_status": component_status,
+                },
+            )
+
+        pointer_bits = profile.get("pointer_bits")
+        if pointer_bits not in (32, 64):
+            raise RuntimeError(
+                "Cannot walk regular bins without a resolved pointer width; "
+                f"target_profile returned pointer_bits={pointer_bits!r}"
+            )
+        size_sz = pointer_bits // 8
+        byteorder = (
+            profile.get("byteorder")
+            if profile.get("byteorder") in ("little", "big")
+            else "little"
+        )
+        assert byteorder is not None
+
+        warnings: List[str] = []
+        if profile.get("byteorder") not in ("little", "big"):
+            warnings.append(
+                "byteorder could not be resolved from the target; parsed "
+                "with little-endian default"
+            )
+
+        layout_out: Dict[str, Any] = {
+            "arena_address": layout.get("arena_address"),
+            "bins_offset": bins_offset,
+            "resolution_source": layout.get("resolution_source"),
+            "unresolved_fields": layout.get("unresolved_fields", []),
+        }
+        allocator_out = {
+            "family": classification["family"],
+            "version": classification.get("version"),
+            "confidence": classification.get("confidence"),
+        }
+
+        # Snapshot the whole bins[] array in one read so every bin sees a
+        # consistent view of its fd/bk pair.
+        bins_bytes_len = BINS_ARRAY_LEN * size_sz
+        if cancellation_check is not None:
+            cancellation_check()
+        bins_block, err = self._read_bytes(target_address + bins_offset, bins_bytes_len)
+        if err is not None or len(bins_block) < bins_bytes_len:
+            warnings.append(f"bins[] block read: {err or 'short read'}")
+            return build_backend_response(
+                "inspect_bins",
+                parsed={
+                    "schema": BIN_INSPECTION_SCHEMA,
+                    "arena_address": target_address,
+                    "is_main_arena": target_address == layout.get("arena_address"),
+                    "layout": layout_out,
+                    "allocator": allocator_out,
+                    "target_profile": profile,
+                    "bins": [],
+                    "max_chunks_per_bin": max_chunks_per_bin,
+                    "component_status": component_status,
+                    "supported": True,
+                    "verdict": "unreadable",
+                    "reason": err or "short read",
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings,
+            )
+
+        bins_out: List[Dict[str, Any]] = []
+        for i in range(1, NBINS):
+            fd_slot_offset = (i - 1) * 2 * size_sz
+            bk_slot_offset = ((i - 1) * 2 + 1) * size_sz
+            fd_slot = int.from_bytes(
+                bins_block[fd_slot_offset : fd_slot_offset + size_sz],
+                byteorder,  # type: ignore[arg-type]
+            )
+            bk_slot = int.from_bytes(
+                bins_block[bk_slot_offset : bk_slot_offset + size_sz],
+                byteorder,  # type: ignore[arg-type]
+            )
+            # bin_at(m, i) = &bins[(i-1)*2] - offsetof(chunk, fd)
+            #             = arena + bins_offset + (i-1)*2*size_sz - 2*size_sz
+            bin_head_address = (
+                target_address + bins_offset + fd_slot_offset - 2 * size_sz
+            )
+            empty = fd_slot == bin_head_address
+            bin_entry: Dict[str, Any] = {
+                "index": i,
+                "category": self.bin_category(i),
+                "bin_head_address": bin_head_address,
+                "fd_head": fd_slot,
+                "bk_head": bk_slot,
+                "empty": empty,
+                "chain": [],
+                "length": 0,
+                "truncated": False,
+                "cycle_detected": False,
+            }
+            if empty or fd_slot == 0:
+                bins_out.append(bin_entry)
+                continue
+            walk = self._walk_regular_bin(
+                bin_head_address,
+                fd_slot,
+                mappings,
+                pointer_bits,
+                byteorder,
+                max_chunks_per_bin,
+                cancellation_check,
+            )
+            bin_entry["chain"] = walk["chunks"]
+            bin_entry["length"] = walk["length"]
+            bin_entry["truncated"] = walk["truncated"]
+            bin_entry["cycle_detected"] = walk["cycle_detected"]
+            bins_out.append(bin_entry)
+
+        return build_backend_response(
+            "inspect_bins",
+            parsed={
+                "schema": BIN_INSPECTION_SCHEMA,
+                "arena_address": target_address,
+                "is_main_arena": target_address == layout.get("arena_address"),
+                "layout": layout_out,
+                "allocator": allocator_out,
+                "target_profile": profile,
+                "bins": bins_out,
+                "max_chunks_per_bin": max_chunks_per_bin,
+                "component_status": component_status,
+                "supported": True,
+                "verdict": "parsed",
+            },
+            raw_responses=[],
+            state=self.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings or None,
+        )
+
 
 class TcacheLayoutResolver:
     """Resolve the per-thread ``tcache`` pointer and struct layout via GDB.
@@ -2894,6 +3203,20 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.3d glibc regular bins (unsorted/small/large) --------------
+    def inspect_bins(
+        self,
+        *,
+        arena_address: Optional[str] = None,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        return self.bins.inspect_bins(
+            arena_address=arena_address,
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+
 
 __all__ = [
     "AllocatorDiscovery",
@@ -2914,6 +3237,8 @@ __all__ = [
     "TCACHE_INSPECTION_SCHEMA",
     "DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN",
     "TCACHE_MAX_BINS",
+    "BIN_INSPECTION_SCHEMA",
+    "DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN",
     "SAFE_LINKING_MIN_VERSION",
     "ALLOCATOR_RUNTIME_COMMANDS",
     "PREV_INUSE",
