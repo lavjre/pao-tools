@@ -12,6 +12,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         debug,
         debugger_memory,
         elf_runtime,
+        heap,
         inspect,
         operations,
         platform,
@@ -29,6 +30,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     debug.register(mcp)
     debugger_memory.register(mcp)
     elf_runtime.register(mcp)
+    heap.register(mcp)
     inspect.register(mcp)
     operations.register(mcp)
     platform.register(mcp)

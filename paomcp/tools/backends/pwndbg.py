@@ -16,6 +16,7 @@ from paomcp.tools.backends.compatibility import PwndbgCompatibility
 from paomcp.tools.backends.crash import CrashTriage
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.gdb import GdbController
+from paomcp.tools.backends.heap import AllocatorDiscovery
 from paomcp.tools.backends.inspection import PwndbgInspection
 
 if TYPE_CHECKING:
@@ -103,6 +104,13 @@ class PwndbgTools:
             self.debugger,
             self.inspection,
             session_state.session_id,
+        )
+        self.heap = AllocatorDiscovery(
+            gdb_controller,
+            self.inspection,
+            self.debugger,
+            session_state.session_id,
+            binary_path_provider=lambda: self.session.binary_path,
         )
         self.max_memory_patches = (
             max_memory_patches
