@@ -15,6 +15,7 @@ from .heap import (
 )
 from .pwndbg import PwndbgTools
 from .python import PythonTools
+from .rop import GadgetIndex, GadgetIndexError, RopTools
 from .subproc import SubprocessTools
 
 __all__ = [
@@ -32,4 +33,7 @@ __all__ = [
     "GitTools",
     "PythonTools",
     "GhidraDecompiler",
+    "GadgetIndex",
+    "GadgetIndexError",
+    "RopTools",
 ]

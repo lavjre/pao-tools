@@ -12,6 +12,7 @@ from paomcp.tools.backends import (
     GhidraDecompiler,
     GitTools,
     PythonTools,
+    RopTools,
     SubprocessTools,
 )
 from paomcp.utils.paths import DEFAULT_WORKSPACE, RuntimePaths, build_runtime_paths
@@ -31,6 +32,7 @@ class AppServices:
     artifact_store: ArtifactStore
     operation_registry: OperationRegistry
     debugger_compatibility: Dict[str, Any]
+    rop_tools: RopTools
     paopipe_sessions: Dict[str, PaoPipe] = field(default_factory=dict)
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -109,6 +111,7 @@ def create_services(
         artifact_store=artifact_store,
         operation_registry=operation_registry,
         debugger_compatibility=debugger_compatibility,
+        rop_tools=RopTools(),
     )
     artifact_store.start_cleanup_worker()
     return services
