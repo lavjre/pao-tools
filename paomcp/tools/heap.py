@@ -420,5 +420,99 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def classify_heap_corruption(
+        session_id: str,
+        arena_address: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Classify corruption across an arena's fastbins, tcache and regular bins.
+
+        Runs the typed bin inspectors (fastbins / tcache / regular bins) and
+        synthesizes their per-chain signals into a bounded, evidence-tagged
+        list of corruption findings.  Emits a conservative arena-level
+        verdict: ``valid`` (no findings), ``suspicious`` (only unreadable
+        findings), ``corrupted`` (any structural violation), ``unsupported``
+        (non-glibc), or ``unresolvable`` (bin layout could not be resolved).
+
+        Categories covered: ``cycle``, ``duplicate_entry`` (a chunk appearing
+        in multiple bins -- a strong double-free signal), ``fd_bk_inconsistency``
+        (broken doubly-linked pair in a regular bin), ``alignment``,
+        ``pointer_out_of_mapping``, ``unreadable_chunk`` and
+        ``unreadable_bin``.  The tcache is thread-local so its findings
+        always reflect the current thread regardless of ``arena_address``.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            arena_address: Optional hex/decimal arena address (typically
+                from ``list_arenas``).  Omit to classify main_arena.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.classify_heap_corruption(
+                arena_address=arena_address,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def validate_free(
+        session_id: str,
+        address: str,
+        address_kind: str = "user",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Return a safe-to-free verdict for a glibc chunk.
+
+        Runs the S6.2 chunk parse + containment checks and cross-references
+        the chunk against the current thread's tcache and main_arena's
+        fastbins to catch a double-free before ``free()`` fires.
+
+        Verdict vocabulary: ``unsupported`` (non-glibc), ``unreadable``
+        (header could not be read), ``double_free`` (chunk already present
+        in tcache or fastbins), ``corrupted`` (alignment / mapping / min-size
+        check failed), ``suspicious`` (payload extends past mapping end), or
+        ``safe`` (every check passed).  Per-check results and the list of
+        failed check names are returned so a heuristic is never promoted to
+        a fact.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            address: Chunk or user pointer as a hex/decimal string.
+            address_kind: ``"user"`` (default -- ``address`` is a pointer
+                returned by ``malloc``) or ``"chunk"`` (``address`` is the
+                chunk header address).
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.validate_free(
+                address=address,
+                address_kind=address_kind,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]
