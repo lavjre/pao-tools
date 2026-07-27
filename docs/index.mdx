@@ -15,7 +15,9 @@ description: "Stateful debugging, exploit I/O, and workspace automation for auto
 />
 
 
-`pao-tools` runs GDB + pwndbg in an isolated environment and exposes session-aware debugging, exploit-driver I/O, and helper tooling over MCP for agentic clients.
+`pao-tools` runs GDB + pwndbg in an isolated environment and exposes typed static
+analysis, stateful debugging, crash/heap triage, ROP/libc workflows, target
+providers, research records, exploit-driver I/O, and helper tooling over MCP.
 
 <CardGroup cols={2}>
   <Card title="Quick Start" icon="rocket" href="/quickstart">
@@ -28,13 +30,16 @@ description: "Stateful debugging, exploit I/O, and workspace automation for auto
     Follow task-oriented walkthroughs for first-run debugging, attach flows, exploit I/O, and multi-session work.
   </Card>
   <Card title="Reference" icon="square-terminal" href="/tool-reference/index">
-    Jump straight to debugger, automation, and attach API details.
+    Jump straight to all 150 debugger, heap, ROP, target, research, and automation tools.
   </Card>
 </CardGroup>
 
 ## Why it exists
 
-The project is built for LLM-driven binary research workflows where a stateless shell is not enough. It keeps debugger state alive across calls, supports multiple parallel sessions, and pairs low-level debugging with helper tools for process management, Python execution, repo fetching, and exploit-driver flows.
+The project is built for LLM-driven binary research workflows where a stateless
+shell is not enough. It keeps debugger state alive across calls, supports multiple
+parallel sessions, and connects static ELF evidence, runtime crashes, allocator
+state, chain hypotheses, target lifecycle, and exportable research records.
 
 You can use `pao-tools` to participate in CTFs, research, and exploit development workflows.
 
@@ -51,7 +56,7 @@ You can use `pao-tools` to participate in CTFs, research, and exploit developmen
     Start with `create_debug_session`, then `set_file`, `set_breakpoint`, and `run`. The walkthrough in [First Debug Session](/guides/first-debug-session) shows the full sequence.
   </Step>
   <Step title="Automate deeper workflows">
-    Move on to [Guides](/guides/index) and the [Reference](/tool-reference/index) section when you need attach flows, exploit I/O, or workspace automation.
+    Move on to [Heap Analysis](/tool-reference/heap-analysis), [ROP and libc](/tool-reference/rop-libc), [Target Providers](/tool-reference/target-providers), and the [Research Workspace](/tool-reference/research-workspace) when the initial debugger flow is working.
   </Step>
 </Steps>
 

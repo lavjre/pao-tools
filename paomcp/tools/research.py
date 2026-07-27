@@ -22,12 +22,14 @@ def register(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """Create a typed research workspace for one investigation.
 
-        A research session is the durable container for notes,
-        hypotheses, evidence links and (in later S9 stages) named
-        snapshots + a timeline.  It is independent of any debugger
-        session; ``owning_debug_session`` is a soft label so a caller
-        can pair a workspace with the debug session that produced its
-        evidence, but the two lifecycles do not have to match.
+        A research session is the bounded in-memory container for notes,
+        hypotheses, evidence links, named snapshots and an append-only
+        timeline.  It is independent of any debugger session;
+        ``owning_debug_session`` is a soft label so a caller can pair a
+        workspace with the debug session that produced its evidence, but
+        the two lifecycles do not have to match.  Use
+        ``export_research_session`` before shutdown when the workspace must
+        survive a server restart.
 
         Args:
             name: Human-readable label (required).
@@ -51,11 +53,11 @@ def register(mcp: FastMCP) -> None:
         session_id: str,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Fetch a research session with every note, hypothesis and evidence.
+        """Fetch a research session with notes, hypotheses, evidence and snapshots.
 
-        The response embeds children inline (no separate list calls
-        needed) so a caller can render a full workspace view from one
-        response.
+        The response embeds the current workspace payload inline so a caller
+        can render it without separate child-list calls.  Timeline access has
+        its own filtered ``get_research_timeline`` tool.
         """
         services = get_services(ctx)
         return services.research_registry.get_session_response(session_id=session_id)

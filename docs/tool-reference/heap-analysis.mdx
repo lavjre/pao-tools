@@ -1,0 +1,257 @@
+---
+title: "Heap Analysis"
+description: "Detect allocators and inspect glibc chunks, arenas, bins, corruption evidence, and bounded heap snapshots."
+---
+
+Heap tools provide typed allocator evidence without requiring a client to parse
+ANSI-formatted pwndbg output. They operate on one live, stopped debugger inferior
+and preserve the runtime profile and memory evidence used for each conclusion.
+
+The implemented parser surface is intentionally asymmetric:
+
+- glibc `ptmalloc` has typed chunk, arena, fastbin, tcache, regular-bin,
+  corruption, free-validation, snapshot, and diff support;
+- musl `mallocng`, jemalloc, and Scudo can be detected and represented through
+  the allocator plugin contract, but do not yet have typed internals parsers;
+- an unsupported allocator is returned as a typed `supported=false` or
+  `verdict="unsupported"` result, not disguised as an empty glibc heap.
+
+## Tools
+
+| Tool | Required inputs | Purpose |
+| --- | --- | --- |
+| `detect_allocator` | `session_id` | Detect allocator family/version, target profile, confidence, and safe-linking applicability |
+| `get_allocator_capabilities` | `session_id` | Report detected allocator and runtime command/capability evidence |
+| `inspect_chunk` | `session_id`, `address` | Parse one glibc `malloc_chunk`, flags, boundaries, neighboring chunk, and raw field evidence |
+| `list_arenas` | `session_id` | Walk the bounded `main_arena.next` chain |
+| `inspect_arena` | `session_id` | Decode one `malloc_state`; defaults to `main_arena` |
+| `inspect_fastbins` | `session_id` | Walk all glibc fastbin chains with safe-linking evidence |
+| `inspect_tcache` | `session_id` | Inspect the current thread's 64 tcache bins |
+| `inspect_bins` | `session_id` | Walk unsorted, small, and large regular bins |
+| `validate_chunk` | `session_id`, `address` | Return a conservative structural verdict for one chunk |
+| `classify_heap_corruption` | `session_id` | Aggregate bounded arena/bin findings into one corruption verdict |
+| `validate_free` | `session_id`, `address` | Check whether freeing a pointer appears structurally safe; does not call `free` |
+| `capture_heap_snapshot` | `session_id` | Capture a bounded glibc arena/bin/chunk ledger |
+| `list_heap_snapshots` | `session_id` | List retained snapshot descriptors and history budget |
+| `get_heap_snapshot` | `session_id`, `identifier` | Retrieve a snapshot by ID or name |
+| `diff_heap_snapshots` | `session_id`, `before`, `after` | Compare chunk ledgers and arena summaries |
+| `link_snapshot_to_crash` | `session_id`, `identifier`, `crash_id` | Record an opaque crash ID on a retained heap snapshot |
+
+## Recommended workflow
+
+```text
+set_file + run/attach
+  -> stop the live inferior at the point of interest
+  -> detect_allocator
+  -> get_allocator_capabilities
+  -> list_arenas
+  -> inspect_arena
+  -> inspect_fastbins + inspect_tcache + inspect_bins
+  -> inspect_chunk / validate_chunk / validate_free
+  -> classify_heap_corruption
+  -> capture_heap_snapshot(name="before")
+  -> continue to the next stop
+  -> capture_heap_snapshot(name="after")
+  -> diff_heap_snapshots(before="before", after="after")
+  -> link_snapshot_to_crash when a crash record is relevant
+```
+
+Every live inspection requires the exact current debugger session. Loading a new
+binary, replacing the inferior, exiting, or continuing invalidates the stopped
+state that the heap parser depends on.
+
+## Discovery and capability metadata
+
+Start with:
+
+```json
+{"tool":"detect_allocator","arguments":{"session_id":"chal-a"}}
+```
+
+The parsed result includes:
+
+- allocator `family`, `variant`, and detected version;
+- conservative confidence plus mapping/libc evidence;
+- architecture, pointer width, and byte order;
+- safe-linking state (`enabled`, `disabled`, `unknown`, or not applicable);
+- component status when a mapping or libc probe was unavailable.
+
+`get_allocator_capabilities` also reports pwndbg runtime primitives known to the
+current debugger.
+
+<Warning>
+  The current `get_allocator_capabilities` metadata still reports the typed glibc
+  inspection API as planned/unavailable. That field has not yet been updated after
+  the typed glibc tools shipped. This is a known metadata mismatch: use
+  `detect_allocator`, the registered tool list, and each inspection tool's own
+  `supported`/`verdict` fields for the effective capability. Do not interpret the
+  stale field as proof that the 14 glibc inspection/snapshot tools are absent.
+</Warning>
+
+## Chunks and addresses
+
+`inspect_chunk`, `validate_chunk`, and `validate_free` accept:
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `address` | required | Hex or decimal string such as `"0x5555555592a0"` |
+| `address_kind` | `"user"` | `"user"` for a pointer returned by `malloc`; `"chunk"` for the header address |
+| `include_next` | `true` | `inspect_chunk` only: read the physical next chunk to infer allocation state |
+
+```json
+{
+  "tool": "inspect_chunk",
+  "arguments": {
+    "session_id": "chal-a",
+    "address": "0x5555555592a0",
+    "address_kind": "user",
+    "include_next": true
+  }
+}
+```
+
+The chunk parser decodes `prev_size`, the masked size, `PREV_INUSE`,
+`IS_MMAPPED`, and `NON_MAIN_ARENA`. It also reports chunk/user addresses,
+physical neighbors, mapping containment, alignment, minimum-size checks, and
+the raw bytes behind individual fields.
+
+`validate_chunk` summarizes those checks as `valid`, `suspicious`, `corrupted`,
+`unreadable`, or `unsupported`. `validate_free` additionally checks current
+bin membership and obvious duplicate/double-free signals. It is diagnostic
+only and never mutates allocator state.
+
+## Arenas and bins
+
+`list_arenas` walks at most **256 arenas** and detects cycles. Arena and bin
+layout resolution normally requires glibc debug symbols; missing field offsets
+produce `verdict="unresolvable"` rather than guessed values.
+
+| Tool | Optional inputs | Traversal behavior |
+| --- | --- | --- |
+| `inspect_arena` | `arena_address=null` | Omit the address for `main_arena` |
+| `inspect_fastbins` | `arena_address=null`, `max_chunks_per_bin=128` | Ten fastbins; decodes safe-linked `fd` when applicable |
+| `inspect_tcache` | `max_chunks_per_bin=64` | Current thread only; 64 bins |
+| `inspect_bins` | `arena_address=null`, `max_chunks_per_bin=1024` | Bins 1-127: unsorted, small, and large |
+
+Traversal limits must be positive. They are caller-controlled caps rather than
+pagination offsets, so prefer the defaults unless a specific chain requires
+more evidence. Every chain has cycle detection and reports truncation/read
+errors explicitly.
+
+For safe-linked singly linked lists, responses retain both the encoded pointer
+and the decoded address. An unknown glibc version does not silently apply a
+guessed decoding formula.
+
+Regular large-bin traversal covers the primary `fd`/`bk` list. Secondary
+`fd_nextsize`/`bk_nextsize` ordering is intentionally deferred and is not
+evidence produced by the current tool.
+
+## Corruption analysis
+
+`classify_heap_corruption` combines fastbin, tcache, and regular-bin evidence.
+Finding categories include:
+
+- chain cycles and unreadable nodes;
+- duplicate entries across bins;
+- invalid alignment or pointers outside known mappings;
+- regular-bin `fd`/`bk` inconsistency;
+- duplicate tcache membership and other strong double-free indicators.
+
+The arena-level verdict is conservative: `valid`, `suspicious`, `corrupted`,
+`unsupported`, or `unresolvable`. A read failure remains an uncertainty; it is
+not promoted to confirmed corruption.
+
+## Heap snapshots and diffs
+
+```json
+{"tool":"capture_heap_snapshot","arguments":{"session_id":"chal-a","name":"before-free"}}
+```
+
+`capture_heap_snapshot` accepts an optional `name` and
+`max_chunks_per_bin=512`. A glibc snapshot records allocator identity, inferior
+PID/epoch, arena summaries, tcache summary, and a normalized chunk ledger.
+Non-glibc allocators produce a stored typed `unsupported` snapshot with an
+empty ledger so the history remains explicit.
+
+Snapshot history is in memory and scoped to the debugger session:
+
+- at most **16 snapshots**;
+- at most **64 MiB** of serialized snapshot payloads in aggregate;
+- oldest entries are evicted first when capacity is needed;
+- a single snapshot larger than the byte budget is rejected;
+- `identifier` may be a snapshot ID or retained name.
+
+```json
+{
+  "tool": "diff_heap_snapshots",
+  "arguments": {
+    "session_id": "chal-a",
+    "before": "before-free",
+    "after": "after-free"
+  }
+}
+```
+
+The diff reports new, removed, and changed chunk-ledger entries plus arena
+deltas. Diffing the same resolved snapshot is rejected. If either side is an
+unsupported allocator snapshot, the result remains typed but has
+`supported=false`.
+
+`link_snapshot_to_crash` stores a non-empty crash ID as an opaque reference. It
+does not verify that the crash still exists in the crash-history cache.
+
+## Response contract
+
+Every tool uses the public `api_version: "1.0"` envelope. The inner `data`
+payload is also versioned:
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "validate_chunk",
+  "session_id": "chal-a",
+  "data": {
+    "success": true,
+    "command": "validate_chunk",
+    "state": "stopped",
+    "parser_version": "1",
+    "parsed": {
+      "schema": "pao.glibc-heap-chunk-validation.v1",
+      "supported": true,
+      "verdict": "valid",
+      "failed_checks": []
+    },
+    "raw_responses": []
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 4,
+    "operation_id": "..."
+  }
+}
+```
+
+Outer `success=true` means the tool call completed. Allocator support and
+analysis confidence live in `data.parsed.supported`, `verdict`, component
+status, findings, and warnings. A successful `unsupported` result is therefore
+not a contradiction.
+
+Large typed payloads use the shared artifact delivery policy instead of silent
+truncation.
+
+## Implemented boundaries
+
+- Heap internals are typed for glibc `ptmalloc`; musl, jemalloc, and Scudo are
+  detection/plugin-contract support only.
+- There is no malloc/free/realloc event tracker or allocation timeline.
+- Snapshots are point-in-time state, not a replacement for allocation events.
+- Tcache inspection reflects the debugger's current thread.
+- Large-bin secondary `fd_nextsize`/`bk_nextsize` links are not traversed.
+- Snapshot history is process memory, not persistent storage. Copy important
+  typed payloads into a research named snapshot and export that research
+  session before restart; a `heap_snapshot` evidence link by itself stores only
+  the opaque snapshot ID.
+- These tools inspect and validate; they do not call allocator functions or
+  repair heap metadata.

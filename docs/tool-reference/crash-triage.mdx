@@ -217,8 +217,32 @@ signal, not proof of identical root cause or exploitability.
     },
     {
       "field": "program_counter",
-      "left": {"kind": "module_offset", "module": "chal", "offset": 4660},
-      "right": {"kind": "module_offset", "module": "chal", "offset": 4660},
+      "left": {
+        "kind": "module_offset",
+        "module": "chal",
+        "module_identity": {
+          "kind": "file",
+          "path": "/workspace/chal",
+          "name": "chal",
+          "stable": true,
+          "build_id": "5f72...d291",
+          "identity_source": "resolved_path+elf_build_id"
+        },
+        "offset": 4660
+      },
+      "right": {
+        "kind": "module_offset",
+        "module": "chal",
+        "module_identity": {
+          "kind": "file",
+          "path": "/workspace/chal",
+          "name": "chal",
+          "stable": true,
+          "build_id": "5f72...d291",
+          "identity_source": "resolved_path+elf_build_id"
+        },
+        "offset": 4660
+      },
       "status": "match",
       "comparable": true
     }

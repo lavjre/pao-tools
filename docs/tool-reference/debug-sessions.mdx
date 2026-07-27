@@ -127,30 +127,35 @@ Most debugger operations are scoped by `session_id`. Create or pick a session fi
 
 ## Common debugger response fields
 
+Every debugger tool uses the shared [Response API](/concepts/response-shapes).
+The fields below are at the response root:
+
 <ResponseField name="success" type="boolean" required>
   Whether the tool call succeeded.
+</ResponseField>
+
+<ResponseField name="tool" type="string" required>
+  MCP tool that produced the response.
 </ResponseField>
 
 <ResponseField name="session_id" type="string">
   Session that the tool actually operated on.
 </ResponseField>
 
-<ResponseField name="state" type="string">
-  Current debugger or inferior state after the operation, when provided by the backend.
+<ResponseField name="data" type="object">
+  Complete tool-specific payload. Debugger backend fields such as `state`,
+  `binary_path`, and `runtime_dir` appear inside this value when applicable.
 </ResponseField>
 
-<ResponseField name="binary_path" type="string">
-  Resolved binary path after `set_file` or other file-sensitive operations.
+<ResponseField name="error" type="object">
+  Structured `code`, `message`, optional exception `type`, and optional
+  `details` when the call fails; otherwise `null`.
 </ResponseField>
 
-<ResponseField name="runtime_dir" type="string">
-  Session-specific runtime directory returned by `get_session_info`.
+<ResponseField name="warnings" type="array">
+  Non-fatal warnings that do not make the outer call fail.
 </ResponseField>
 
-<ResponseField name="error" type="string">
-  Short actionable error message when the call fails.
-</ResponseField>
-
-<ResponseField name="type" type="string">
-  Exception type returned by the shared error wrapper on failures.
+<ResponseField name="meta" type="object" required>
+  Duration, operation id, and idempotency replay metadata.
 </ResponseField>

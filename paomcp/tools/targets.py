@@ -39,14 +39,21 @@ def register(mcp: FastMCP) -> None:
 
         ``kind`` is one of: ``local_process``, ``attach_pid``,
         ``gdbserver``, ``tcp_remote``, ``ssh``, ``docker``, ``qemu_user``,
-        ``qemu_system``.  This build ships ``local_process`` and
-        ``attach_pid``; later stages register the rest.
+        ``qemu_system``.  All eight providers are registered; actual
+        availability depends on their runtime executable, daemon, credentials,
+        image, kernel, rootfs, or remote endpoint.
 
         ``config`` is a per-kind dict.  Common keys:
 
         * ``local_process``: ``binary_path`` (required), ``argv``, ``env``,
           ``working_dir``, ``stdin_bytes``.
         * ``attach_pid``: ``pid`` (required, positive int).
+        * ``gdbserver`` / ``tcp_remote``: host and port plus the provider's
+          process or connection settings.
+        * ``ssh``: host, username, authentication and optional remote paths.
+        * ``docker``: container/image and command settings.
+        * ``qemu_user`` / ``qemu_system``: emulator plus binary, rootfs,
+          kernel, machine and GDB-listen settings as applicable.
 
         Optional metadata (informational, never overrides typed
         detection): ``arch``, ``platform``, ``notes``, ``name``.  Every
@@ -120,9 +127,9 @@ def register(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """Bring a target to a runnable state.
 
-        For ``local_process`` this spawns the binary; for
-        ``attach_pid`` it verifies the pid is alive and marks the
-        target ``running`` without touching the inferior.
+        Provider-specific behavior may spawn a process/container/emulator,
+        verify an existing PID or endpoint, or establish an SSH/GDB-remote
+        transport.  Inspect ``get_target_capabilities`` before branching.
         """
         services = get_services(ctx)
         return services.target_registry.start_target_response(target_id=target_id)
@@ -139,6 +146,8 @@ def register(mcp: FastMCP) -> None:
 
         * ``local_process``: SIGTERM, then SIGKILL after ``timeout_sec``.
         * ``attach_pid``:    detach (never kills the caller's inferior).
+        * remote/container/QEMU kinds: stop only provider-owned resources;
+          externally owned endpoints are disconnected rather than killed.
 
         When ``remove`` is true the target is dropped from the registry
         after a successful stop, freeing its session-cap slot.
@@ -158,10 +167,9 @@ def register(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """Bring a remote-kind target's transport up (alias for start).
 
-        For remote providers (gdbserver, tcp_remote) this probes / spawns
-        the connection endpoint without touching the debugger.  Prefer
-        this over ``start_target`` for remote workflows so the verb
-        matches the intent.
+        For remote providers this probes, spawns, or opens the provider
+        transport without attaching GDB.  Prefer this over ``start_target``
+        for remote workflows so the verb matches the intent.
         """
         services = get_services(ctx)
         return services.target_registry.connect_target_response(target_id=target_id)
@@ -216,9 +224,9 @@ def register(mcp: FastMCP) -> None:
         ``direction`` is ``"download"`` (remote ``source`` -> local
         ``destination``) or ``"upload"`` (local ``source`` -> remote
         ``destination``).  Only providers whose ``capabilities.file_sync``
-        is true accept this operation; today that means the ``ssh``
-        provider.  Fails with a typed error otherwise rather than
-        silently no-op-ing.
+        is true accept this operation; SSH uses SFTP and Docker uses
+        ``docker cp``.  Other providers fail with a typed error rather
+        than silently no-op-ing.
         """
         services = get_services(ctx)
         return services.target_registry.sync_target_files_response(

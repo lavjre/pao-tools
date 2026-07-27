@@ -7,16 +7,17 @@ description: "How pao-tools resolves file paths, working directories, and runtim
 
 ## The core rule
 
-Pass file paths that resolve inside `/workspace`.
+For tools that use the workspace resolver, pass file paths that resolve inside
+`/workspace`.
 
 <Tabs>
-  <Tab title="Good paths">
+  <Tab title="Accepted by workspace tools">
     - `/workspace/chal`
     - `/workspace/build/vuln`
     - `chal`
     - `build/vuln`
   </Tab>
-  <Tab title="Bad paths">
+  <Tab title="Rejected by workspace tools">
     - `/tmp/chal`
     - `/home/you/chal`
     - `/Users/name/project/chal`
@@ -26,7 +27,8 @@ Pass file paths that resolve inside `/workspace`.
 
 ## Relative path behavior
 
-When a tool accepts a path or `cwd`, relative values are resolved under `/workspace`.
+When a workspace-managed tool accepts a path or `cwd`, relative values are
+resolved under `/workspace`.
 
 ```json
 {"tool":"set_file","arguments":{"binary_path":"chal","session_id":"chal-a"}}
@@ -46,8 +48,28 @@ $PWD/workspace:/workspace
 then a host file like `./workspace/chal` becomes `/workspace/chal` in tool calls.
 
 <Warning>
-  Tools cannot see arbitrary host filesystem paths. If a file is not inside the mounted workspace, it is not available to the server.
+  A container cannot see arbitrary host filesystem paths. A server-local path
+  is usable only when that location exists inside the container, for example
+  through an explicit mount.
 </Warning>
+
+## Server-local path exceptions
+
+Some S7-S9 APIs intentionally accept server-local paths and currently use
+normal absolute-path resolution rather than workspace containment:
+
+- ROP/libc inputs such as `binary_path`, `libc_path`, and local candidate libc
+  files;
+- target-provider binaries, emulator assets, SSH keys, Docker/QEMU paths, and
+  file synchronization endpoints;
+- research bundle export/import/verify destinations and optional artifact
+  extraction directories.
+
+Prefer explicit `/workspace/...` paths for these APIs as well, but do not assume
+the shared resolver enforces that boundary. See [ROP and libc](/tool-reference/rop-libc),
+[Target Providers](/tool-reference/target-providers), and
+[Research Workspace](/tool-reference/research-workspace) for each tool's exact
+behavior.
 
 ## Runtime artifacts vs workspace files
 
@@ -64,6 +86,8 @@ By default, `PAO_RUNTIME_ROOT` falls back to a temp directory similar to `/tmp/p
 - `set_file`, `paocli`, and `execute_python_script` resolve binary or script paths under `/workspace`
 - `run_command`, `spawn_process`, and `execute_python_code` resolve `cwd` under `/workspace`
 - `fetch_repo` defaults to cloning into `/workspace/<repo-name>` when `target_dir` is omitted
+- S7-S9 server-local exceptions are listed above and are not equivalent to the
+  workspace-contained tools
 
 <Tip>
   If a tool says a path was not found, first confirm the host file is inside `./workspace`, then retry with the in-container form like `/workspace/<name>`.

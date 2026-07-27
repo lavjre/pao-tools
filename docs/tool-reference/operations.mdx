@@ -20,6 +20,10 @@ For a debugger operation, pass the same `session_id` used to start it. Omitting
 `session_id` lists only unscoped operations and cannot read or cancel work owned by
 another debug session.
 
+`list_operations.state` accepts `running`, `succeeded`, `failed`, or
+`cancelled`. `limit` defaults to `100`, must be positive, and cannot exceed the
+configured operation-history limit (1,000 by default).
+
 ```json
 {
   "tool": "list_operations",

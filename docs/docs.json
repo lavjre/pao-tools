@@ -79,6 +79,8 @@
 							"tool-reference/debugger-memory",
 							"tool-reference/debugger-completion",
 							"tool-reference/crash-triage",
+							"tool-reference/heap-analysis",
+							"tool-reference/rop-libc",
 							"tool-reference/debug-sessions",
 							"tool-reference/inspection",
 							"tool-reference/attach-api"
@@ -87,6 +89,8 @@
 					{
 						"group": "Automation and Exploit I/O",
 						"pages": [
+							"tool-reference/target-providers",
+							"tool-reference/research-workspace",
 							"tool-reference/paocli",
 							"tool-reference/processes",
 							"tool-reference/operations",

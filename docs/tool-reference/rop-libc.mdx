@@ -1,0 +1,337 @@
+---
+title: "ROP and Libc"
+description: "Index typed gadgets, score libc candidates, build constrained chains and SROP frames, validate them statically, and export payloads."
+---
+
+ROP/libc tools turn static gadget and symbol evidence into versioned,
+machine-readable exploit hypotheses. Gadget discovery is powered by the bundled
+Python `ropper` package. Libc identification operates on caller-supplied local
+candidate files; it does not query an online libc database.
+
+These tools are static and do not require a debugger session. They do not send a
+payload, continue a target, or claim that a statically valid chain will execute
+successfully in a specific process.
+
+## Tools
+
+| Tool | Required inputs | Purpose |
+| --- | --- | --- |
+| `find_gadgets` | `binary_path` | Index, normalize, filter, deduplicate, and analyze gadgets |
+| `find_gadget_sequence` | `binary_path`, `steps` | Select one matching gadget for each ordered regex step |
+| `inspect_gadget` | `binary_path`, `address` | Verify and inspect one gadget at an absolute/rebased address |
+| `identify_libc` | `leaks`, `candidate_libcs` | Score leaked symbols against local libc candidates |
+| `find_one_gadgets` | `libc_path` | Run the optional external `one_gadget` executable |
+| `build_rop_chain` | `binary_path`, `kind` | Build x86-64 `ret2libc` or `ret2syscall` entries and bytes |
+| `inspect_sigreturn_frame` | none | Build an x86-64 or i386 pwntools SROP frame |
+| `explain_chain_constraints` | `chain` | Explain slot side effects and risky register overwrites |
+| `validate_rop_chain` | `chain` | Produce a static pass/fail/unknown verdict |
+| `export_chain` | `chain` | Serialize entries as raw hex, Python, or pwntools source |
+
+## Recommended workflow
+
+```text
+find_gadgets
+  -> find_gadget_sequence / inspect_gadget
+  -> identify_libc when runtime leaks are available
+  -> find_one_gadgets when the optional executable is installed
+  -> build_rop_chain
+  -> explain_chain_constraints
+  -> validate_rop_chain with live executable mappings when available
+  -> export_chain
+```
+
+For an SROP hypothesis, use `inspect_sigreturn_frame` to build the frame, then
+place its bytes in a larger chain assembled and validated by the caller.
+
+## Gadget indexing
+
+```json
+{
+  "tool": "find_gadgets",
+  "arguments": {
+    "binary_path": "/workspace/chal",
+    "filter_pattern": "pop rdi.*ret",
+    "arch": "x86_64",
+    "image_base": 4194304,
+    "bad_bytes": ["0x00", 10],
+    "max_results": 500,
+    "max_instructions": 8,
+    "include_analysis": true
+  }
+}
+```
+
+| Argument | Default | Behavior |
+| --- | --- | --- |
+| `binary_path` | required | Readable local binary path; use an absolute `/workspace/...` path in Docker |
+| `filter_pattern` | `null` | Case-insensitive regex over normalized instruction text |
+| `arch` | `null` | Optional architecture override; otherwise ropper detects it |
+| `image_base` | `null` | Rebase reported gadgets to this module base |
+| `bad_bytes` | `null` | Byte integers `0`-`255` or strings such as `"0x0a"` |
+| `max_results` | `500` | Returned gadget cap; valid range `1`-`20000` |
+| `max_instructions` | `8` | Ignore gadgets longer than this positive instruction count |
+| `include_analysis` | `true` | Include per-instruction side-effect records |
+
+Every gadget includes its normalized instructions, bytes, address, pointer
+width, stack delta, registers read/written/clobbered, and analysis notes.
+Sightings with identical bytes/instructions are deduplicated. The response
+separately reports `total_scanned`, `matched`, `returned`, and `truncated`, so
+`max_results` is never presented as a complete index.
+
+Bad-byte filtering applies to the absolute gadget address encoded
+little-endian at the selected architecture's pointer width.
+
+### Ordered sequence selection
+
+```json
+{
+  "tool": "find_gadget_sequence",
+  "arguments": {
+    "binary_path": "/workspace/chal",
+    "steps": ["pop rdi ; ret", "pop rsi ; ret", "call rax"],
+    "prefer_shortest": true
+  }
+}
+```
+
+`steps` must contain between 1 and **32** regex patterns. Each step is matched
+independently; this tool does not prove that the chosen gadgets compose
+semantically. The result is `verdict="complete"` only when every step matched,
+otherwise `partial`.
+
+`inspect_gadget` looks up one address using the same binary, architecture, and
+image-base interpretation and returns `found` or `not_found`.
+
+## Libc identification
+
+```json
+{
+  "tool": "identify_libc",
+  "arguments": {
+    "leaks": {
+      "puts": 140737351850400,
+      "read": 140737351735632
+    },
+    "candidate_libcs": [
+      "/workspace/libcs/libc-2.35.so",
+      "/workspace/libcs/libc-2.39.so"
+    ]
+  }
+}
+```
+
+`leaks` is a non-empty `{symbol_name: absolute_address}` mapping.
+`candidate_libcs` is a non-empty list of readable local ELF files. For each
+candidate, the tool subtracts the candidate symbol offsets from the leaks and
+checks whether the inferred bases agree:
+
+- `consistent`: at least two matched leaks infer one base;
+- `insufficient`: only one symbol matched;
+- `inconsistent`: matched symbols infer different bases;
+- `unreadable`: the candidate could not be parsed.
+
+The aggregate verdict is:
+
+| Verdict | Meaning |
+| --- | --- |
+| `confirmed` | One candidate wins with at least three matched leaks |
+| `likely` | One candidate wins with two matched leaks |
+| `ambiguous` | Multiple candidates remain consistent |
+| `insufficient` | More leak evidence is required |
+| `rejected` | No candidate is consistent |
+
+No network lookup or automatic corpus download occurs. Use
+`fetch_runtime_libraries` or supply your own local libc corpus.
+
+## Optional one-gadget lookup
+
+`find_one_gadgets` shells out to the Ruby `one_gadget` executable with a
+positive `timeout_sec` (default **30 seconds**). Results preserve offsets, calls,
+and textual constraints.
+
+<Warning>
+  `one_gadget` is optional and is not installed by the standard pao-tools Docker
+  image. A missing executable returns the typed
+  `verdict="unsupported"` plus an install hint; it is not a server failure.
+</Warning>
+
+Other outcomes are `parsed`, `empty`, or `failed`. The tool does not evaluate
+the returned constraints against a live process automatically.
+
+## Chain construction
+
+```json
+{
+  "tool": "build_rop_chain",
+  "arguments": {
+    "binary_path": "/workspace/chal",
+    "kind": "ret2libc",
+    "arch": "x86_64",
+    "target_address": 140737351726864,
+    "target_symbol": "system",
+    "args": [140737353874576],
+    "align_stack": true,
+    "bad_bytes": ["0x0a"]
+  }
+}
+```
+
+The current builder supports only `arch="x86_64"`:
+
+- `kind="ret2libc"` loads positional SysV integer/pointer arguments and calls
+  the required `target_address`;
+- `kind="ret2syscall"` loads `rax` from `syscall_number`, loads Linux syscall
+  argument registers, and selects a `syscall ; ret` gadget.
+
+`ret2libc` inserts a bare `ret` before the target when `align_stack=true` to
+model 16-byte SysV stack alignment. The response contains typed entries,
+packed little-endian `raw_bytes`, assumptions, and any missing gadgets.
+Unsupported architectures return `verdict="unsupported_arch"`; missing
+required gadgets return `verdict="missing_gadgets"`.
+
+The builder does not currently synthesize ret2csu, ret2dlresolve, stack pivots,
+JOP/COP, or multi-stage leak plans.
+
+## SROP frames
+
+```json
+{
+  "tool": "inspect_sigreturn_frame",
+  "arguments": {
+    "arch": "x86_64",
+    "registers": {
+      "rax": 59,
+      "rdi": 140737353874576,
+      "rip": 140737351896873,
+      "rsp": 140737488346112
+    }
+  }
+}
+```
+
+`inspect_sigreturn_frame` supports **x86-64 and i386**. It delegates byte layout
+to pwntools and returns the frame bytes as hex, frame size, register offsets,
+and the architecture's `rt_sigreturn` syscall number. Other architectures
+return `unsupported_arch`.
+
+This tool builds only the signal frame. It does not find the preceding
+sigreturn trigger or append the frame to a complete payload.
+
+## Constraints and static validation
+
+`explain_chain_constraints` accepts the `entries` list returned by
+`build_rop_chain`. It summarizes slot reads/writes/clobbers and reports
+registers overwritten after an earlier slot loaded them. This is advisory
+evidence, not execution.
+
+`validate_rop_chain` performs three static checks:
+
+1. gadget/target addresses are inside caller-supplied executable mappings;
+2. packed pointer/immediate slots avoid the requested bad bytes;
+3. register-clobber analysis has no risky overwrite, or reports a warning.
+
+```json
+{
+  "tool": "validate_rop_chain",
+  "arguments": {
+    "chain": [
+      {"kind":"gadget","address":4198707,"purpose":"load rdi"},
+      {"kind":"immediate","value":140737353874576,"purpose":"arg0"},
+      {"kind":"target","address":140737351726864,"purpose":"call system"}
+    ],
+    "executable_mappings": [
+      {"start":"0x400000","end":"0x405000","permissions":"r-xp","file":"/workspace/chal"},
+      {"start":"0x7ffff7c00000","end":"0x7ffff7e00000","permissions":"r-xp","file":"/workspace/libc.so.6"}
+    ],
+    "bad_bytes": ["0x0a"],
+    "arch": "x86_64"
+  }
+}
+```
+
+The overall verdict is `fail` if a required check fails, `unknown` if the
+executable-mapping check could not run, and otherwise `pass`. Register clobbers
+are warning-level because a chain may deliberately reload a register.
+
+<Info>
+  Validation is static. It does not emulate instructions, inspect a live
+  debugger inferior, prove one-gadget constraints, or replay the chain.
+  Omitting `executable_mappings` intentionally produces `unknown`, not `pass`.
+</Info>
+
+## Export
+
+`export_chain` accepts the typed chain entries and one of:
+
+| Format | Output |
+| --- | --- |
+| `raw` | Hex-encoded packed little-endian bytes |
+| `python` | Self-contained Python using `struct.pack` |
+| `pwntools` | Pwntools snippet with the appropriate context and pack helper |
+
+`format` defaults to `"raw"`, `arch` defaults to `"x86_64"`, and generated
+source uses `variable_name="chain"` unless overridden. Entry purposes are
+included as comments in generated source.
+
+## Response contract
+
+Every tool uses the public `api_version: "1.0"` envelope. Static backends
+identify their state as `STATIC`, use `parser_version: "1"`, and put the
+tool-specific contract under `data.parsed.schema`.
+
+```json
+{
+  "api_version": "1.0",
+  "success": true,
+  "tool": "find_gadgets",
+  "session_id": null,
+  "data": {
+    "success": true,
+    "command": "find_gadgets",
+    "state": "STATIC",
+    "parser_version": "1",
+    "parsed": {
+      "schema": "pao.gadget-list.v1",
+      "binary_path": "/workspace/chal",
+      "total_scanned": 912,
+      "matched": 8,
+      "returned": 8,
+      "truncated": false,
+      "gadgets": [
+        {
+          "address": 4198707,
+          "instruction_text": "pop rdi ; ret",
+          "stack_delta": 16,
+          "writes": ["rdi"]
+        }
+      ]
+    },
+    "raw_responses": []
+  },
+  "error": null,
+  "warnings": [],
+  "meta": {
+    "duration_ms": 31,
+    "operation_id": "..."
+  }
+}
+```
+
+Outer `success=true` means the static operation completed. Confidence and
+support are expressed by `data.parsed.verdict`, per-candidate/per-check
+evidence, `truncated`, and warnings. Large results use the shared artifact
+delivery policy instead of silent truncation.
+
+## Implemented boundaries
+
+- Gadget indexing and side-effect analysis cover more architectures than the
+  chain builder, subject to ropper support for the input file.
+- Chain construction is x86-64 `ret2libc` and `ret2syscall` only.
+- SROP frame construction supports x86-64 and i386 only.
+- Libc identification needs caller-supplied leak names, addresses, and local
+  candidate files.
+- `one_gadget` is an optional external dependency and its constraints remain
+  textual evidence.
+- Chain validation is static; no debugger replay, emulation, or symbolic
+  execution is performed.
+- No tool in this family transmits or executes the generated payload.

@@ -99,11 +99,19 @@ Use active probing only when exact helper versions are needed:
 component (package metadata, debugger, Ghidra, or paocli) is unavailable; the report
 still describes usable partial capabilities and provides actionable `warnings`.
 
-Provider entries distinguish an installed runtime primitive from a typed provider
-API. For example, `remote_tcp.available=true` with `typed_api=false` means paocli can
-perform the primitive, but the target-provider abstraction has not been implemented.
-Allocator entries make the same distinction so agents do not mistake raw pwndbg
-commands for the later typed heap workflow.
+Provider and allocator entries distinguish an installed runtime primitive from a
+typed API. However, the current platform manifest still uses its original static
+S1 capability matrix and can under-report typed S6 heap and S8 provider support.
+Use MCP tool discovery plus `get_target_capabilities` for a created target as the
+source of truth for those registered tool families.
+
+<Warning>
+  `typed_api=false` in this aggregate manifest does not currently prove that the
+  corresponding S6/S8 tools are absent. The 16 heap tools and eight target provider
+  kinds are registered, but this legacy readiness matrix has not yet been wired to
+  router registration. Runtime dependencies can still make an individual provider
+  or allocator operation unavailable.
+</Warning>
 
 Every provider and allocator has a stable `status`:
 
@@ -112,9 +120,9 @@ Every provider and allocator has a stable `status`:
 - `ready`: the required runtime and typed API are both available.
 
 Allocator `primitive_status` separately reports whether the expected pwndbg command
-set is unavailable, partial, or complete. For example, all ptmalloc commands may be
-present while the allocator remains `status=partial` until its typed heap API exists.
-`existing_pid` is only ready when the debugger compatibility gate is ready.
+set is unavailable, partial, or complete. Treat its current typed-readiness fields
+as legacy metadata and inspect the dedicated heap tools directly. `existing_pid`
+is only ready when the debugger compatibility gate is ready.
 
 ## Probe safety and evidence
 

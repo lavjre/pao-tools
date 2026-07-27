@@ -1,0 +1,291 @@
+---
+title: "Research Workspace"
+description: "Record notes, evidence, hypotheses, snapshots, timelines, portable bundles, and final reports for one investigation."
+---
+
+The research-workspace API organizes evidence from debugger, crash, heap, ROP,
+and artifact tools into a separate investigation record. A research
+`session_id` is not a debugger session id. `owning_debug_session` is only a
+soft provenance label; closing either session does not automatically close or
+persist the other.
+
+All tools return the shared [Response API](/concepts/response-shapes). Typed
+workspace payloads live under `data.parsed` and use versioned `pao.research-*`
+schemas.
+
+## Tools
+
+| Tool | Required arguments | Purpose |
+| --- | --- | --- |
+| `create_research_session` | `name`; optional `description`, `owning_debug_session`, `metadata` | Create an in-memory investigation |
+| `get_research_session` | `session_id` | Return metadata, notes, hypotheses, evidence, and snapshot summaries |
+| `list_research_sessions` | none | List session summaries and the registry cap |
+| `add_research_note` | `session_id`, `body`; optional tags/hypothesis | Add a Markdown note |
+| `link_evidence` | `session_id`, `kind`, `ref`; optional `description`, `hypothesis_id`, `note_id`, `metadata` | Record a typed reference without duplicating its payload |
+| `add_hypothesis` | `session_id`, `statement`; optional state/rationale | Create an explicit claim under investigation |
+| `update_hypothesis_state` | `session_id`, `hypothesis_id`, `state` | Change a hypothesis and optionally record rationale |
+| `create_named_snapshot` | `session_id`, `name`; optional slots/description | Store caller-assembled checkpoint values |
+| `list_snapshots` | `session_id` | List snapshot summaries without slot payloads |
+| `compare_snapshots` | `session_id`, `before`, `after` | Structurally compare two snapshot ids |
+| `append_timeline_event` | `session_id`, `kind`, `summary`; optional `ref`, linked ids, `metadata` | Add an explicit timeline event |
+| `get_research_timeline` | `session_id`; optional kinds/limit | Return all or the newest filtered events |
+| `export_research_session` | `session_id`, `destination` | Write a portable ZIP bundle |
+| `import_research_session` | `source_path`; optional `artifact_destination_dir` | Verify and import into a new research session |
+| `verify_research_bundle` | `source_path` | Validate a bundle without importing it |
+| `generate_final_report` | `session_id`; optional formats | Render JSON, Markdown, and/or HTML report values |
+
+## Recommended workflow
+
+```text
+create_research_session
+  -> add_hypothesis
+  -> add_research_note
+  -> link_evidence
+  -> create_named_snapshot
+  -> append_timeline_event
+  -> update_hypothesis_state
+  -> generate_final_report
+  -> export_research_session
+  -> verify_research_bundle
+```
+
+```json
+{
+  "tool": "create_research_session",
+  "arguments": {
+    "name": "heap-overflow-chal",
+    "description": "Track crash families and heap state",
+    "owning_debug_session": "chal-a",
+    "metadata": {
+      "binary_path": "/workspace/chal",
+      "build_id": "5f72...d291"
+    }
+  }
+}
+```
+
+The new id is at `data.parsed.session.session_id`.
+
+## Notes, evidence, and hypotheses
+
+`add_research_note` accepts a non-empty Markdown `body`, free-form string
+`tags`, and an optional existing `hypothesis_id`.
+
+Evidence is a typed pointer. `kind` accepts:
+
+- `artifact`
+- `crash`
+- `heap_snapshot`
+- `tool_result`
+- `note`
+- `external`
+
+`ref` is the opaque artifact id, crash id, heap snapshot id, operation/result
+reference, note id, URL, or path appropriate to that kind. The registry checks
+the optional `note_id` and `hypothesis_id` link fields, but it does not resolve
+the opaque `ref` or copy the referenced store at link time.
+
+```json
+{
+  "tool": "link_evidence",
+  "arguments": {
+    "session_id": "a1b2c3d4e5f6",
+    "kind": "crash",
+    "ref": "chal-a:7b4e2f8c...:1:3",
+    "description": "First reproducible SIGSEGV",
+    "hypothesis_id": "0123456789ab"
+  }
+}
+```
+
+Hypothesis state is always one of `proposed`, `supported`, `rejected`, or
+`unknown`. State transitions are not restricted to a fixed graph; the explicit
+state and optional rationale are the audit record.
+
+Notes, evidence links, snapshots, and hypothesis changes append timeline events
+automatically. Use `append_timeline_event` for other significant actions.
+
+## Named snapshots
+
+Research snapshots do not call the debugger. The caller collects tool results,
+selects the evidence to preserve, and supplies any subset of these slots:
+
+| Slot | Typical caller-supplied value |
+| --- | --- |
+| `registers` | Register-name to value mapping |
+| `memory` | Address/byte-range records |
+| `mappings` | Typed virtual-memory mapping records |
+| `heap_snapshot` | A heap snapshot id or selected heap evidence |
+| `backtrace` | Typed frame records |
+| `notes` | Free-form Markdown associated with the checkpoint |
+| `metadata` | Target identity, ASLR bases, tool versions, or other JSON data |
+
+Unknown slot names are rejected. Slot payloads are opaque JSON values: the
+research layer does not validate that a register record or heap reference came
+from a live tool.
+
+```json
+{
+  "tool": "create_named_snapshot",
+  "arguments": {
+    "session_id": "a1b2c3d4e5f6",
+    "name": "before-free",
+    "slots": {
+      "registers": {"rip": "0x401234", "rsp": "0x7fffffffdde0"},
+      "heap_snapshot": {"snapshot_id": "heap-000001"},
+      "metadata": {"crash_id": null}
+    }
+  }
+}
+```
+
+`list_snapshots` returns summaries and slot names, not complete slot payloads.
+`get_research_session` likewise embeds snapshot summaries. Full slot values are
+preserved by export and used by `compare_snapshots`.
+
+Snapshot comparison accepts two distinct snapshot ids. For mappings/objects it
+reports added, removed, and changed keys. For lists it reports lengths and
+`repr`-based membership differences rather than an ordered LCS. Other values
+receive a scalar before/after comparison.
+
+## Timeline
+
+Explicit timeline `kind` accepts:
+
+- `tool_call`
+- `debug_stop`
+- `crash`
+- `note`
+- `snapshot`
+- `hypothesis_change`
+- `reproduction`
+- `artifact`
+- `other`
+
+`get_research_timeline.kinds` filters this vocabulary. A positive `limit`
+returns the most recent matching events. When the 2,000-event cap is exceeded,
+the oldest event is removed and the new event includes
+`metadata.dropped_oldest_for_cap=true`.
+
+## Export, verification, and import
+
+The live registry is in process memory. Restarting the server loses research
+sessions, so export is the durability boundary.
+
+```json
+{
+  "tool": "export_research_session",
+  "arguments": {
+    "session_id": "a1b2c3d4e5f6",
+    "destination": "/workspace/reports/heap-overflow.pao.zip"
+  }
+}
+```
+
+The ZIP layout is:
+
+```text
+manifest.json
+integrity.json
+artifacts/<sha256>
+```
+
+`manifest.json` contains the complete session, including full snapshot slots
+and timeline. `integrity.json` maps bundled artifact entries to SHA-256.
+Artifact payloads are content-addressed and deduplicated by digest.
+
+Only evidence with `kind="artifact"` is resolved into bundle bytes. Crash,
+heap-snapshot, tool-result, note, and external references remain opaque strings
+in the manifest. Missing or digest-mismatched artifact references produce
+export warnings and are not copied.
+
+Export is capped at 512 MiB of pre-compression manifest/integrity/artifact data
+and 4,096 ZIP entries. The bundle uses ZIP64 and deflate after those checks.
+
+`verify_research_bundle` checks ZIP readability, required manifest/integrity
+files, allowed layout, presence of every integrity entry, SHA-256 matches, and
+unindexed artifact entries. It returns `verdict="valid"` or `"invalid"` plus
+problems.
+
+`import_research_session` verifies first, creates a fresh session id, and remaps
+note, hypothesis, evidence, snapshot, timeline, and session references.
+`metadata.imported_from` records the original id.
+
+If `artifact_destination_dir` is supplied, bundled artifact blobs are extracted
+there under their ZIP-entry basenames; bundles produced by this project use
+SHA-256 digests for those names. Extraction does not register them in the
+server's ArtifactStore and does not rewrite opaque evidence refs; re-ingestion
+is a separate caller workflow.
+
+<Warning>
+  Bundles have SHA-256 integrity but no cryptographic signature, authentication,
+  or encryption. A valid hash manifest detects accidental/untargeted byte
+  changes; it does not establish who created the bundle. Core dumps and notes
+  can contain secrets, so encrypt and sign the ZIP externally when needed.
+</Warning>
+
+Export, import, verification, and extraction paths are server-local filesystem
+paths. The current bundle layer does not enforce `/workspace` containment.
+Prefer an explicit directory under `/workspace` and avoid paths containing
+unrelated host data.
+
+## Final reports
+
+`generate_final_report.formats` accepts any subset of `json`, `markdown`, and
+`html`; omission defaults to `["markdown", "json"]`.
+
+The report separates:
+
+- facts from crash/artifact/heap-snapshot/tool-result evidence and snapshot
+  slots;
+- heuristics from notes tagged `heuristic` or evidence with
+  `metadata.inference=true`;
+- hypotheses with their state and rationale; and
+- known unknowns inferred from evidence gaps.
+
+The `html` form is a self-contained page containing escaped Markdown inside a
+`<pre>` block. It is not rendered Markdown. Report strings are returned inside
+`data.parsed.rendered`; the normal response-artifact policy applies when the
+normalized `data` payload exceeds the inline threshold.
+
+## Response schemas
+
+| Tool group | `data.parsed.schema` |
+| --- | --- |
+| Session create/get/list | `pao.research-session.v1`, `pao.research-session-list.v1` |
+| Notes and evidence | `pao.research-note.v1`, `pao.research-evidence.v1` |
+| Hypotheses | `pao.research-hypothesis.v1` |
+| Snapshots | `pao.research-snapshot.v1`, `pao.research-snapshot-list.v1`, `pao.research-snapshot-diff.v1` |
+| Timeline | `pao.research-timeline-event.v1`, `pao.research-timeline.v1` |
+| Bundle export/import/verify | `pao.research-export.v1`, `pao.research-import.v1`, `pao.research-verify.v1` |
+| Final report | `pao.research-report.v1` |
+
+The bundle header itself uses `pao.research-bundle.v1`.
+
+## Capacity and limitations
+
+| Resource | Default cap | Behavior at the cap |
+| --- | ---: | --- |
+| Research sessions | 32 | New session is rejected |
+| Notes per session | 500 | New note is rejected |
+| Evidence links per session | 1,000 | New link is rejected |
+| Hypotheses per session | 100 | New hypothesis is rejected |
+| Named snapshots per session | 64 | New snapshot is rejected |
+| Timeline events per session | 2,000 | Oldest event is removed with explicit metadata |
+| Export bundle bytes | 512 MiB | Export is rejected before ZIP construction |
+| Export bundle entries | 4,096 | Export is rejected before ZIP construction |
+
+- There is no MCP tool to delete a research session, note, evidence link,
+  hypothesis, snapshot, or timeline event.
+- Research mutations and bundle writes currently do not expose
+  `idempotency_key`; do not blindly retry them after an ambiguous transport
+  failure.
+- Registry caps are constructor defaults rather than environment variables.
+- Export copies artifact payloads into memory before creating the ZIP; the
+  512 MiB cap bounds but does not eliminate that memory cost.
+- Verification and import read the complete ZIP into memory. They do not apply
+  the export byte/entry caps or re-enforce the per-session child-record caps,
+  so import only bundles produced by a trusted workflow.
+- Verification and reporting are local operations and do not query live
+  debugger, heap, target, or artifact state beyond the explicit export-time
+  artifact resolution described above.

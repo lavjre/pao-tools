@@ -1,0 +1,242 @@
+---
+title: "Target Providers"
+description: "Create, connect, inspect, synchronize, and attach local, remote, Docker, and QEMU targets through one typed lifecycle."
+---
+
+The target-provider API gives eight target kinds the same managed lifecycle. A
+target is an in-memory descriptor with an opaque `target_id`, an owning debug
+session, provider-specific configuration, and one of these states:
+`created`, `starting`, `running`, `connected`, `attached`, `detached`, `stopped`,
+`dead`, or `error`.
+
+All tools return the shared [Response API](/concepts/response-shapes). Typed
+provider payloads are under `data.parsed` and identify their schema, target,
+state, and provider result.
+
+## Tools
+
+| Tool | Required arguments | Purpose |
+| --- | --- | --- |
+| `create_target` | `kind`; optional `config`, `session_id` | Validate a provider spec and allocate a target id without starting it |
+| `list_targets` | optional `session_id` | List one session's targets, or every target when omitted |
+| `get_target_status` | `target_id` | Refresh and return lifecycle state and metadata |
+| `get_target_capabilities` | `target_id` | Report start, stop, attach, sync, reconnect, and forwarding support |
+| `start_target` | `target_id` | Start a local provider or bring a remote transport up |
+| `stop_target` | `target_id`; optional `timeout_sec`, `remove` | Stop or detach with provider-specific ownership semantics |
+| `connect_target` | `target_id` | Intent-named alias for provider `start` |
+| `disconnect_target` | `target_id`; optional `timeout_sec` | Intent-named alias for provider `stop`, retaining the target id |
+| `reconnect_target` | `target_id`; optional `timeout_sec` | Disconnect and then connect the same target |
+| `sync_target_files` | `target_id`, `source`, `destination`; optional `direction` | Upload or download one file through SSH or Docker |
+| `fetch_runtime_libraries` | `target_id`, `destination_dir`; optional `candidate_paths` | Download candidate libc/loader files from an SSH target |
+| `attach_debugger` | `target_id`; optional `session_id` | Bind the selected GDB controller to a provider that supports direct attach |
+
+`stop_target.timeout_sec`, `disconnect_target.timeout_sec`, and
+`reconnect_target.timeout_sec` default to `10.0`. `stop_target.remove` defaults
+to `false`. A successful `remove=true` frees the target's registry slot.
+`sync_target_files.direction` is `download` by default and accepts only
+`download` or `upload`.
+
+<Info>
+  Provider lifecycle methods currently report operational failure inside
+  `data.parsed.success` and `data.parsed.error`. Check those fields in addition
+  to the public envelope's `success` value.
+</Info>
+
+## Create a target
+
+```json
+{
+  "tool": "create_target",
+  "arguments": {
+    "kind": "local_process",
+    "session_id": "chal-a",
+    "config": {
+      "name": "local-chal",
+      "binary_path": "/workspace/chal",
+      "argv": ["--mode", "test"],
+      "working_dir": "/workspace"
+    }
+  }
+}
+```
+
+The result contains the new id at
+`data.parsed.target.target_id`. Omitting `session_id` binds the target to the
+default debugger session. Names are labels and need not be unique.
+
+Each session may retain at most eight targets. The registry is process memory:
+server restart loses target descriptors, and callers should explicitly stop and
+remove owned processes or transports when finished.
+
+## Provider kinds and configuration
+
+`config` is a JSON object. Common optional metadata keys are `name`, `arch`,
+`platform`, and `notes`. Execution-oriented providers also accept `argv`,
+`env`, and `working_dir` where shown.
+
+| Kind | Required `config` | Important optional `config` | Runtime behavior |
+| --- | --- | --- | --- |
+| `local_process` | `binary_path` | `argv`, `env`, `working_dir`, `stdin_bytes` | Spawns a local process and attaches GDB by PID |
+| `attach_pid` | positive `pid` | common metadata | Verifies and attaches to an existing process that pao-tools does not own |
+| `gdbserver` | `binary_path` or `pid` | `host`, `port`, `argv`, `env`, `working_dir` | Spawns local `gdbserver` and attaches with the GDB remote protocol |
+| `tcp_remote` | `host`, `port` | common metadata | Connects to an already-running gdbserver-compatible endpoint |
+| `ssh` | `host`, `ssh_user`, and either `ssh_key_path` or `ssh_password` | `port` | Opens Paramiko SSH/SFTP for synchronization; no direct GDB attach |
+| `docker` | `docker_image` | `name`, `argv`, `env`, `docker_workdir`, `docker_extra_args` | Runs a detached `--rm` container through the Docker CLI |
+| `qemu_user` | `binary_path`, `qemu_binary` | `qemu_ld_prefix`, `qemu_extra_args`, `argv`, `env`, `working_dir`, `host`, `port` | Starts QEMU user mode with its `-g` GDB stub |
+| `qemu_system` | `qemu_binary` plus `kernel_path` or `disk_path` | `initrd_path`, `kernel_cmdline`, `qemu_memory`, `qemu_machine`, `qemu_extra_args`, `host`, `port` | Boots a paused, headless VM with a GDB TCP stub |
+
+Integer-like `pid` and `port` values are normalized by the provider layer.
+`argv`, `docker_extra_args`, and `qemu_extra_args` accept arrays; a string is
+shell-split during spec construction. `stdin_bytes` on `local_process` is a
+one-shot UTF-8 string or byte value written immediately and then closed.
+
+Paths in provider configuration are server-visible paths. The current provider
+layer converts many local paths with `os.path.abspath` but does not apply the
+workspace-containment resolver used by `set_file`; prefer explicit
+`/workspace/...` paths and do not pass unrelated host paths.
+
+## Recommended local workflow
+
+```text
+create_debug_session(session_id="chal-a")
+  -> create_target(kind="local_process", session_id="chal-a", ...)
+  -> start_target(target_id=...)
+  -> get_target_status(target_id=...)
+  -> attach_debugger(target_id=..., session_id="chal-a")
+  -> debugger and crash tools
+  -> stop_target(target_id=..., remove=true)
+```
+
+`local_process` owns the child. Stop sends a normal termination request and
+falls back to a hard kill after the timeout. `attach_pid` never kills the
+caller's process: its start verifies liveness, and stop changes the target to
+`detached`.
+
+## GDB remote providers
+
+`tcp_remote` is specifically a GDB remote-protocol endpoint, not an arbitrary
+TCP challenge service. Its start/connect phase performs a bounded TCP probe;
+`attach_debugger` then issues GDB/MI `-target-select remote host:port`.
+Disconnecting or stopping it never terminates the remote process.
+
+`gdbserver` owns a local `gdbserver` subprocess. It either starts a binary or
+uses `gdbserver --attach` for a PID, waits for the listen socket, and uses the
+same GDB remote attach path. Stopping it terminates the owned subprocess.
+
+```json
+{
+  "tool": "create_target",
+  "arguments": {
+    "kind": "tcp_remote",
+    "session_id": "remote",
+    "config": {"host": "127.0.0.1", "port": 31337}
+  }
+}
+```
+
+## SSH
+
+SSH provides connection lifecycle, SFTP upload/download, and runtime-library
+collection. It does not attach GDB directly. Start a gdbserver on the remote
+host, arrange any required tunnel yourself, and create a separate
+`tcp_remote` target for debugger attach.
+
+```json
+{
+  "tool": "create_target",
+  "arguments": {
+    "kind": "ssh",
+    "session_id": "remote",
+    "config": {
+      "host": "lab.example",
+      "port": 22,
+      "ssh_user": "research",
+      "ssh_key_path": "/workspace/keys/lab"
+    }
+  }
+}
+```
+
+The built-in Paramiko client disables agent/key discovery and uses the supplied
+key or password. Missing host keys are accepted with
+`paramiko.AutoAddPolicy` (permissive trust on first use), so this is not strict
+host-key verification. Use only a trusted private lab or replace the client
+factory when verified host identities are required.
+
+`fetch_runtime_libraries` is SSH-only. Its default candidates cover common
+x86-64 and i386 glibc paths plus the x86-64 musl loader. The result separates
+`fetched` from `missing` paths.
+
+## Docker
+
+The Docker provider calls the `docker` executable for `run`, `stop`, `kill`,
+and `cp`. The pao-tools image does not automatically provide a usable host
+Docker daemon or socket; the CLI, daemon connection, and any socket mounting
+must be supplied by the operator.
+
+Direct `attach_debugger` is intentionally unsupported. Run gdbserver inside the
+container, publish its port with `docker_extra_args`, and use a `tcp_remote`
+target. File synchronization is supported through `docker cp`.
+
+<Warning>
+  `docker_extra_args` is passed to `docker run` and can materially change host
+  exposure, mounts, devices, and privileges. Treat it as an owner-controlled
+  private-tool input.
+</Warning>
+
+## QEMU
+
+The QEMU providers do not download emulators, root filesystems, kernels,
+initrds, disks, or guest libraries. The caller supplies the executable and all
+target assets.
+
+- `qemu_user` runs the chosen `qemu_binary` with `-g PORT`, an optional
+  `qemu_ld_prefix`, and the target binary.
+- `qemu_system` runs the chosen system emulator with
+  `-gdb tcp:HOST:PORT -S -nographic`; `-S` keeps the guest paused until GDB
+  attaches.
+
+Both wait for the GDB stub and then attach through the shared GDB remote path.
+Real cross-architecture execution depends on compatible Linux/WSL binaries,
+guest assets, and debugger architecture support.
+
+## Response schemas
+
+| Tool group | `data.parsed.schema` |
+| --- | --- |
+| Create/list/status/capabilities | `pao.target-create.v1`, `pao.target-list.v1`, `pao.target-status.v1`, `pao.target-capabilities.v1` |
+| Start/stop | `pao.target-start.v1`, `pao.target-stop.v1` |
+| Connect/disconnect | `pao.target-connect.v1`, `pao.target-disconnect.v1` |
+| File/library transfer | `pao.target-file-sync.v1`, `pao.target-fetch-libs.v1` |
+| Debugger attach | `pao.target-attach.v1` |
+
+`reconnect_target` currently returns the second phase's
+`pao.target-connect.v1` payload after running disconnect and connect in order.
+
+`get_target_capabilities` is authoritative for the selected provider and
+returns stable booleans for `start`, `stop`, `attach_debugger`, `file_sync`,
+`reconnect`, and `port_forward`.
+
+<Warning>
+  The current aggregate `get_platform_capabilities` manifest still
+  under-reports typed readiness for several provider kinds. Use
+  `get_target_capabilities(target_id=...)` for the implemented target-specific
+  surface until the aggregate manifest is reconciled.
+</Warning>
+
+## Current limitations
+
+- SSH and Docker do not attach GDB directly.
+- Port-forwarding capability is descriptive; there is no separate typed
+  port-forward tool.
+- Reconnect is implemented as stop/disconnect followed by start/connect; it
+  does not preserve an attached GDB session.
+- The server shutdown path does not yet walk the target registry and stop every
+  provider-owned process, container, or emulator. Explicitly stop owned targets
+  before shutting the server down.
+- Target tools currently do not expose `idempotency_key`; retrying a
+  start/connect/create request after transport loss can repeat the operation.
+- The registry is not durable and has no list pagination beyond the eight
+  targets-per-session cap.
+- Provider-specific executable availability is checked when the operation
+  runs, not when `create_target` stores the descriptor.

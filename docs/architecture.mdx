@@ -24,13 +24,18 @@ description: "Project structure and runtime design decisions behind pao-tools."
 
 ## Tool families
 
-- debugger control in `paomcp/tools/debug.py`
-- inspection in `paomcp/tools/inspect.py`
-- process helpers in `paomcp/tools/processes.py`
-- managed Python helpers in `paomcp/tools/python_env.py`
-- interactive exploit-driver flows in `paomcp/tools/paocli.py`
-- repo acquisition in `paomcp/tools/repos.py`
-- local Ghidra decompilation in `paomcp/tools/decompiler.py`
+- runtime/platform discovery in `compatibility.py` and `platform.py`
+- ELF/runtime and cached static analysis in `elf_runtime.py` and `static_analysis.py`
+- debugger control, completion, inspection, and memory in `debug.py`,
+  `debugger_memory.py`, and `inspect.py`
+- crash and allocator research in `crash.py` and `heap.py`
+- gadget, libc, SROP, and chain workflows in `rop.py`
+- local/remote/container/emulator lifecycle in `targets.py`
+- notes, hypotheses, snapshots, timeline, bundles, and reports in `research.py`
+- interactive exploit-driver flows in `paocli.py`
+- process, Python, repository, artifact, and operation helpers in
+  `processes.py`, `python_env.py`, `repos.py`, `artifacts.py`, and `operations.py`
+- local Ghidra decompilation in `decompiler.py`
 
 ## Project structure
 
@@ -53,16 +58,35 @@ description: "Project structure and runtime design decisions behind pao-tools."
       <Tree.File name="registry.py" />
     </Tree.Folder>
     <Tree.Folder name="tools" defaultOpen>
+      <Tree.File name="compatibility.py" />
+      <Tree.File name="platform.py" />
+      <Tree.File name="elf_runtime.py" />
+      <Tree.File name="static_analysis.py" />
       <Tree.File name="debug.py" />
+      <Tree.File name="debugger_memory.py" />
       <Tree.File name="inspect.py" />
+      <Tree.File name="crash.py" />
+      <Tree.File name="heap.py" />
+      <Tree.File name="rop.py" />
+      <Tree.File name="targets.py" />
+      <Tree.File name="research.py" />
       <Tree.File name="processes.py" />
       <Tree.File name="python_env.py" />
       <Tree.File name="paocli.py" />
       <Tree.File name="repos.py" />
+      <Tree.File name="artifacts.py" />
+      <Tree.File name="operations.py" />
       <Tree.File name="decompiler.py" />
       <Tree.Folder name="backends">
         <Tree.File name="gdb.py" />
         <Tree.File name="pwndbg.py" />
+        <Tree.File name="crash.py" />
+        <Tree.File name="heap.py" />
+        <Tree.File name="rop.py" />
+        <Tree.File name="targets.py" />
+        <Tree.File name="research.py" />
+        <Tree.File name="research_bundle.py" />
+        <Tree.File name="research_report.py" />
         <Tree.File name="subproc.py" />
         <Tree.File name="python.py" />
         <Tree.File name="git.py" />
@@ -86,6 +110,12 @@ Execution-control tools prefer MI commands because they are structured and more 
 ### Separation of concerns
 
 The router registers tools, while most implementation logic lives in dedicated backend or tool modules.
+
+### Bounded research state
+
+Debug, target, heap-snapshot, and research registries are scoped to the server
+process and enforce explicit caps. Research sessions are in memory; verified ZIP
+export/import is the persistence boundary across restarts.
 
 ### Container-oriented runtime
 

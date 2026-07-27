@@ -17,6 +17,14 @@ analysis workflows.
   disassembly, thread selection, and event-oriented stepping
 - Typed frames/inferiors, register groups, debugger snapshots, and reversible patches
 - Typed fatal-signal records, crash snapshots, cyclic offsets, core artifacts, and reports
+- Typed allocator discovery plus glibc chunks, arenas, bins, corruption checks,
+  free validation, and bounded heap snapshot diffs
+- Static ROP gadget and side-effect analysis, libc candidate scoring, optional
+  one-gadget integration, typed chain construction, validation, and export
+- One target lifecycle contract for local processes, PID attach, gdbserver,
+  GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers
+- Bounded in-memory research workspaces with notes, hypotheses, evidence,
+  snapshots, timelines, export/import bundles, and final reports
 - Deterministic execution control through GDB/MI
 - Register, stack, memory, disassembly, and backtrace inspection
 - Breakpoints, stepping, attach, interrupt, and asynchronous event polling
@@ -32,7 +40,8 @@ analysis workflows.
 
 ## Response API
 
-Every MCP tool returns the same `api_version: "1.0"` envelope. Primary tool
+The current server contract exposes 150 MCP tools. Every tool returns the same
+`api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
 truncation flags. Managed process output has a hard combined stdout+stderr budget;
@@ -173,25 +182,41 @@ are installed in pao-tools.
 ## Roadmap
 
 Stages 1-4 established the response/artifact foundation, compatibility and platform
-discovery, typed ELF/static analysis, and the debugger/memory API.
+discovery, typed ELF/static analysis, and the debugger/memory API. Stages 5-9 now
+have implemented baselines; the status column records their intentionally bounded
+scope and the remaining extension points.
 
 | Stage | Goal | Status |
 | --- | --- | --- |
-| S5 | Typed crash triage: run, snapshot, analyze, classify, compare, cyclic scan, core evidence, and per-crash report artifact | Code and local unit/static validation complete. Release completion still requires the current candidate to pass the live Linux Docker boot, HTTP MCP handshake, and real crash/core smoke gate. |
-| S6 | Typed glibc heap inspection: allocator discovery, arenas, bins/tcache, chunks, safe-linking evidence, and bounded history | Planned |
-| S7 | ROP gadget, libc identification, one-gadget, chain construction, and validation workflows | Planned |
-| S8 | Local, remote, SSH, Docker, and QEMU target providers behind one target contract | Planned |
-| S9 | Research notes, persistent session snapshots, exports, and final multi-artifact reporting | Planned |
+| S5 | Typed crash triage: run, snapshot, analyze, classify, compare, cyclic scan, core evidence, and per-crash report artifact | Implemented. The CI definitions gate image publication on Linux container boot, `/healthz`, an HTTP MCP registration check, and a real crash/core smoke test; consult the workflow run for the current candidate rather than assuming that live gate passed. |
+| S6 | Typed heap analysis: allocator discovery, glibc chunks, arenas, fastbins/tcache/regular bins, safe-linking evidence, corruption/free validation, and bounded snapshot history | Implemented for glibc. musl mallocng, jemalloc, and Scudo are detected through the allocator/plugin contract but do not yet have typed internal parsers. Allocation-event tracking is not included. |
+| S7 | ROP gadget analysis, libc identification, one-gadget lookup, chain construction, static validation, and export | Implemented baseline. Gadget analysis is multi-architecture, but chain construction is currently x86-64 `ret2libc`/`ret2syscall`; SROP frames support x86-64/i386, validation is static, and `one_gadget` remains an optional external executable. |
+| S8 | Local process, PID attach, gdbserver, GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers behind one target contract | Implemented provider matrix. Runtime availability still depends on the corresponding host executables, credentials, images, kernels, and root filesystems. SSH and Docker targets use a separate gdbserver/GDB-remote target for debugger attachment. |
+| S9 | Research notes, hypotheses, evidence, named snapshots, timeline, export/import bundles, and final reporting | Implemented baseline. The live registry is bounded and in-memory, so explicit ZIP export/import is the durability path. Reports support JSON, Markdown, and escaped preformatted HTML; the HTML output is not a rendered Markdown document. |
 
 The S5 `generate_crash_report` tool is an evidence-preserving report for one exact
-crash. It does not replace the broader cross-session research records and final
-reporting planned for S9.
+crash. The S9 `generate_final_report` tool instead summarizes the evidence,
+hypotheses, snapshots, and timeline that a caller linked into a research session.
+
+### Potential builds
+
+- Add dedicated live Linux/container smoke workflows for the S6-S9 tool families.
+- Reconcile the aggregate platform/allocator capability manifests with the
+  registered S6/S8 APIs.
+- Add allocation-event tracking and typed musl, jemalloc, and Scudo internals.
+- Extend ROP chain construction to more architectures and add debugger-backed
+  dynamic chain validation.
+- Complete provider shutdown/session cleanup and package the host integrations
+  required by Docker, SSH, and broader QEMU targets.
+- Add research autosave, direct artifact re-ingestion on import, and optionally
+  signed or encrypted research bundles. Bound imported ZIP size, entry count,
+  and decompressed bytes before loading untrusted bundles into memory.
 
 This roadmap assumes a private, single-user research tool. Authentication, RBAC,
 multi-user tenancy, and public-service audit infrastructure are intentionally out of
 scope. Resource caps, cleanup, artifact integrity, loopback defaults, and debugger
 isolation remain operational safeguards for the owner's machine rather than a
-separate product stage.
+separate product stage. There is intentionally no S10 in this roadmap.
 
 ## License
 
