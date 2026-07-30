@@ -128,6 +128,28 @@ steps:
           "pao-tools:cloudbuild-$BUILD_ID" \
           /app/tests/docker_stage5_smoke.py
 
+  - id: stage6-9-runtime-smoke
+    name: "gcr.io/cloud-builders/docker"
+    entrypoint: "bash"
+    args:
+      - "-ceu"
+      - |
+        STAGE6_9_VOLUME="pao-cloud-stage6-9-runtime-$BUILD_ID"
+        cleanup() {
+          docker volume rm -f "$${STAGE6_9_VOLUME}" >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        docker run --rm \
+          --cap-add=SYS_PTRACE \
+          --cap-add=SYS_ADMIN \
+          --security-opt seccomp=unconfined \
+          --security-opt apparmor=unconfined \
+          -v "$${STAGE6_9_VOLUME}:/var/lib/pao" \
+          --entrypoint /app/.venv/bin/python \
+          "pao-tools:cloudbuild-$BUILD_ID" \
+          /app/tests/docker_stage6_9_smoke.py
+
   - id: tag-verified-image
     name: "gcr.io/cloud-builders/docker"
     args:

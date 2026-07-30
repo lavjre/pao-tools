@@ -199,23 +199,49 @@ heap-snapshot, tool-result, note, and external references remain opaque strings
 in the manifest. Missing or digest-mismatched artifact references produce
 export warnings and are not copied.
 
-Export is capped at 512 MiB of pre-compression manifest/integrity/artifact data
-and 4,096 ZIP entries. The bundle uses ZIP64 and deflate after those checks.
+Export is capped at 512 MiB for both the complete uncompressed payload and the
+resulting compressed archive, with at most 4,096 ZIP entries. `manifest.json`
+has a separate 32 MiB cap and `integrity.json` a 4 MiB cap. Entries normally
+use deflate; an unusually compressible member is stored without compression so
+the generated bundle also satisfies the verifier's 200:1 per-entry expansion
+limit. Archives remain ordinary single-disk ZIP files under these caps; ZIP64
+input is rejected.
 
-`verify_research_bundle` checks ZIP readability, required manifest/integrity
-files, allowed layout, presence of every integrity entry, SHA-256 matches, and
-unindexed artifact entries. It returns `verdict="valid"` or `"invalid"` plus
+`verify_research_bundle` applies its compressed-size quota before reading the
+file into memory. It then inspects the raw end-of-central-directory and central
+directory before Python's ZIP reader materializes the entry list, bounding
+entry count, names, extra fields, and comments. Archive validation rejects
+duplicate or encrypted entries, unsupported compression methods, excessive
+compressed/uncompressed totals, excessive expansion ratios, and any path
+outside this exact layout:
+
+```text
+manifest.json
+integrity.json
+artifacts/<64 lowercase hexadecimal SHA-256>
+```
+
+For each artifact, the basename must equal the digest recorded by
+`integrity.json`; the manifest artifact index, ZIP entry size, integrity entry,
+and observed streamed SHA-256 must agree. Extra or unindexed artifacts are
+invalid. Verification returns `verdict="valid"` or `"invalid"` plus explicit
 problems.
 
 `import_research_session` verifies first, creates a fresh session id, and remaps
 note, hypothesis, evidence, snapshot, timeline, and session references.
-`metadata.imported_from` records the original id.
+`metadata.imported_from` records the original id. Before creating that session,
+verification also checks child collections against the live
+`ResearchRegistry` caps and validates their basic object shapes, ids, states,
+kinds, required strings, metadata objects, and snapshot slots. The registry's
+overall session cap is then enforced when the fresh session is allocated.
 
 If `artifact_destination_dir` is supplied, bundled artifact blobs are extracted
-there under their ZIP-entry basenames; bundles produced by this project use
-SHA-256 digests for those names. Extraction does not register them in the
-server's ArtifactStore and does not rewrite opaque evidence refs; re-ingestion
-is a separate caller workflow.
+there under their verified SHA-256 basenames. Artifact hashing and extraction
+read bounded chunks rather than materializing decompressed artifact payloads;
+each extraction writes a temporary file and atomically replaces the final
+destination only after the declared size is consumed. Extraction does not
+register files in the server's ArtifactStore and does not rewrite opaque
+evidence refs; re-ingestion is a separate caller workflow.
 
 <Warning>
   Bundles have SHA-256 integrity but no cryptographic signature, authentication,
@@ -272,8 +298,14 @@ The bundle header itself uses `pao.research-bundle.v1`.
 | Hypotheses per session | 100 | New hypothesis is rejected |
 | Named snapshots per session | 64 | New snapshot is rejected |
 | Timeline events per session | 2,000 | Oldest event is removed with explicit metadata |
-| Export bundle bytes | 512 MiB | Export is rejected before ZIP construction |
-| Export bundle entries | 4,096 | Export is rejected before ZIP construction |
+| Compressed bundle bytes | 512 MiB | Export, verify, and import reject the bundle |
+| Total uncompressed entry bytes | 512 MiB | Export, verify, and import reject the bundle |
+| Bundle entries | 4,096 | Checked before export and before ZIP entry materialization |
+| `manifest.json` | 32 MiB | Control document is rejected before JSON parsing |
+| `integrity.json` | 4 MiB | Integrity index is rejected before JSON parsing |
+| Per-entry expansion ratio | 200:1 | Input is rejected; export stores an exceptional member uncompressed |
+| ZIP entry name | 255 bytes | Rejected during central-directory preflight |
+| ZIP extra field or comment | 4 KiB each | Rejected during central-directory preflight |
 
 - There is no MCP tool to delete a research session, note, evidence link,
   hypothesis, snapshot, or timeline event.
@@ -283,9 +315,11 @@ The bundle header itself uses `pao.research-bundle.v1`.
 - Registry caps are constructor defaults rather than environment variables.
 - Export copies artifact payloads into memory before creating the ZIP; the
   512 MiB cap bounds but does not eliminate that memory cost.
-- Verification and import read the complete ZIP into memory. They do not apply
-  the export byte/entry caps or re-enforce the per-session child-record caps,
-  so import only bundles produced by a trusted workflow.
+- Verification and import retain the already size-checked compressed ZIP in
+  memory, up to the 512 MiB cap. Control documents are read under their smaller
+  caps, while artifact hashing and extraction stream decompressed bytes.
+- ZIP64, multi-disk ZIPs, encrypted entries, and compression methods other than
+  stored or deflate are unsupported.
 - Verification and reporting are local operations and do not query live
   debugger, heap, target, or artifact state beyond the explicit export-time
   artifact resolution described above.

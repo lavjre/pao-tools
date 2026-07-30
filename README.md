@@ -189,28 +189,32 @@ scope and the remaining extension points.
 | Stage | Goal | Status |
 | --- | --- | --- |
 | S5 | Typed crash triage: run, snapshot, analyze, classify, compare, cyclic scan, core evidence, and per-crash report artifact | Implemented. The CI definitions gate image publication on Linux container boot, `/healthz`, an HTTP MCP registration check, and a real crash/core smoke test; consult the workflow run for the current candidate rather than assuming that live gate passed. |
-| S6 | Typed heap analysis: allocator discovery, glibc chunks, arenas, fastbins/tcache/regular bins, safe-linking evidence, corruption/free validation, and bounded snapshot history | Implemented for glibc. musl mallocng, jemalloc, and Scudo are detected through the allocator/plugin contract but do not yet have typed internal parsers. Allocation-event tracking is not included. |
-| S7 | ROP gadget analysis, libc identification, one-gadget lookup, chain construction, static validation, and export | Implemented baseline. Gadget analysis is multi-architecture, but chain construction is currently x86-64 `ret2libc`/`ret2syscall`; SROP frames support x86-64/i386, validation is static, and `one_gadget` remains an optional external executable. |
-| S8 | Local process, PID attach, gdbserver, GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers behind one target contract | Implemented provider matrix. Runtime availability still depends on the corresponding host executables, credentials, images, kernels, and root filesystems. SSH and Docker targets use a separate gdbserver/GDB-remote target for debugger attachment. |
-| S9 | Research notes, hypotheses, evidence, named snapshots, timeline, export/import bundles, and final reporting | Implemented baseline. The live registry is bounded and in-memory, so explicit ZIP export/import is the durability path. Reports support JSON, Markdown, and escaped preformatted HTML; the HTML output is not a rendered Markdown document. |
+| S6 | Typed heap analysis: allocator discovery, glibc chunks, arenas, fastbins/tcache/regular bins, safe-linking evidence, corruption/free validation, and bounded snapshot history | Implemented for glibc, including reconciled typed-capability metadata. musl mallocng, jemalloc, and Scudo are detected through the allocator/plugin contract but do not yet have typed internal parsers. Allocation-event tracking is not included. |
+| S7 | ROP gadget analysis, libc identification, one-gadget lookup, chain construction, static validation, and export | Implemented baseline. Gadget analysis is multi-architecture, but chain construction is currently x86-64 `ret2libc`/`ret2syscall`; SROP frames support x86-64/i386 and validation is static. The standard Docker image pins `one_gadget` 1.10.0; it remains optional for non-Docker installs. |
+| S8 | Local process, PID attach, gdbserver, GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers behind one target contract | Implemented provider matrix with reconciled aggregate metadata, strict SSH host-key verification, and registry-wide shutdown cleanup. Runtime availability still depends on the corresponding host executables, credentials, known-host entries, images, kernels, and root filesystems. SSH and Docker targets use a separate gdbserver/GDB-remote target for debugger attachment. |
+| S9 | Research notes, hypotheses, evidence, named snapshots, timeline, export/import bundles, and final reporting | Implemented baseline. ZIP verification/import applies compressed, uncompressed, entry, control-document, expansion-ratio, integrity, canonical-path, and per-session record quotas before rehydration. The live registry remains bounded and in-memory, so explicit ZIP export/import is the durability path. |
 
 The S5 `generate_crash_report` tool is an evidence-preserving report for one exact
 crash. The S9 `generate_final_report` tool instead summarizes the evidence,
 hypotheses, snapshots, and timeline that a caller linked into a research session.
 
+The Linux image build and publish definitions now include a live S6-S9 gate that
+checks tool registration plus representative glibc inspection, gadget/one-gadget
+analysis, local target lifecycle, and research export/verify/import workflows.
+This describes the configured CI gate, not a claimed local Docker pass; consult
+the workflow run for the exact image candidate.
+
 ### Potential builds
 
-- Add dedicated live Linux/container smoke workflows for the S6-S9 tool families.
-- Reconcile the aggregate platform/allocator capability manifests with the
-  registered S6/S8 APIs.
 - Add allocation-event tracking and typed musl, jemalloc, and Scudo internals.
 - Extend ROP chain construction to more architectures and add debugger-backed
   dynamic chain validation.
-- Complete provider shutdown/session cleanup and package the host integrations
-  required by Docker, SSH, and broader QEMU targets.
+- Expand live provider coverage beyond the current local-target smoke with
+  repeatable SSH, Docker-provider, gdbserver, and QEMU integration fixtures.
 - Add research autosave, direct artifact re-ingestion on import, and optionally
-  signed or encrypted research bundles. Bound imported ZIP size, entry count,
-  and decompressed bytes before loading untrusted bundles into memory.
+  signed or encrypted research bundles. Stream the bounded compressed ZIP
+  container directly from disk if avoiding its current in-memory copy becomes
+  important for very large private investigations.
 
 This roadmap assumes a private, single-user research tool. Authentication, RBAC,
 multi-user tenancy, and public-service audit infrastructure are intentionally out of

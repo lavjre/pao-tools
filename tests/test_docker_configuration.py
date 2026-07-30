@@ -32,6 +32,22 @@ def test_stage5_smoke_is_present_in_the_docker_context():
     )
 
 
+def test_stage6_9_smoke_and_one_gadget_are_pinned_in_the_docker_image():
+    dockerignore = _read(".dockerignore")
+    dockerfile = _read("Dockerfile")
+
+    assert "!tests/docker_stage6_9_smoke.py" in dockerignore
+    assert (
+        "COPY tests/docker_stage6_9_smoke.py ./tests/docker_stage6_9_smoke.py"
+        in dockerfile
+    )
+    assert "ARG ONE_GADGET_VERSION=1.10.0" in dockerfile
+    assert (
+        'gem install --no-document one_gadget -v "${ONE_GADGET_VERSION}"' in dockerfile
+    )
+    assert "one_gadget --version" in dockerfile
+
+
 def test_helper_venv_is_baked_outside_the_runtime_volume():
     dockerfile = _read("Dockerfile")
     service = _read("paomcp.service")
@@ -73,9 +89,17 @@ def test_publish_serializes_repository_and_pushes_the_smoke_tested_image():
     build_index = workflow.index("Build exact image for smoke and publication")
     boot_index = workflow.index("Boot default entrypoint and probe health")
     stage5_index = workflow.index("Run stage5 smoke test")
+    stage6_9_index = workflow.index("Run stage6-9 smoke test")
     login_index = workflow.index("Log in to GHCR")
     push_index = workflow.index("Push the smoke-tested image")
-    assert build_index < boot_index < stage5_index < login_index < push_index
+    assert (
+        build_index
+        < boot_index
+        < stage5_index
+        < stage6_9_index
+        < login_index
+        < push_index
+    )
     assert "docker push --all-tags" in workflow
 
 
@@ -86,10 +110,18 @@ def test_cloud_build_gates_publication_on_verify_boot_and_stage5_smoke():
     build_index = cloudbuild.index("id: build-candidate")
     boot_index = cloudbuild.index("id: boot-default-entrypoint")
     stage5_index = cloudbuild.index("id: stage5-runtime-smoke")
+    stage6_9_index = cloudbuild.index("id: stage6-9-runtime-smoke")
     tag_index = cloudbuild.index("id: tag-verified-image")
     images_index = cloudbuild.index("\nimages:")
 
-    assert verify_index < build_index < boot_index < stage5_index < tag_index
+    assert (
+        verify_index
+        < build_index
+        < boot_index
+        < stage5_index
+        < stage6_9_index
+        < tag_index
+    )
     assert tag_index < images_index
     assert "uv run pytest -v" in cloudbuild
     assert "--platform=linux/amd64" in cloudbuild
@@ -101,9 +133,11 @@ def test_cloud_build_gates_publication_on_verify_boot_and_stage5_smoke():
     for tool_name in STAGE5_MCP_TOOLS:
         assert f'"{tool_name}"' in cloudbuild
     assert "/app/tests/docker_stage5_smoke.py" in cloudbuild
+    assert "/app/tests/docker_stage6_9_smoke.py" in cloudbuild
     assert "trap cleanup EXIT" in cloudbuild
     assert "pao-tools-cloud-boot-$BUILD_ID" in cloudbuild
     assert "pao-cloud-stage5-runtime-$BUILD_ID" in cloudbuild
+    assert "pao-cloud-stage6-9-runtime-$BUILD_ID" in cloudbuild
 
 
 def test_local_build_helper_only_advertises_loopback_http():
@@ -156,3 +190,19 @@ def test_stage5_smoke_uses_real_isolated_services():
     assert 'runtime_root=os.path.join(runtime_dir, "runtime")' in smoke
     assert "cast(Any, None)" not in smoke
     assert '"gdb_features": {"generate_core_file": {"available": True}}' not in smoke
+
+
+def test_stage6_9_smoke_uses_real_runtime_boundaries():
+    smoke = _read("tests/docker_stage6_9_smoke.py")
+
+    assert "create_services(" in smoke
+    assert "Client(create_mcp(services))" in smoke
+    assert "STAGE6_TOOLS" in smoke
+    assert "STAGE7_TOOLS" in smoke
+    assert "STAGE8_TOOLS" in smoke
+    assert "STAGE9_TOOLS" in smoke
+    assert '"detect_allocator"' in smoke
+    assert '"find_one_gadgets"' in smoke
+    assert '"local_process"' in smoke
+    assert '"verify_research_bundle"' in smoke
+    assert "/lib/x86_64-linux-gnu/libc.so.6" in smoke

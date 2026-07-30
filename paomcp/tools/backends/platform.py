@@ -56,6 +56,7 @@ class ExecutableSpec:
 
 
 EXECUTABLE_SPECS: Dict[str, ExecutableSpec] = {
+    "docker": ExecutableSpec(("docker",)),
     "gdb": ExecutableSpec(("gdb",)),
     "gdbserver": ExecutableSpec(("gdbserver",)),
     "paocli": ExecutableSpec(("paocli",)),
@@ -663,6 +664,7 @@ class PlatformCapabilities:
         user_arches = self._emulated_architectures(executables, "qemu_user_")
         system_arches = self._emulated_architectures(executables, "qemu_system_")
         commands = self._debugger_command_names()
+        debugger_ready = bool(self.debugger_capabilities.get("ready"))
 
         allocator_commands = {
             "glibc_ptmalloc": ["arena", "bins", "heap", "malloc-chunk", "tcachebins"],
@@ -678,74 +680,133 @@ class PlatformCapabilities:
                 if available and not missing
                 else "partial" if available else "unavailable"
             )
+            typed_api = allocator == "glibc_ptmalloc"
+            typed_ready = typed_api and debugger_ready
+            inspection_available = typed_ready or bool(available)
             allocators[allocator] = {
                 "runtime_primitives": available,
                 "missing_primitives": missing,
-                "available": bool(available),
-                "typed_api": False,
+                "available": inspection_available,
+                "typed_api": typed_api,
                 "primitive_status": primitive_status,
-                "status": "partial" if available else "unavailable",
-                "ready": False,
+                "status": (
+                    "ready"
+                    if typed_ready
+                    else "partial" if inspection_available else "unavailable"
+                ),
+                "ready": typed_ready,
+                "requires": ["debugger"] if typed_api else [],
             }
 
-        debugger_ready = bool(self.debugger_capabilities.get("ready"))
-        paocli_ready = bool(paocli.get("ready"))
         qemu_user_ready = bool(user_arches)
         qemu_system_ready = bool(system_arches)
+        paocli_ready = bool(paocli.get("ready"))
+        gdbserver_available = bool(executables.get("gdbserver", {}).get("available"))
+        docker_available = bool(executables.get("docker", {}).get("available"))
+        paramiko_available = bool(self.module_lookup("paramiko"))
+
+        def provider(
+            *,
+            available: bool,
+            requires: Sequence[str],
+            debugger_required: bool = False,
+            category: str = "target_provider",
+            **details: Any,
+        ) -> Dict[str, Any]:
+            """Describe shipped provider code separately from runtime readiness."""
+            ready = available and (debugger_ready or not debugger_required)
+            status = "ready" if ready else "partial" if available else "unavailable"
+            missing = [
+                requirement
+                for requirement in requires
+                if (
+                    (requirement == "debugger" and not debugger_ready)
+                    or (requirement == "gdbserver" and not gdbserver_available)
+                    or (requirement == "docker" and not docker_available)
+                    or (requirement == "paramiko" and not paramiko_available)
+                    or (requirement == "paocli" and not paocli_ready)
+                    or (requirement == "qemu-user" and not qemu_user_ready)
+                    or (requirement == "qemu-system" and not qemu_system_ready)
+                )
+            ]
+            return {
+                "available": available,
+                "typed_api": True,
+                "status": status,
+                "ready": ready,
+                "requires": list(requires),
+                "missing_requirements": missing,
+                "category": category,
+                **details,
+            }
+
+        canonical_providers = {
+            "local_process": provider(available=True, requires=[]),
+            "attach_pid": provider(
+                available=debugger_ready,
+                requires=["debugger"],
+                debugger_required=True,
+            ),
+            "gdbserver": provider(
+                available=gdbserver_available,
+                requires=["gdbserver", "debugger"],
+                debugger_required=True,
+            ),
+            "tcp_remote": provider(
+                available=debugger_ready,
+                requires=["debugger"],
+                debugger_required=True,
+            ),
+            "ssh": provider(
+                available=paramiko_available,
+                requires=["paramiko"],
+            ),
+            "docker": provider(
+                available=docker_available,
+                requires=["docker"],
+            ),
+            "qemu_user": provider(
+                available=qemu_user_ready,
+                requires=["qemu-user", "debugger"],
+                debugger_required=True,
+                architectures=user_arches,
+            ),
+            "qemu_system": provider(
+                available=qemu_system_ready,
+                requires=["qemu-system", "debugger"],
+                debugger_required=True,
+                architectures=system_arches,
+            ),
+        }
         providers = {
-            "local_process": {
-                "available": True,
-                "typed_api": True,
-                "status": "ready",
-                "ready": True,
-            },
+            **canonical_providers,
+            # API 1.0 compatibility aliases.  New consumers should use the
+            # exact TargetKind spellings above.
             "existing_pid": {
-                "available": debugger_ready,
-                "typed_api": True,
-                "status": "ready" if debugger_ready else "unavailable",
-                "ready": debugger_ready,
-                "requires": ["debugger"],
-            },
-            "paocli_driver": {
-                "available": paocli_ready,
-                "typed_api": True,
-                "status": "ready" if paocli_ready else "unavailable",
-                "ready": paocli_ready,
-                "requires": ["paocli"],
+                **canonical_providers["attach_pid"],
+                "alias_for": "attach_pid",
+                "deprecated": True,
+                "category": "target_provider_alias",
             },
             "remote_tcp": {
                 "available": paocli_ready,
                 "typed_api": False,
                 "status": "partial" if paocli_ready else "unavailable",
                 "ready": False,
+                "requires": ["paocli"],
+                "missing_requirements": [] if paocli_ready else ["paocli"],
                 "source": "paocli primitive",
+                "deprecated": True,
+                "category": "exploit_driver_primitive",
             },
-            "ssh": {
-                "available": False,
-                "typed_api": False,
-                "status": "unavailable",
-                "ready": False,
-            },
-            "docker": {
-                "available": False,
-                "typed_api": False,
-                "status": "unavailable",
-                "ready": False,
-            },
-            "qemu_user": {
-                "available": qemu_user_ready,
-                "typed_api": False,
-                "status": "partial" if qemu_user_ready else "unavailable",
-                "ready": False,
-                "architectures": user_arches,
-            },
-            "qemu_system": {
-                "available": qemu_system_ready,
-                "typed_api": False,
-                "status": "partial" if qemu_system_ready else "unavailable",
-                "ready": False,
-                "architectures": system_arches,
-            },
+            # paocli remains a typed exploit-session integration, not a
+            # TargetRegistry provider.  Preserve the public capability key
+            # while making that distinction machine-readable.
+            "paocli_driver": provider(
+                available=paocli_ready,
+                requires=["paocli"],
+                category="exploit_driver",
+            ),
         }
         return {
             "architectures": {
@@ -755,6 +816,7 @@ class PlatformCapabilities:
                 "schema": "architecture-neutral",
             },
             "providers": providers,
+            "target_provider_kinds": sorted(canonical_providers),
             "allocators": allocators,
             "analysis": {
                 "debugger": bool(self.debugger_capabilities.get("ready")),

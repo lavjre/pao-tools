@@ -65,6 +65,11 @@ ALLOCATOR_RUNTIME_COMMANDS: Dict[str, Tuple[str, ...]] = {
     "unknown": (),
 }
 
+# The S6.2-S6.5 typed parsers operate on glibc heap structures directly
+# through GDB memory/expression APIs.  Runtime pwndbg commands remain useful
+# evidence, but their absence does not make the shipped typed API disappear.
+TYPED_INSPECTION_FAMILIES = frozenset({"glibc"})
+
 # Filename evidence.  Kept deliberately narrow: a match must look like a real
 # shared object, not merely mention the word "libc" somewhere in a path.
 _FAMILY_FILENAME_PATTERNS: Dict[str, Tuple[re.Pattern[str], ...]] = {
@@ -530,6 +535,7 @@ class AllocatorDiscovery:
                 # No pwndbg primitives are known for this family, so the runtime
                 # cannot be probed -- report unknown rather than a false negative.
                 runtime_status = "unknown"
+            typed_available = family in TYPED_INSPECTION_FAMILIES
             families[family] = {
                 "detected": detected,
                 "runtime_commands": {
@@ -537,11 +543,9 @@ class AllocatorDiscovery:
                     "missing": missing,
                     "status": runtime_status,
                 },
-                # No typed heap parser ships in S6.1; later stages flip this on
-                # per family.  It is reported honestly as planned/unavailable.
                 "typed_inspection_api": {
-                    "status": "planned" if family in {"glibc"} else "unavailable",
-                    "available": False,
+                    "status": "supported" if typed_available else "unavailable",
+                    "available": typed_available,
                 },
             }
         return families
@@ -581,13 +585,20 @@ class AllocatorDiscovery:
             if detected != "unknown"
             else "unsupported"
         )
+        typed_available = bool(
+            detected_caps.get("typed_inspection_api", {}).get("available")
+        )
         # Overall verdict for the detected allocator: the discovery capability
-        # itself is always supported once an inferior is live; the value here is
-        # the honest state of *inspection* readiness for later stages.
+        # itself is always supported once an inferior is live.  A shipped typed
+        # parser is sufficient for full inspection support; pwndbg primitives
+        # are reported independently and provide a partial fallback for families
+        # that do not have a typed parser.
         if detected == "unknown":
             overall = "unsupported"
+        elif typed_available:
+            overall = "supported"
         elif runtime_status in {"supported", "partial"}:
-            overall = "supported" if runtime_status == "supported" else "partial"
+            overall = "partial"
         elif not command_names:
             overall = "unknown"
         else:

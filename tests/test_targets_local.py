@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -339,6 +340,177 @@ class TestCloseSession:
         assert len(summary["stopped"]) == 2
         assert summary["errors"] == []
         assert registry.list(session_id="sess") == []
+
+
+# ---------------------------------------------------------------------------
+# close_all shutdown cleanup
+# ---------------------------------------------------------------------------
+class TestCloseAll:
+    def test_close_all_stops_owned_and_detaches_external_targets(self) -> None:
+        registry = TargetRegistry()
+        owned = registry.create(
+            TargetSpec.from_config(
+                "local_process",
+                {
+                    "binary_path": sys.executable,
+                    "argv": ["-c", "import time; time.sleep(30)"],
+                },
+                session_id="owned",
+            )
+        )
+        external = registry.create(
+            TargetSpec.from_config(
+                "attach_pid",
+                {"pid": os.getpid()},
+                session_id="external",
+            )
+        )
+        registry.start_target_response(target_id=owned.target_id)
+        registry.start_target_response(target_id=external.target_id)
+
+        summary = registry.close_all(stop_timeout_sec=5.0)
+
+        assert summary == {
+            "processed": 2,
+            "closed": [owned.target_id, external.target_id],
+            "errors": [],
+        }
+        assert owned.state == TargetState.STOPPED
+        assert owned.process is not None
+        assert owned.process.poll() is not None
+        assert external.state == TargetState.DETACHED
+        assert os.getpid() > 0
+        assert registry.list() == []
+
+    def test_close_all_processes_every_target_after_provider_failure(self) -> None:
+        calls: List[str] = []
+
+        class FailingProvider:
+            kind = TargetKind.ATTACH_PID
+
+            def start(self, handle: TargetHandle) -> None:
+                handle._set_state(TargetState.RUNNING)
+
+            def stop(
+                self,
+                handle: TargetHandle,
+                *,
+                timeout_sec: float = 10.0,
+            ) -> None:
+                calls.append(handle.target_id)
+                if handle.spec.name == "fails":
+                    raise RuntimeError("injected cleanup failure")
+                handle._set_state(TargetState.DETACHED)
+
+            def attach_debugger(self, handle: TargetHandle, gdb: Any) -> Dict[str, Any]:
+                raise NotImplementedError
+
+            def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]:
+                return {}
+
+        registry = TargetRegistry()
+        registry.register_provider(FailingProvider())
+        handles = [
+            registry.create(
+                TargetSpec(
+                    kind=TargetKind.ATTACH_PID,
+                    pid=os.getpid(),
+                    name=name,
+                    session_id="sess",
+                )
+            )
+            for name in ("first", "fails", "last")
+        ]
+
+        summary = registry.close_all()
+
+        assert calls == [handle.target_id for handle in handles]
+        assert summary["processed"] == 3
+        assert summary["closed"] == [handles[0].target_id, handles[2].target_id]
+        assert summary["errors"] == [
+            {
+                "target_id": handles[1].target_id,
+                "kind": "attach_pid",
+                "error": "injected cleanup failure",
+                "type": "RuntimeError",
+            }
+        ]
+        assert registry.list() == []
+
+    def test_close_all_is_idempotent(self) -> None:
+        registry = TargetRegistry()
+        assert registry.close_all() == {
+            "processed": 0,
+            "closed": [],
+            "errors": [],
+        }
+
+    def test_close_all_rejects_targets_created_during_shutdown(self) -> None:
+        registry = TargetRegistry()
+        registry.close_all()
+
+        with pytest.raises(TargetError, match="registry is closed"):
+            registry.create(
+                TargetSpec.from_config(
+                    "attach_pid",
+                    {"pid": os.getpid()},
+                    session_id="late",
+                )
+            )
+        assert registry.close_all() == {
+            "processed": 0,
+            "closed": [],
+            "errors": [],
+        }
+
+    def test_close_session_and_close_all_do_not_stop_same_target_twice(self) -> None:
+        entered_stop = threading.Event()
+        release_stop = threading.Event()
+        stop_calls: List[str] = []
+
+        class BlockingProvider:
+            kind = TargetKind.ATTACH_PID
+
+            def start(self, handle: TargetHandle) -> None:
+                handle._set_state(TargetState.RUNNING)
+
+            def stop(
+                self,
+                handle: TargetHandle,
+                *,
+                timeout_sec: float = 10.0,
+            ) -> None:
+                stop_calls.append(handle.target_id)
+                entered_stop.set()
+                assert release_stop.wait(timeout=5.0)
+                handle._set_state(TargetState.DETACHED)
+
+            def attach_debugger(self, handle: TargetHandle, gdb: Any) -> Dict[str, Any]:
+                raise NotImplementedError
+
+            def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]:
+                return {}
+
+        registry = TargetRegistry()
+        registry.register_provider(BlockingProvider())
+        handle = registry.create(
+            TargetSpec(
+                kind=TargetKind.ATTACH_PID,
+                pid=os.getpid(),
+                session_id="sess",
+            )
+        )
+        worker = threading.Thread(target=registry.close_session, args=("sess",))
+        worker.start()
+        assert entered_stop.wait(timeout=5.0)
+
+        shutdown = registry.close_all()
+        release_stop.set()
+        worker.join(timeout=5.0)
+
+        assert worker.is_alive() is False
+        assert shutdown == {"processed": 0, "closed": [], "errors": []}
+        assert stop_calls == [handle.target_id]
 
 
 # ---------------------------------------------------------------------------

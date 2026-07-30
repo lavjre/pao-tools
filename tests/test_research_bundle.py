@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -89,6 +90,51 @@ def _seeded_session(registry: ResearchRegistry) -> str:
     return sid
 
 
+def _minimal_manifest() -> dict[str, Any]:
+    return {
+        "bundle_schema": BUNDLE_SCHEMA_VERSION,
+        "parser_version": "1",
+        "artifact_index": [],
+        "session": {
+            "session_id": "source-session",
+            "name": "import-control",
+            "description": None,
+            "owning_debug_session": None,
+            "metadata": {},
+            "hypotheses": [],
+            "notes": [],
+            "evidence": [],
+            "snapshots": [],
+            "timeline": [],
+        },
+    }
+
+
+def _build_bundle(
+    manifest: dict[str, Any],
+    *,
+    integrity: Any = None,
+    integrity_payload: bytes | None = None,
+    artifacts: dict[str, bytes] | None = None,
+    extra_entries: dict[str, bytes] | None = None,
+) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(MANIFEST_ARCNAME, json.dumps(manifest))
+        if integrity_payload is None:
+            zf.writestr(
+                INTEGRITY_ARCNAME,
+                json.dumps({} if integrity is None else integrity),
+            )
+        else:
+            zf.writestr(INTEGRITY_ARCNAME, integrity_payload)
+        for name, payload in (artifacts or {}).items():
+            zf.writestr(name, payload)
+        for name, payload in (extra_entries or {}).items():
+            zf.writestr(name, payload)
+    return buffer.getvalue()
+
+
 class TestExport:
     def test_export_writes_zip_with_manifest_and_integrity(
         self, tmp_path: Path
@@ -173,6 +219,17 @@ class TestExport:
         assert summary["artifact_count"] == 0
         assert any("orphan" in w for w in summary["warnings"])
 
+    def test_repetitive_legitimate_export_remains_verifiable(self) -> None:
+        registry = ResearchRegistry()
+        sid = registry.create_session_response(name="compressible")["parsed"][
+            "session"
+        ]["session_id"]
+        registry.add_note_response(session_id=sid, body="A" * 100_000)
+        bundle = ResearchBundle(registry)
+        data, _ = bundle.export_to_bytes(session_id=sid)
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "valid"
+
     def test_byte_cap_enforced(self) -> None:
         registry = ResearchRegistry()
         sid = _seeded_session(registry)
@@ -251,6 +308,114 @@ class TestVerify:
         assert result["verdict"] == "invalid"
         assert any("sha256 mismatch" in p for p in result["problems"])
 
+    def test_uncompressed_zip_bomb_is_rejected_before_json_parse(self) -> None:
+        manifest = _minimal_manifest()
+        manifest["session"]["description"] = "A" * 20_000
+        data = _build_bundle(manifest)
+        assert len(data) < 1024
+        bundle = ResearchBundle(
+            ResearchRegistry(),
+            max_bundle_bytes=1024,
+            max_compression_ratio=10_000,
+        )
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any("uncompressed byte cap" in problem for problem in result["problems"])
+
+    def test_high_compression_ratio_is_rejected(self) -> None:
+        manifest = _minimal_manifest()
+        manifest["session"]["description"] = "A" * 20_000
+        data = _build_bundle(manifest)
+        bundle = ResearchBundle(
+            ResearchRegistry(),
+            max_bundle_bytes=100_000,
+            max_uncompressed_bytes=100_000,
+            max_compression_ratio=5,
+        )
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any("compression-ratio cap" in problem for problem in result["problems"])
+
+    def test_entry_count_cap_is_checked_from_central_directory(self) -> None:
+        data = _build_bundle(
+            _minimal_manifest(),
+            extra_entries={"unexpected.txt": b""},
+        )
+        bundle = ResearchBundle(ResearchRegistry(), max_bundle_entries=2)
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert result["problems"] == ["bundle exceeds the entry cap (3 > 2)"]
+
+    def test_oversized_manifest_is_rejected_before_decompression(self) -> None:
+        data = _build_bundle(_minimal_manifest())
+        bundle = ResearchBundle(ResearchRegistry(), max_manifest_bytes=64)
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any("manifest.json exceeds" in problem for problem in result["problems"])
+
+    def test_oversized_integrity_index_is_rejected_before_decompression(self) -> None:
+        data = _build_bundle(
+            _minimal_manifest(),
+            integrity_payload=b"{}" + (b" " * 128),
+        )
+        bundle = ResearchBundle(ResearchRegistry(), max_integrity_bytes=64)
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any(
+            "integrity.json exceeds" in problem for problem in result["problems"]
+        )
+
+    def test_json_numeric_limit_error_is_returned_as_typed_invalid(self) -> None:
+        manifest_payload = json.dumps(_minimal_manifest()).replace(
+            '"metadata": {}',
+            f'"metadata": {{"huge": {"9" * 5000}}}',
+            1,
+        )
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(MANIFEST_ARCNAME, manifest_payload)
+            zf.writestr(INTEGRITY_ARCNAME, "{}")
+        result = ResearchBundle(
+            ResearchRegistry(), max_compression_ratio=10_000
+        ).verify_bytes(buffer.getvalue())
+        assert result["verdict"] == "invalid"
+        assert any("manifest.json is not valid JSON" in p for p in result["problems"])
+
+    def test_noncanonical_artifact_path_is_rejected(self) -> None:
+        payload = b"safe bytes"
+        sha256 = hashlib.sha256(payload).hexdigest()
+        arcname = "artifacts/../not-content-addressed"
+        manifest = _minimal_manifest()
+        manifest["artifact_index"] = [
+            {
+                "resolved": True,
+                "arcname": arcname,
+                "sha256": sha256,
+                "size_bytes": len(payload),
+            }
+        ]
+        data = _build_bundle(
+            manifest,
+            integrity={arcname: sha256},
+            artifacts={arcname: payload},
+        )
+        result = ResearchBundle(ResearchRegistry()).verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any("canonical" in problem for problem in result["problems"])
+
+    def test_file_size_cap_prevents_verify_and_import_read(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "oversized.zip"
+        source.write_bytes(b"x" * 128)
+        bundle = ResearchBundle(ResearchRegistry(), max_bundle_bytes=64)
+        result = bundle.verify_file(str(source))
+        assert result["verdict"] == "invalid"
+        assert result["bundle_bytes"] == 128
+        assert any("compressed byte cap" in problem for problem in result["problems"])
+        with pytest.raises(BundleError, match="compressed byte cap"):
+            bundle.import_file(str(source))
+
 
 class TestImport:
     def test_import_creates_new_session_with_remapped_ids(self, tmp_path: Path) -> None:
@@ -306,6 +471,72 @@ class TestImport:
         # slot payload survives the round trip
         snap = next(iter(imported.snapshots.values()))
         assert snap.slots["registers"]["rip"] == 0x400100
+
+    @pytest.mark.parametrize(
+        ("child_name", "registry_limit", "child"),
+        [
+            (
+                "notes",
+                {"max_notes_per_session": 1},
+                {"note_id": "note", "body": "bounded", "tags": []},
+            ),
+            (
+                "hypotheses",
+                {"max_hypotheses_per_session": 1},
+                {
+                    "hypothesis_id": "hypothesis",
+                    "statement": "bounded",
+                    "state": "proposed",
+                },
+            ),
+            (
+                "evidence",
+                {"max_evidence_per_session": 1},
+                {
+                    "evidence_id": "evidence",
+                    "kind": "external",
+                    "ref": "bounded",
+                    "metadata": {},
+                },
+            ),
+            (
+                "snapshots",
+                {"max_snapshots_per_session": 1},
+                {"snapshot_id": "snapshot", "name": "bounded", "slots": {}},
+            ),
+            (
+                "timeline",
+                {"max_timeline_events_per_session": 1},
+                {
+                    "event_id": "event",
+                    "kind": "other",
+                    "summary": "bounded",
+                    "metadata": {},
+                },
+            ),
+        ],
+    )
+    def test_import_cannot_bypass_child_record_caps(
+        self,
+        child_name: str,
+        registry_limit: dict[str, int],
+        child: dict[str, Any],
+    ) -> None:
+        manifest = _minimal_manifest()
+        manifest["session"][child_name] = [dict(child), dict(child)]
+        data = _build_bundle(manifest)
+        registry = ResearchRegistry(**registry_limit)
+        bundle = ResearchBundle(registry)
+
+        verify = bundle.verify_bytes(data)
+        assert verify["verdict"] == "invalid"
+        assert any(
+            f"manifest.session.{child_name} exceeds the registry cap" in problem
+            for problem in verify["problems"]
+        )
+        with pytest.raises(BundleError, match="registry cap"):
+            bundle.import_bytes(data)
+        assert registry.list_sessions() == []
 
 
 def _first_hypothesis_id(session) -> str:

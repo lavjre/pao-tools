@@ -273,21 +273,28 @@ class TestAllocatorCapabilities:
         assert glibc["detected"] is True
         assert glibc["runtime_commands"]["status"] == "supported"
         assert glibc["runtime_commands"]["missing"] == []
+        assert glibc["typed_inspection_api"] == {
+            "status": "supported",
+            "available": True,
+        }
 
-    def test_partial_when_some_commands_missing(self):
+    def test_typed_glibc_remains_supported_when_some_commands_are_missing(self):
         discovery = build()
         result = discovery.get_allocator_capabilities(
             debugger_command_names=["arena", "bins"]
         )
         parsed = result["parsed"]
         assert parsed["allocators"]["glibc"]["runtime_commands"]["status"] == "partial"
-        assert parsed["overall_status"] == "partial"
+        assert (
+            parsed["allocators"]["glibc"]["typed_inspection_api"]["available"] is True
+        )
+        assert parsed["overall_status"] == "supported"
 
-    def test_unknown_when_no_command_inventory(self):
+    def test_typed_glibc_remains_supported_without_command_inventory(self):
         discovery = build()
         result = discovery.get_allocator_capabilities(debugger_command_names=[])
         parsed = result["parsed"]
-        assert parsed["overall_status"] == "unknown"
+        assert parsed["overall_status"] == "supported"
         assert parsed["command_inventory_size"] == 0
         assert any("unknown" in w for w in result.get("warnings", []))
 
@@ -301,6 +308,8 @@ class TestAllocatorCapabilities:
         musl = parsed["allocators"]["musl"]
         assert musl["runtime_commands"]["status"] == "supported"
         assert musl["typed_inspection_api"]["available"] is False
+        assert musl["typed_inspection_api"]["status"] == "unavailable"
+        assert parsed["overall_status"] == "partial"
 
     def test_unknown_allocator_is_unsupported(self):
         discovery = build(mappings=[mapping("/bin/chal")], libc=None)

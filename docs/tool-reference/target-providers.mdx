@@ -64,9 +64,10 @@ The result contains the new id at
 `data.parsed.target.target_id`. Omitting `session_id` binds the target to the
 default debugger session. Names are labels and need not be unique.
 
-Each session may retain at most eight targets. The registry is process memory:
-server restart loses target descriptors, and callers should explicitly stop and
-remove owned processes or transports when finished.
+Each session may retain at most eight targets. The registry is process memory,
+so server restart loses target descriptors. Callers should still explicitly
+stop and remove targets when finished, while normal server shutdown also drains
+the complete registry as a final cleanup boundary.
 
 ## Provider kinds and configuration
 
@@ -80,7 +81,7 @@ remove owned processes or transports when finished.
 | `attach_pid` | positive `pid` | common metadata | Verifies and attaches to an existing process that pao-tools does not own |
 | `gdbserver` | `binary_path` or `pid` | `host`, `port`, `argv`, `env`, `working_dir` | Spawns local `gdbserver` and attaches with the GDB remote protocol |
 | `tcp_remote` | `host`, `port` | common metadata | Connects to an already-running gdbserver-compatible endpoint |
-| `ssh` | `host`, `ssh_user`, and either `ssh_key_path` or `ssh_password` | `port` | Opens Paramiko SSH/SFTP for synchronization; no direct GDB attach |
+| `ssh` | `host`, `ssh_user`, and either `ssh_key_path` or `ssh_password` | `port`, `ssh_known_hosts_path` | Opens Paramiko SSH/SFTP with strict host-key verification; no direct GDB attach |
 | `docker` | `docker_image` | `name`, `argv`, `env`, `docker_workdir`, `docker_extra_args` | Runs a detached `--rm` container through the Docker CLI |
 | `qemu_user` | `binary_path`, `qemu_binary` | `qemu_ld_prefix`, `qemu_extra_args`, `argv`, `env`, `working_dir`, `host`, `port` | Starts QEMU user mode with its `-g` GDB stub |
 | `qemu_system` | `qemu_binary` plus `kernel_path` or `disk_path` | `initrd_path`, `kernel_cmdline`, `qemu_memory`, `qemu_machine`, `qemu_extra_args`, `host`, `port` | Boots a paused, headless VM with a GDB TCP stub |
@@ -157,11 +158,11 @@ host, arrange any required tunnel yourself, and create a separate
 }
 ```
 
-The built-in Paramiko client disables agent/key discovery and uses the supplied
-key or password. Missing host keys are accepted with
-`paramiko.AutoAddPolicy` (permissive trust on first use), so this is not strict
-host-key verification. Use only a trusted private lab or replace the client
-factory when verified host identities are required.
+The built-in Paramiko client disables agent/key discovery, loads the service
+account's system host keys, and rejects unknown or changed host keys. Set
+`ssh_known_hosts_path` to load an additional server-local OpenSSH
+`known_hosts` file before connecting. The file must already exist and be
+readable; pao-tools never enrolls a key received from the target.
 
 `fetch_runtime_libraries` is SSH-only. Its default candidates cover common
 x86-64 and i386 glibc paths plus the x86-64 musl loader. The result separates
@@ -217,12 +218,19 @@ guest assets, and debugger architecture support.
 returns stable booleans for `start`, `stop`, `attach_debugger`, `file_sync`,
 `reconnect`, and `port_forward`.
 
-<Warning>
-  The current aggregate `get_platform_capabilities` manifest still
-  under-reports typed readiness for several provider kinds. Use
-  `get_target_capabilities(target_id=...)` for the implemented target-specific
-  surface until the aggregate manifest is reconciled.
-</Warning>
+The aggregate `get_platform_capabilities` manifest now lists all eight
+canonical provider kinds and separates the shipped typed API from current
+runtime readiness. Use it to select a provider family, then use
+`get_target_capabilities(target_id=...)` for the exact operation matrix of a
+created target.
+
+During normal `AppServices` shutdown, the target registry closes before the
+debugger/session registries. It atomically stops accepting new targets, removes
+all retained descriptors, and attempts provider cleanup for every handle:
+owned local processes, gdbserver children, Docker containers, and QEMU
+instances are stopped; attached PIDs and remote TCP endpoints are detached;
+SSH transports are closed. One provider error is logged but does not prevent
+the remaining targets from being processed.
 
 ## Current limitations
 
@@ -231,9 +239,6 @@ returns stable booleans for `start`, `stop`, `attach_debugger`, `file_sync`,
   port-forward tool.
 - Reconnect is implemented as stop/disconnect followed by start/connect; it
   does not preserve an attached GDB session.
-- The server shutdown path does not yet walk the target registry and stop every
-  provider-owned process, container, or emulator. Explicitly stop owned targets
-  before shutting the server down.
 - Target tools currently do not expose `idempotency_key`; retrying a
   start/connect/create request after transport loss can repeat the operation.
 - The registry is not durable and has no list pagination beyond the eight

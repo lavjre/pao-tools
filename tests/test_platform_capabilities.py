@@ -15,6 +15,7 @@ from paomcp.tools.backends.platform import (
     _bounded_text,
     _run_version_probe,
 )
+from paomcp.tools.backends.targets import TargetKind
 from paomcp.tools.platform import _service_cache
 
 DEBUGGER_READY = {
@@ -108,18 +109,32 @@ def test_platform_manifest_aggregates_runtime_and_feature_groups():
     assert report["runtimes"]["decompiler"]["version"] == "11.4.2"
     assert report["runtimes"]["paocli"]["version"] == "1.6-pao"
     assert report["feature_groups"]["architectures"]["qemu_user"] == ["aarch64"]
-    remote_tcp = report["feature_groups"]["providers"]["remote_tcp"]
-    assert remote_tcp["available"] is True
-    assert remote_tcp["typed_api"] is False
-    assert remote_tcp["status"] == "partial"
-    assert remote_tcp["ready"] is False
-    assert remote_tcp["source"] == "paocli primitive"
+    providers = report["feature_groups"]["providers"]
+    canonical_kinds = {kind.value for kind in TargetKind}
+    assert canonical_kinds <= set(providers)
+    assert report["feature_groups"]["target_provider_kinds"] == sorted(canonical_kinds)
+    assert all(providers[kind]["typed_api"] is True for kind in canonical_kinds)
+    tcp_remote = providers["tcp_remote"]
+    assert tcp_remote["available"] is True
+    assert tcp_remote["status"] == "ready"
+    assert tcp_remote["ready"] is True
+    assert providers["remote_tcp"]["source"] == "paocli primitive"
+    assert providers["remote_tcp"]["typed_api"] is False
+    assert providers["remote_tcp"]["status"] == "partial"
+    assert providers["remote_tcp"]["deprecated"] is True
+    assert providers["existing_pid"]["alias_for"] == "attach_pid"
+    assert providers["existing_pid"]["deprecated"] is True
+    assert providers["paocli_driver"]["category"] == "exploit_driver"
+    assert providers["paocli_driver"]["ready"] is True
+    assert providers["gdbserver"]["status"] == "unavailable"
+    assert providers["ssh"]["status"] == "unavailable"
+    assert providers["docker"]["status"] == "unavailable"
     ptmalloc = report["feature_groups"]["allocators"]["glibc_ptmalloc"]
     assert ptmalloc["available"] is True
-    assert ptmalloc["typed_api"] is False
+    assert ptmalloc["typed_api"] is True
     assert ptmalloc["primitive_status"] == "ready"
-    assert ptmalloc["status"] == "partial"
-    assert ptmalloc["ready"] is False
+    assert ptmalloc["status"] == "ready"
+    assert ptmalloc["ready"] is True
     assert report["evidence"]["debugger"]["version"].startswith("Gdb:")
     assert report["probe"]["probed_count"] == 0
 
@@ -232,13 +247,14 @@ def test_degraded_components_return_actionable_warnings():
     assert "Expected pwndbg 2026.02.18, found unknown" in report["warnings"]
     assert "Ghidra headless executable not found" in report["warnings"]
     assert "paocli module or console entry point is unavailable" in report["warnings"]
-    existing_pid = report["feature_groups"]["providers"]["existing_pid"]
-    assert existing_pid["available"] is False
-    assert existing_pid["status"] == "unavailable"
-    assert existing_pid["ready"] is False
+    attach_pid = report["feature_groups"]["providers"]["attach_pid"]
+    assert attach_pid["typed_api"] is True
+    assert attach_pid["available"] is False
+    assert attach_pid["status"] == "unavailable"
+    assert attach_pid["ready"] is False
 
 
-def test_allocator_status_distinguishes_partial_primitives_from_readiness():
+def test_allocator_status_distinguishes_partial_primitives_from_typed_readiness():
     debugger = {
         **DEBUGGER_READY,
         "command_groups": {
@@ -251,9 +267,34 @@ def test_allocator_status_distinguishes_partial_primitives_from_readiness():
 
     ptmalloc = report["feature_groups"]["allocators"]["glibc_ptmalloc"]
     assert ptmalloc["available"] is True
+    assert ptmalloc["typed_api"] is True
     assert ptmalloc["primitive_status"] == "partial"
-    assert ptmalloc["status"] == "partial"
-    assert ptmalloc["ready"] is False
+    assert ptmalloc["status"] == "ready"
+    assert ptmalloc["ready"] is True
+
+
+def test_provider_runtime_dependencies_are_distinct_from_typed_registration():
+    paths = {
+        "docker": "/tools/docker",
+        "gdbserver": "/tools/gdbserver",
+    }
+
+    def which(name: str):
+        return paths.get(name) or _which(name)
+
+    report = _backend(
+        which=which,
+        module_lookup=lambda name: name in {"paocli", "paramiko"},
+    ).get_capabilities()
+
+    providers = report["feature_groups"]["providers"]
+    canonical_kinds = {kind.value for kind in TargetKind}
+    assert canonical_kinds <= set(providers)
+    assert all(providers[kind]["typed_api"] is True for kind in canonical_kinds)
+    assert all(providers[kind]["ready"] is True for kind in canonical_kinds)
+    assert providers["gdbserver"]["requires"] == ["gdbserver", "debugger"]
+    assert providers["docker"]["requires"] == ["docker"]
+    assert providers["ssh"]["requires"] == ["paramiko"]
 
 
 def test_probe_set_runs_in_parallel_with_a_bounded_worker_pool():

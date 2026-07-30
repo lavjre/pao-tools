@@ -62,6 +62,7 @@ jobs:
       BOOT_CONTAINER: pao-tools-ci-boot-${{ github.run_id }}-${{ github.run_attempt }}
       BOOT_VOLUME: pao-ci-boot-runtime-${{ github.run_id }}-${{ github.run_attempt }}
       STAGE5_VOLUME: pao-ci-stage5-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      STAGE6_9_VOLUME: pao-ci-stage6-9-runtime-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -155,3 +156,17 @@ jobs:
       - name: Remove smoke evidence volume
         if: always()
         run: docker volume rm -f "$STAGE5_VOLUME" || true
+      - name: Run stage6-9 smoke test
+        run: |
+          docker run --rm \
+            --cap-add=SYS_PTRACE \
+            --cap-add=SYS_ADMIN \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            -v "${STAGE6_9_VOLUME}:/var/lib/pao" \
+            --entrypoint /app/.venv/bin/python \
+            pao-tools:ci \
+            /app/tests/docker_stage6_9_smoke.py
+      - name: Remove stage6-9 smoke resources
+        if: always()
+        run: docker volume rm -f "$STAGE6_9_VOLUME" || true

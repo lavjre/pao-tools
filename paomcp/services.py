@@ -139,6 +139,14 @@ def close_services(services: AppServices) -> None:
             pipe.kill()
         services.paopipe_sessions.clear()
 
+    target_cleanup = services.target_registry.close_all()
+    if target_cleanup["errors"]:
+        logger.warning(
+            "Target cleanup completed with %d error(s): %s",
+            len(target_cleanup["errors"]),
+            target_cleanup["errors"],
+        )
+
     services.subprocess_tools.close_all()
     services.session_registry.close_all()
     services.artifact_store.close()

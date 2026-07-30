@@ -3,6 +3,7 @@ FROM ubuntu:24.04 AS base
 
 ARG TARGETARCH
 ARG PWNDBG_VERSION=2026.02.18
+ARG ONE_GADGET_VERSION=1.10.0
 ARG GHIDRA_VERSION=12.1.2
 ARG GHIDRA_RELEASE_DATE=20260605
 ARG GHIDRA_SHA256=b62e81a0390618466c019c60d8c2f796ced2509c4c1aea4a37644a77272cf99d
@@ -17,6 +18,7 @@ RUN dpkg --add-architecture i386 && \
       gdb gdbserver gdb-multiarch lldb strace ltrace patchelf elfutils libc6-dbg \
       qemu-system-x86 qemu-user qemu-user-binfmt \
       python3 python3-pip python3-venv python3-dev python3-setuptools python3-poetry \
+      ruby ruby-dev \
       openjdk-21-jdk-headless \
       libasan8 libubsan1 liblsan0 libtsan2 \
       libc6:i386 libstdc++6:i386 libgcc-s1:i386 zlib1g:i386 lib32z1 \
@@ -80,6 +82,7 @@ COPY README.md ./
 COPY paomcp ./paomcp
 COPY paocli ./paocli
 COPY tests/docker_stage5_smoke.py ./tests/docker_stage5_smoke.py
+COPY tests/docker_stage6_9_smoke.py ./tests/docker_stage6_9_smoke.py
 COPY paomcp.service /etc/systemd/system/paomcp.service
 
 # Create workspace, persistent runtime, and image-owned helper roots.
@@ -93,6 +96,12 @@ RUN useradd -m -s /bin/bash pao && \
 
 RUN wget https://github.com/io12/pwninit/releases/download/3.3.1/pwninit -O /usr/local/bin/pwninit && \
     chmod +x /usr/local/bin/pwninit
+
+RUN gem install --no-document one_gadget -v "${ONE_GADGET_VERSION}" && \
+    test "$(ruby -e 'puts Gem::Specification.find_by_name("one_gadget").version')" = "${ONE_GADGET_VERSION}" && \
+    one_gadget --version
+
+ENV PAO_ONE_GADGET_VERSION=${ONE_GADGET_VERSION}
 
 # Enable paomcp systemd service for VM boot (firecrackers)
 RUN mkdir -p /etc/systemd/system/multi-user.target.wants && \

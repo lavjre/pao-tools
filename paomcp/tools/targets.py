@@ -50,7 +50,8 @@ def register(mcp: FastMCP) -> None:
         * ``attach_pid``: ``pid`` (required, positive int).
         * ``gdbserver`` / ``tcp_remote``: host and port plus the provider's
           process or connection settings.
-        * ``ssh``: host, username, authentication and optional remote paths.
+        * ``ssh``: ``host``, ``ssh_user``, key/password authentication and
+          optional ``ssh_known_hosts_path``. Unknown host keys are rejected.
         * ``docker``: container/image and command settings.
         * ``qemu_user`` / ``qemu_system``: emulator plus binary, rootfs,
           kernel, machine and GDB-listen settings as applicable.

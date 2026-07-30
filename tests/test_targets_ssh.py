@@ -18,6 +18,7 @@ from paomcp.tools.backends.targets import (
     TargetRegistry,
     TargetSpec,
     TargetState,
+    _default_ssh_client_factory,
 )
 
 
@@ -80,8 +81,12 @@ class _FakeSshClient:
         }
         self._active = active
         self.connect_calls: List[Dict[str, Any]] = []
+        self.loaded_host_key_files: List[str] = []
         self.closed = False
         self._sftp: Optional[_FakeSftp] = None
+
+    def load_host_keys(self, path: str) -> None:
+        self.loaded_host_key_files.append(path)
 
     def connect(self, **kwargs: Any) -> None:
         self.connect_calls.append(kwargs)
@@ -142,11 +147,111 @@ class TestSshSpecValidation:
         assert spec.kind == TargetKind.SSH
         assert spec.ssh_password == "p"
 
+    def test_accepts_explicit_known_hosts_path(self) -> None:
+        spec = TargetSpec.from_config(
+            "ssh",
+            {
+                "host": "h",
+                "ssh_user": "u",
+                "ssh_password": "p",
+                "ssh_known_hosts_path": "/workspace/known_hosts",
+            },
+        )
+        assert spec.ssh_known_hosts_path == "/workspace/known_hosts"
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle over the fake client
 # ---------------------------------------------------------------------------
 class TestSshLifecycle:
+    def test_default_factory_rejects_unknown_host_keys(self, monkeypatch) -> None:
+        import paramiko
+
+        class _FactoryClient:
+            def __init__(self) -> None:
+                self.system_keys_loaded = False
+                self.policy: Any = None
+
+            def load_system_host_keys(self) -> None:
+                self.system_keys_loaded = True
+
+            def set_missing_host_key_policy(self, policy: Any) -> None:
+                self.policy = policy
+
+        expected_policy = object()
+        fake_client = _FactoryClient()
+        monkeypatch.setattr(paramiko, "SSHClient", lambda: fake_client)
+        monkeypatch.setattr(paramiko, "RejectPolicy", lambda: expected_policy)
+
+        client = _default_ssh_client_factory()
+
+        assert client is fake_client
+        assert fake_client.system_keys_loaded is True
+        assert fake_client.policy is expected_policy
+
+    def test_explicit_known_hosts_file_is_loaded_before_connect(self, tmp_path) -> None:
+        fake = _FakeSshClient()
+        registry = _build_registry(fake)
+        known_hosts = tmp_path / "known_hosts"
+        known_hosts.write_text("ctf.remote ssh-ed25519 AAAATEST\n", encoding="utf-8")
+        spec = TargetSpec.from_config(
+            "ssh",
+            {
+                "host": "ctf.remote",
+                "ssh_user": "player",
+                "ssh_key_path": "/tmp/id_rsa",
+                "ssh_known_hosts_path": str(known_hosts),
+            },
+            session_id="sess",
+        )
+        handle = registry.create(spec)
+
+        response = registry.connect_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is True
+        assert fake.loaded_host_key_files == [str(known_hosts.resolve())]
+        assert fake.connect_calls
+
+    def test_missing_explicit_known_hosts_file_fails_closed(self, tmp_path) -> None:
+        fake = _FakeSshClient()
+        registry = _build_registry(fake)
+        missing = tmp_path / "missing-known-hosts"
+        spec = TargetSpec.from_config(
+            "ssh",
+            {
+                "host": "ctf.remote",
+                "ssh_user": "player",
+                "ssh_key_path": "/tmp/id_rsa",
+                "ssh_known_hosts_path": str(missing),
+            },
+            session_id="sess",
+        )
+        handle = registry.create(spec)
+
+        response = registry.connect_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is False
+        assert "known_hosts" in response["parsed"]["error"]
+        assert fake.connect_calls == []
+        assert fake.closed is True
+
+    def test_failed_handshake_closes_unretained_client(self) -> None:
+        class _FailingSshClient(_FakeSshClient):
+            def connect(self, **kwargs: Any) -> None:
+                self.connect_calls.append(kwargs)
+                raise OSError("injected handshake failure")
+
+        fake = _FailingSshClient()
+        registry = _build_registry(fake)
+        handle = registry.create(_ssh_spec())
+
+        response = registry.connect_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is False
+        assert "handshake failure" in response["parsed"]["error"]
+        assert fake.connect_calls
+        assert fake.closed is True
+
     def test_start_connects_and_probes_transport(self) -> None:
         fake = _FakeSshClient()
         registry = _build_registry(fake)

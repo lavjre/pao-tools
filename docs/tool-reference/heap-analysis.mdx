@@ -77,16 +77,20 @@ The parsed result includes:
 - component status when a mapping or libc probe was unavailable.
 
 `get_allocator_capabilities` also reports pwndbg runtime primitives known to the
-current debugger.
+current debugger. The response deliberately separates two capability layers:
 
-<Warning>
-  The current `get_allocator_capabilities` metadata still reports the typed glibc
-  inspection API as planned/unavailable. That field has not yet been updated after
-  the typed glibc tools shipped. This is a known metadata mismatch: use
-  `detect_allocator`, the registered tool list, and each inspection tool's own
-  `supported`/`verdict` fields for the effective capability. Do not interpret the
-  stale field as proof that the 14 glibc inspection/snapshot tools are absent.
-</Warning>
+- `typed_inspection_api.available=true` and `status="supported"` for glibc,
+  because the shipped parser reads allocator structures through GDB memory and
+  expression APIs; and
+- `runtime_commands`, which reports optional pwndbg command coverage as
+  `supported`, `partial`, `unsupported`, or `unknown`.
+
+Missing pwndbg heap commands therefore do not hide or disable the typed glibc
+surface. Conversely, a discovered `jemalloc` or `mallocng` command is useful
+raw evidence but does not imply that a typed internals parser exists. Musl,
+jemalloc, Scudo, and unknown families currently report
+`typed_inspection_api.available=false`; their individual inspection calls
+return a typed unsupported verdict instead of applying glibc layouts.
 
 ## Chunks and addresses
 

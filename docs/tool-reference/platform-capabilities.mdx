@@ -68,20 +68,35 @@ Use active probing only when exact helper versions are needed:
         "status": "ready",
         "ready": true
       },
-      "remote_tcp": {
+      "attach_pid": {
         "available": true,
-        "typed_api": false,
-        "status": "partial",
-        "ready": false
+        "typed_api": true,
+        "status": "ready",
+        "ready": true,
+        "requires": ["debugger"]
+      },
+      "existing_pid": {
+        "alias_for": "attach_pid",
+        "deprecated": true
       }
     },
+    "target_provider_kinds": [
+      "attach_pid",
+      "docker",
+      "gdbserver",
+      "local_process",
+      "qemu_system",
+      "qemu_user",
+      "ssh",
+      "tcp_remote"
+    ],
     "allocators": {
       "glibc_ptmalloc": {
         "available": true,
-        "typed_api": false,
+        "typed_api": true,
         "primitive_status": "ready",
-        "status": "partial",
-        "ready": false,
+        "status": "ready",
+        "ready": true,
         "runtime_primitives": ["arena", "bins", "heap"]
       }
     }
@@ -99,30 +114,46 @@ Use active probing only when exact helper versions are needed:
 component (package metadata, debugger, Ghidra, or paocli) is unavailable; the report
 still describes usable partial capabilities and provides actionable `warnings`.
 
-Provider and allocator entries distinguish an installed runtime primitive from a
-typed API. However, the current platform manifest still uses its original static
-S1 capability matrix and can under-report typed S6 heap and S8 provider support.
-Use MCP tool discovery plus `get_target_capabilities` for a created target as the
-source of truth for those registered tool families.
+`feature_groups.target_provider_kinds` is the canonical S8 provider set accepted
+by `create_target`: `local_process`, `attach_pid`, `gdbserver`, `tcp_remote`,
+`ssh`, `docker`, `qemu_user`, and `qemu_system`. Each canonical provider reports
+`typed_api=true` because its typed implementation ships with the server.
+Runtime readiness is separate:
 
-<Warning>
-  `typed_api=false` in this aggregate manifest does not currently prove that the
-  corresponding S6/S8 tools are absent. The 16 heap tools and eight target provider
-  kinds are registered, but this legacy readiness matrix has not yet been wired to
-  router registration. Runtime dependencies can still make an individual provider
-  or allocator operation unavailable.
-</Warning>
+- `available` records whether the provider's required executable, Python module,
+  emulator family, or debugger is present;
+- `missing_requirements` names dependencies that discovery could not satisfy;
+- `ready` is true only when the provider can run in the current environment,
+  including debugger readiness for providers that attach GDB; and
+- `status` summarizes that state as `unavailable`, `partial`, or `ready`.
 
-Every provider and allocator has a stable `status`:
+The `providers` object retains compatibility metadata that is not part of the
+canonical provider-kind list. `existing_pid` is a deprecated alias for
+`attach_pid`. `remote_tcp` is the deprecated paocli exploit-driver primitive,
+not an alias for the `tcp_remote` GDB provider, and therefore remains
+`typed_api=false`. `paocli_driver` likewise describes the exploit-session
+integration rather than a `TargetRegistry` provider. New target workflows
+should use names from `target_provider_kinds`.
+
+Allocator entries use the same separation. `glibc_ptmalloc` reports
+`typed_api=true` because the S6 parser reads heap structures through typed GDB
+memory/expression operations; its typed readiness therefore depends on the
+debugger, not on whether every optional pwndbg heap command was discovered.
+Jemalloc and musl mallocng may expose raw runtime primitives while still
+reporting `typed_api=false`, because typed internals parsers have not shipped
+for those families.
+
+Every provider and allocator has a stable aggregate `status`:
 
 - `unavailable`: its runtime dependency or primitive is missing;
 - `partial`: at least one primitive exists, but the complete typed API is not ready;
 - `ready`: the required runtime and typed API are both available.
 
 Allocator `primitive_status` separately reports whether the expected pwndbg command
-set is unavailable, partial, or complete. Treat its current typed-readiness fields
-as legacy metadata and inspect the dedicated heap tools directly. `existing_pid`
-is only ready when the debugger compatibility gate is ready.
+set is unavailable, partial, or complete. It is raw-command evidence, not a
+substitute for `typed_api` or the dedicated allocator capability response.
+`get_target_capabilities(target_id=...)` remains the authoritative operation
+matrix for one created target.
 
 ## Probe safety and evidence
 

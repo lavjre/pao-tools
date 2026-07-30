@@ -139,6 +139,7 @@ class TargetSpec:
     ssh_user: Optional[str] = None
     ssh_key_path: Optional[str] = None
     ssh_password: Optional[str] = None
+    ssh_known_hosts_path: Optional[str] = None
     # Docker
     docker_image: Optional[str] = None
     docker_workdir: Optional[str] = None
@@ -185,6 +186,7 @@ class TargetSpec:
             "ssh_user",
             "ssh_key_path",
             "ssh_password",
+            "ssh_known_hosts_path",
             "docker_image",
             "docker_workdir",
             "qemu_binary",
@@ -847,16 +849,12 @@ class SshClientFactory(Protocol):
 
 
 def _default_ssh_client_factory() -> Any:
-    """Return a real paramiko ``SSHClient`` with a permissive host-key policy.
-
-    The permissive policy is deliberate for research workflows against
-    scratch VMs; a production caller should replace this factory with
-    a strict-host-key one.
-    """
+    """Return a real paramiko client that rejects unknown host keys."""
     import paramiko  # type: ignore[import-untyped]
 
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
     return client
 
 
@@ -896,19 +894,34 @@ class SshProvider:
                 return existing
             spec = handle.spec
             client = self._client_factory()
-            kwargs: Dict[str, Any] = {
-                "hostname": spec.host,
-                "port": int(spec.port) if spec.port else 22,
-                "username": spec.ssh_user,
-                "timeout": self._connect_timeout_sec,
-                "allow_agent": False,
-                "look_for_keys": False,
-            }
-            if spec.ssh_key_path:
-                kwargs["key_filename"] = spec.ssh_key_path
-            if spec.ssh_password:
-                kwargs["password"] = spec.ssh_password
-            client.connect(**kwargs)
+            try:
+                if spec.ssh_known_hosts_path:
+                    known_hosts_path = os.path.abspath(spec.ssh_known_hosts_path)
+                    if not os.path.isfile(known_hosts_path):
+                        raise TargetError(
+                            "ssh_known_hosts_path must name a readable "
+                            "known_hosts file"
+                        )
+                    client.load_host_keys(known_hosts_path)
+                kwargs: Dict[str, Any] = {
+                    "hostname": spec.host,
+                    "port": int(spec.port) if spec.port else 22,
+                    "username": spec.ssh_user,
+                    "timeout": self._connect_timeout_sec,
+                    "allow_agent": False,
+                    "look_for_keys": False,
+                }
+                if spec.ssh_key_path:
+                    kwargs["key_filename"] = spec.ssh_key_path
+                if spec.ssh_password:
+                    kwargs["password"] = spec.ssh_password
+                client.connect(**kwargs)
+            except Exception:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                raise
             self._clients[handle.target_id] = client
             return client
 
@@ -1554,6 +1567,7 @@ class TargetRegistry:
             TargetKind.QEMU_SYSTEM: QemuSystemProvider(),
         }
         self._lock = threading.RLock()
+        self._closed = False
 
     # ------------------------------------------------------------------
     # Registration
@@ -1589,6 +1603,8 @@ class TargetRegistry:
     # ------------------------------------------------------------------
     def create(self, spec: TargetSpec) -> TargetHandle:
         with self._lock:
+            if self._closed:
+                raise TargetError("target registry is closed")
             if not self.has_provider(spec.kind):
                 raise TargetError(
                     f"provider for kind '{spec.kind.value}' is not registered"
@@ -1635,9 +1651,18 @@ class TargetRegistry:
         Errors are collected (never re-raised) so a caller's own
         cleanup is not aborted by a stubborn subprocess.
         """
+        with self._lock:
+            handles = [
+                handle
+                for handle in self._targets.values()
+                if handle.spec.session_id == session_id
+            ]
+            for handle in handles:
+                self._targets.pop(handle.target_id, None)
+
         stopped: List[str] = []
         errors: List[Dict[str, Any]] = []
-        for handle in self.list(session_id=session_id):
+        for handle in handles:
             try:
                 provider = self.provider_for(handle.kind)
                 provider.stop(handle, timeout_sec=stop_timeout_sec)
@@ -1650,11 +1675,52 @@ class TargetRegistry:
                         "type": type(exc).__name__,
                     }
                 )
-            finally:
-                self.remove(handle.target_id)
         return {
             "session_id": session_id,
             "stopped": stopped,
+            "errors": errors,
+        }
+
+    def close_all(
+        self,
+        *,
+        stop_timeout_sec: float = DEFAULT_TARGET_STOP_TIMEOUT_SEC,
+    ) -> Dict[str, Any]:
+        """Release every retained target without aborting on one failure.
+
+        Provider ``stop`` implementations encode the ownership boundary:
+        locally spawned processes, containers, and QEMU instances are
+        terminated; attach-PID and TCP-remote targets are only detached;
+        SSH transports are closed.  The registry is drained atomically
+        before invoking providers so every target retained when shutdown
+        begins is processed exactly once and no failed provider can leave
+        a stale registry entry behind.
+        """
+        with self._lock:
+            self._closed = True
+            handles = list(self._targets.values())
+            self._targets.clear()
+
+        closed: List[str] = []
+        errors: List[Dict[str, Any]] = []
+        for handle in handles:
+            try:
+                provider = self.provider_for(handle.kind)
+                provider.stop(handle, timeout_sec=stop_timeout_sec)
+                closed.append(handle.target_id)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "target_id": handle.target_id,
+                        "kind": handle.kind.value,
+                        "error": str(exc),
+                        "type": type(exc).__name__,
+                    }
+                )
+
+        return {
+            "processed": len(handles),
+            "closed": closed,
             "errors": errors,
         }
 
