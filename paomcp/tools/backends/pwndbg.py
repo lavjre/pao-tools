@@ -12,6 +12,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from paomcp.tools.backends.backend import BackendSpec
 from paomcp.tools.backends.compatibility import PwndbgCompatibility
 from paomcp.tools.backends.crash import CrashTriage
 from paomcp.tools.backends.debugger import DebuggerOperations
@@ -79,6 +80,7 @@ class PwndbgTools:
         gdb_controller: GdbController,
         session_state: SessionState,
         *,
+        backend: Optional[BackendSpec] = None,
         max_memory_write_bytes: Optional[int] = None,
         max_memory_patches: Optional[int] = None,
         max_memory_patch_bytes: Optional[int] = None,
@@ -89,9 +91,14 @@ class PwndbgTools:
         Args:
             gdb_controller: GDB controller instance
             session_state: Session state manager
+            backend: resolved debugger backend spec; ``None`` (or a
+                ``gdb-mi3`` protocol) enables the full pwndbg surface, while
+                an ``lldb-cli`` backend gates pwndbg-only inspection behind a
+                typed "requires the gdb/pwndbg backend" verdict.
         """
         self.gdb = gdb_controller
         self.session = session_state
+        self.backend = backend
         self.compatibility = PwndbgCompatibility(gdb_controller)
         self.inspection = PwndbgInspection(gdb_controller)
         self.debugger = DebuggerOperations(
@@ -111,6 +118,7 @@ class PwndbgTools:
             self.debugger,
             session_state.session_id,
             binary_path_provider=lambda: self.session.binary_path,
+            backend=backend,
         )
         self.max_memory_patches = (
             max_memory_patches
@@ -152,6 +160,29 @@ class PwndbgTools:
             logger.exception(
                 "GDB initialize() failed during tool init; will retry on demand"
             )
+
+    @property
+    def _is_lldb(self) -> bool:
+        backend = getattr(self, "backend", None)
+        return backend is not None and getattr(backend, "protocol", None) == "lldb-cli"
+
+    def _backend_gate(
+        self, capability: str, command: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Return a typed verdict dict when the pwndbg surface is unavailable."""
+        if not self._is_lldb:
+            return None
+        backend_name = getattr(self.backend, "name", "lldb")
+        return {
+            "success": False,
+            "command": command or capability,
+            "state": self.gdb.get_state(),
+            "type": "GdbOnlyBackendError",
+            "error": (
+                f"'{capability}' requires the gdb/pwndbg backend; "
+                f"session uses {backend_name}"
+            ),
+        }
 
     def _advance_inferior_generation(self, reason: str) -> None:
         """Invalidate active patches whenever address-space identity can change."""
@@ -223,9 +254,38 @@ class PwndbgTools:
             self._advance_inferior_generation(reason)
 
     def get_debugger_capabilities(self, refresh: bool = False) -> Dict[str, Any]:
-        """Return typed pwndbg/GDB runtime compatibility information."""
+        """Return typed pwndbg/GDB runtime compatibility information.
+
+        On an lldb session this returns a degraded success report: the rich
+        pwndbg surface is unavailable, but the caller still learns which
+        backend the session drives and what backends exist on the host.
+        """
+        from paomcp.tools.backends.backend import available_backends
+
+        if self._is_lldb:
+            backend_name = getattr(self.backend, "name", "lldb")
+            return {
+                "success": True,
+                "ready": False,
+                "parser_version": "1",
+                "backend": (
+                    self.backend.to_dict() if self.backend else {"name": backend_name}
+                ),
+                "available_backends": available_backends(),
+                "warning": (
+                    "session drives the lldb backend; the rich pwndbg tool "
+                    "surface (heap parsers, elf runtime, crash triage) requires "
+                    "the gdb/pwndbg backend"
+                ),
+            }
         self.gdb.initialize()
-        return self.compatibility.get_capabilities(refresh=refresh)
+        report = self.compatibility.get_capabilities(refresh=refresh)
+        if isinstance(report, dict):
+            report["backend"] = (
+                self.backend.to_dict() if self.backend else {"name": "gdb"}
+            )
+            report["available_backends"] = available_backends()
+        return report
 
     def list_pwndbg_commands(
         self,
@@ -233,11 +293,17 @@ class PwndbgTools:
         query: Optional[str] = None,
     ) -> Dict[str, Any]:
         """List installed pwndbg commands with parsed and raw evidence."""
+        gate = self._backend_gate("list_pwndbg_commands")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self.compatibility.list_commands(category=category, query=query)
 
     def get_pwndbg_command_help(self, command_name: str) -> Dict[str, Any]:
         """Return raw help for one validated pwndbg command."""
+        gate = self._backend_gate("get_pwndbg_command_help")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self.compatibility.get_help(command_name)
 
@@ -250,6 +316,9 @@ class PwndbgTools:
 
     def analyze_elf(self, binary_path: str) -> Dict[str, Any]:
         """Load and inspect an ELF using checksec, sections, and PLT parsers."""
+        gate = self._backend_gate("analyze_elf")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         if not self.session.binary_loaded or self.session.binary_path != binary_path:
             load_result = self.set_file(binary_path)
@@ -266,6 +335,9 @@ class PwndbgTools:
 
     def checksec(self, binary_path: str) -> Dict[str, Any]:
         """Return typed mitigation information for an ELF path."""
+        gate = self._backend_gate("checksec")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(self.inspection.checksec(binary_path))
 
@@ -279,6 +351,9 @@ class PwndbgTools:
         all_plt_symbols: bool = False,
     ) -> Dict[str, Any]:
         """Inspect typed GOT/PLT entries for the selected binary/runtime."""
+        gate = self._backend_gate("inspect_got_plt")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         result = self.inspection.inspect_got_plt(
             symbol_filter=symbol_filter,
@@ -298,6 +373,9 @@ class PwndbgTools:
         gaps: bool = False,
     ) -> Dict[str, Any]:
         """Return parsed virtual memory mappings."""
+        gate = self._backend_gate("memory_maps")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(
             self.inspection.memory_maps(
@@ -310,16 +388,25 @@ class PwndbgTools:
 
     def list_threads(self, limit: Optional[int] = None) -> Dict[str, Any]:
         """Return parsed pwndbg thread information."""
+        gate = self._backend_gate("list_threads")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(self.inspection.threads(limit=limit))
 
     def get_process_info(self) -> Dict[str, Any]:
         """Return parsed process metadata from procinfo."""
+        gate = self._backend_gate("get_process_info")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(self.inspection.process_info())
 
     def inspect_libc(self, include_link_map: bool = True) -> Dict[str, Any]:
         """Return parsed libc metadata and optional dynamic link map."""
+        gate = self._backend_gate("inspect_libc")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(
             self.inspection.inspect_libc(include_link_map=include_link_map)
@@ -327,6 +414,9 @@ class PwndbgTools:
 
     def inspect_address(self, address: str = "$pc") -> Dict[str, Any]:
         """Return parsed mapping, offsets, and sections for an address."""
+        gate = self._backend_gate("inspect_address")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_inspection(self.inspection.address_info(address))
 
@@ -695,6 +785,9 @@ class PwndbgTools:
         step: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Search mapped memory through pwndbg with parsed matches."""
+        gate = self._backend_gate("search_memory")
+        if gate is not None:
+            return gate
         self.gdb.initialize()
         return self._record_debugger(
             self.debugger.search_memory(

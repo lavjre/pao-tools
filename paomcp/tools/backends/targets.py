@@ -159,6 +159,8 @@ class TargetSpec:
     arch: Optional[str] = None
     platform: Optional[str] = None
     notes: Optional[str] = None
+    # Debugger backend request ("gdb" | "lldb" | "auto") for the owning session
+    backend: Optional[str] = None
 
     @classmethod
     def from_config(
@@ -200,6 +202,7 @@ class TargetSpec:
             "arch",
             "platform",
             "notes",
+            "backend",
         ):
             if attr in config and config[attr] is not None:
                 setattr(spec, attr, str(config[attr]))

@@ -400,9 +400,10 @@ class _StubbornDestroyedGdb(_FakeGdb):
 
 
 class _FakePwndbgTools:
-    def __init__(self, gdb: _FakeGdb, state: Any) -> None:
+    def __init__(self, gdb: _FakeGdb, state: Any, *, backend: Any = None) -> None:
         self.gdb = gdb
         self.state = state
+        self.backend = backend
 
 
 def test_debug_session_registry_enforces_limit_without_breaking_idempotency(

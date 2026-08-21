@@ -34,6 +34,7 @@ def register(mcp: FastMCP) -> None:
         kind: str,
         config: Optional[Mapping[str, Any]] = None,
         session_id: Optional[str] = None,
+        backend: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Create a typed target descriptor for a future attach / connect.
@@ -65,12 +66,20 @@ def register(mcp: FastMCP) -> None:
 
         Creating a target does not start it -- call ``start_target``
         before ``attach_debugger``.
+
+        Args:
+            backend: Debugger backend request for the owning session:
+                "gdb", "lldb", or "auto". Stored on the target descriptor
+                and applied when the target's session is (re)created.
         """
         services = get_services(ctx)
         resolved_session = _resolve_session_id(services, session_id)
+        merged_config = dict(config) if config else {}
+        if backend is not None:
+            merged_config["backend"] = backend
         return services.target_registry.create_target_response(
             kind=kind,
-            config=dict(config) if config else None,
+            config=merged_config or None,
             session_id=resolved_session,
         )
 
@@ -293,6 +302,7 @@ def register(mcp: FastMCP) -> None:
     async def attach_debugger(
         target_id: str,
         session_id: Optional[str] = None,
+        backend: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Attach the debugger session's GDB to the target.
@@ -302,11 +312,20 @@ def register(mcp: FastMCP) -> None:
         ``GdbController`` gets the attach.  Falls back to the default
         debug session when omitted.  After a successful attach the
         target moves to ``state = "attached"``.
+
+        Args:
+            backend: Debugger backend request ("gdb", "lldb", "auto"). When a
+                session does not exist yet, supplying a backend creates it with
+                that backend; when the session exists, the request must match
+                its active backend.
         """
         services = get_services(ctx)
         resolved_session = _resolve_session_id(services, session_id)
         session = resolve_debug_session(
-            services, session_id=resolved_session, create_if_missing=False
+            services,
+            session_id=resolved_session,
+            create_if_missing=backend is not None,
+            backend=backend,
         )
 
         def _do_attach() -> Dict[str, Any]:

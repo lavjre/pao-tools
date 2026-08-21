@@ -18,13 +18,25 @@ def register(mcp: FastMCP) -> None:
     @catch_errors()
     async def create_debug_session(
         session_id: Optional[str] = None,
+        backend: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Create or return a debug session by id."""
+        """Create or return a debug session by id.
+
+        Args:
+            session_id: Optional explicit session id; auto-generated if omitted.
+            backend: Debugger backend request: "gdb", "lldb", or "auto". When
+                omitted the session uses ``PAO_DEBUGGER_BACKEND`` (default gdb).
+                If the session already exists, the requested backend must match
+                the session's active backend.
+        """
         services = get_services(ctx)
         session = resolve_debug_session(
-            services, session_id=session_id, create_if_missing=True
+            services,
+            session_id=session_id,
+            create_if_missing=True,
+            backend=backend,
         )
         return {"success": True, "session": session.to_dict()}
 

@@ -1,9 +1,18 @@
 """Internal backend adapters used by MCP tool registrations."""
 
+from .backend import (
+    BackendSpec,
+    BackendUnavailableError,
+    UnknownBackendError,
+    available_backends,
+    build_controller,
+    resolve_backend,
+)
 from .decompiler import GhidraDecompiler
 from .crash import CrashTriage
 from .git import GitTools
 from .gdb import GdbController
+from .lldb import LldbController
 from .heap import (
     AllocatorDiscovery,
     ArenaLayoutResolver,
@@ -13,6 +22,7 @@ from .heap import (
     HeapTools,
     TcacheLayoutResolver,
 )
+from .heap_techniques import GlibcTechniqueAnalyzer
 from .pwndbg import PwndbgTools
 from .python import PythonTools
 from .research import (
@@ -57,7 +67,14 @@ from .targets import (
 )
 
 __all__ = [
+    "BackendSpec",
+    "BackendUnavailableError",
+    "UnknownBackendError",
+    "available_backends",
+    "build_controller",
+    "resolve_backend",
     "GdbController",
+    "LldbController",
     "CrashTriage",
     "AllocatorDiscovery",
     "ArenaLayoutResolver",
@@ -66,6 +83,7 @@ __all__ = [
     "GlibcHeap",
     "HeapTools",
     "TcacheLayoutResolver",
+    "GlibcTechniqueAnalyzer",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",

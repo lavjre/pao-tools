@@ -13,6 +13,7 @@ from fastmcp import Context
 
 from paomcp.api import ToolError, ToolMeta, ToolResponse
 from paomcp.artifacts import ArtifactStore
+from paomcp.tools.backends.backend import validate_backend_name
 from paomcp.operations import bind_operation, reset_operation
 from paomcp.paopipe import PaoPipe
 from paomcp.services import AppServices
@@ -463,20 +464,36 @@ def resolve_debug_session(
     services: AppServices,
     session_id: Optional[str] = None,
     create_if_missing: bool = True,
+    backend: Optional[str] = None,
 ) -> DebugSession:
     registry = require_session_registry(services)
 
     if session_id is not None:
         existing = registry.get_session(session_id)
         if existing:
+            if backend:
+                _assert_backend_matches(existing, backend)
             return existing
         if not create_if_missing:
             raise SessionNotFoundError(f"Debug session '{session_id}' not found")
-        return registry.create_session(session_id)
+        return registry.create_session(session_id, backend=backend)
 
     if not create_if_missing:
         raise SessionNotFoundError("session_id is required")
-    return registry.ensure_session()
+    return registry.ensure_session(backend=backend)
+
+
+def _assert_backend_matches(session: DebugSession, backend: str) -> None:
+    """Validate a requested backend against an existing session's backend."""
+    validate_backend_name(backend)
+    if backend == "auto":
+        return
+    current = getattr(session.backend, "name", "gdb") if session.backend else "gdb"
+    if current != backend:
+        raise ValueError(
+            f"Debug session '{session.session_id}' already runs the {current} "
+            f"backend; requested {backend}"
+        )
 
 
 def sync_session_pid(session: DebugSession) -> None:

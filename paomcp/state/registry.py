@@ -10,7 +10,13 @@ import threading
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from paomcp.tools.backends import GdbController, PwndbgTools
+from paomcp.tools.backends import (
+    BackendSpec,
+    GdbController,
+    LldbController,
+    PwndbgTools,
+    resolve_backend,
+)
 from paomcp.state.session import SessionState
 from paomcp.utils.paths import RuntimePaths, validate_session_id
 
@@ -31,6 +37,35 @@ class SessionNotFoundError(LookupError):
     """Raised when a required debugger session does not exist."""
 
 
+def _build_controller_for_spec(spec: BackendSpec) -> Any:
+    """Construct the controller for a resolved backend spec.
+
+    Controller classes are resolved as module-global names at call time (not
+    imported at module load) so the existing tests that monkeypatch
+    ``registry_module.GdbController`` / ``registry_module.LldbController``
+    keep working: this factory is the one construction path they intercept.
+
+    The executable is only passed when it differs from the controller's
+    default, preserving the historical zero-argument construction shape
+    (``GdbController()``) that monkeypatched fakes depend on.
+    """
+    if spec.protocol == "lldb-cli":
+        if spec.executable and spec.executable != "pwndbg-lldb":
+            return LldbController(executable=spec.executable)
+        return LldbController()
+    if spec.executable and spec.executable != "pwndbg":
+        return GdbController(pwndbg_executable=spec.executable)
+    return GdbController()
+
+
+def _default_backend_resolver(*, session_backend: Optional[str]) -> BackendSpec:
+    """Resolve the backend honoring ``PAO_DEBUGGER_BACKEND`` from the env."""
+    return resolve_backend(
+        env_backend=os.environ.get("PAO_DEBUGGER_BACKEND"),
+        session_backend=session_backend,
+    )
+
+
 @dataclass
 class DebugSession:
     """Container for a full debugger session and associated resources."""
@@ -40,6 +75,7 @@ class DebugSession:
     gdb: GdbController
     state: SessionState
     tools: PwndbgTools
+    backend: Optional[BackendSpec] = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     lock: threading.RLock = field(default_factory=threading.RLock)
     driver_pid: Optional[int] = None
@@ -53,7 +89,7 @@ class DebugSession:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize lightweight metadata for API responses."""
-        return {
+        base: Dict[str, Any] = {
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat(),
             "runtime_dir": self.runtime_dir,
@@ -66,12 +102,22 @@ class DebugSession:
             "closing": self.closing,
             "closed": self.closed,
         }
+        if self.backend is not None:
+            base["backend"] = self.backend.name
+            base["protocol"] = self.backend.protocol
+            base["backend_executable"] = self.backend.executable
+        return base
 
 
 class DebugSessionRegistry:
     """Tracks independent debugger sessions keyed by session id."""
 
-    def __init__(self, runtime_paths: RuntimePaths, max_sessions: Optional[int] = None):
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        max_sessions: Optional[int] = None,
+        backend_resolver: Optional[Callable[..., BackendSpec]] = None,
+    ):
         self.runtime_paths = runtime_paths
         self.max_sessions = (
             DEFAULT_MAX_DEBUG_SESSIONS if max_sessions is None else max_sessions
@@ -82,6 +128,7 @@ class DebugSessionRegistry:
         self._tombstones: Dict[str, DebugSession] = {}
         self.default_session_id: Optional[str] = None
         self._lock = threading.RLock()
+        self._backend_resolver = backend_resolver or _default_backend_resolver
 
     def _new_session_id(self) -> str:
         return uuid.uuid4().hex[:12]
@@ -91,8 +138,15 @@ class DebugSessionRegistry:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def create_session(self, session_id: Optional[str] = None) -> DebugSession:
-        """Create (or return existing) debugger session by id."""
+    def create_session(
+        self, session_id: Optional[str] = None, *, backend: Optional[str] = None
+    ) -> DebugSession:
+        """Create (or return existing) debugger session by id.
+
+        ``backend`` is a ``gdb``/``lldb``/``auto`` request that is resolved
+        through the registry's backend resolver; ``None`` defers to the
+        resolver's default (env ``PAO_DEBUGGER_BACKEND``, then ``gdb``).
+        """
         chosen_id = (
             validate_session_id(session_id) if session_id else self._new_session_id()
         )
@@ -125,15 +179,17 @@ class DebugSessionRegistry:
                         )
 
                     runtime_dir = self._runtime_dir_for(chosen_id)
-                    gdb = GdbController()
+                    spec = self._backend_resolver(session_backend=backend)
+                    gdb = _build_controller_for_spec(spec)
                     state = SessionState(session_id=chosen_id)
-                    tools = PwndbgTools(gdb, state)
+                    tools = PwndbgTools(gdb, state, backend=spec)
                     new_session = DebugSession(
                         session_id=chosen_id,
                         runtime_dir=runtime_dir,
                         gdb=gdb,
                         state=state,
                         tools=tools,
+                        backend=spec,
                     )
                     try:
                         gdb.initialize()
@@ -353,13 +409,17 @@ class DebugSessionRegistry:
             )
         return True
 
-    def ensure_session(self, session_id: Optional[str] = None) -> DebugSession:
+    def ensure_session(
+        self, session_id: Optional[str] = None, *, backend: Optional[str] = None
+    ) -> DebugSession:
         """Return an existing session, creating if necessary."""
         if session_id:
             validated_id = validate_session_id(session_id)
             existing = self.get_session(validated_id)
             return (
-                existing if existing is not None else self.create_session(validated_id)
+                existing
+                if existing is not None
+                else self.create_session(validated_id, backend=backend)
             )
 
         with self._lock:
@@ -368,7 +428,7 @@ class DebugSessionRegistry:
             default = self.get_session(default_id)
             if default is not None:
                 return default
-        return self.create_session("default")
+        return self.create_session("default", backend=backend)
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         with self._lock:
