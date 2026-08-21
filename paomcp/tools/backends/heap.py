@@ -4889,6 +4889,23 @@ class HeapTools:
         self._libmalloc_analyzer_cache = analyzer
         return analyzer
 
+    def _regions_tracker(self) -> Any:
+        """Resolve the JIT/memory-region tracker, getattr-cached on the facade.
+
+        Region tracking is allocator-independent: it never routes through
+        ``_analyzer()`` or family classification.  The lazy import keeps the
+        ``regions`` <-> ``heap`` module graph acyclic (``regions`` imports this
+        module for ``PARSER_VERSION``).
+        """
+        cached = getattr(self, "_regions_tracker_cache", None)
+        if cached is not None:
+            return cached
+        from .regions import JitRegionTracker  # noqa: PLC0415
+
+        tracker = JitRegionTracker(self)
+        self._regions_tracker_cache = tracker
+        return tracker
+
     @property
     def _is_lldb(self) -> bool:
         backend = getattr(self, "backend", None)
@@ -5196,6 +5213,37 @@ class HeapTools:
         if gate is not None:
             return gate
         return self._libmalloc_analyzer().classify_pointer(
+            address=address,
+            address_kind=address_kind,
+            cancellation_check=cancellation_check,
+        )
+
+    # ---- S6.12 JIT memory-region tracking (allocator-independent) ----
+    def scan_jit_regions(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Scan anonymous executable mappings (V8 JIT-heap candidates)."""
+        gate = self._gdb_gate("scan_jit_regions")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().scan_jit_regions(
+            cancellation_check=cancellation_check
+        )
+
+    def classify_memory_region(
+        self,
+        *,
+        address: str,
+        address_kind: str = "user",
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve the memory mapping containing an address."""
+        gate = self._gdb_gate("classify_memory_region")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().classify_memory_region(
             address=address,
             address_kind=address_kind,
             cancellation_check=cancellation_check,

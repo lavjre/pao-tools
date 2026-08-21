@@ -36,6 +36,8 @@ The implemented parser surface is intentionally asymmetric:
 | `get_heap_snapshot` | `session_id`, `identifier` | Retrieve a snapshot by ID or name |
 | `diff_heap_snapshots` | `session_id`, `before`, `after` | Compare chunk ledgers and arena summaries |
 | `link_snapshot_to_crash` | `session_id`, `identifier`, `crash_id` | Record an opaque crash ID on a retained heap snapshot |
+| `scan_jit_regions` | `session_id` | List anonymous executable mappings (V8/Chrome JIT-heap candidates) sorted by size, with executable/writable/anonymous/jit_candidate/rwx flags and a summary; allocator-independent |
+| `classify_memory_region` | `session_id`, `address` | Resolve the memory mapping containing an address; reports the region and its JIT/rwx classification flags |
 
 ## Recommended workflow
 

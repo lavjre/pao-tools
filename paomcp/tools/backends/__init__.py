@@ -32,6 +32,7 @@ from .libmalloc import (
 )
 from .macho import MachOFile, load_macho, parse_macho
 from .pwndbg import PwndbgTools
+from .regions import JIT_REGIONS_SCHEMA, MEMORY_REGION_SCHEMA, JitRegionTracker
 from .slub import SLUB_CACHE_SCHEMA, SLUB_FREELIST_SCHEMA, KernelSlab
 from .python import PythonTools
 from .research import (
@@ -102,6 +103,9 @@ __all__ = [
     "LIBMALLOC_ZONES_SCHEMA",
     "LIBMALLOC_ZONE_SCHEMA",
     "LIBMALLOC_POINTER_SCHEMA",
+    "JitRegionTracker",
+    "JIT_REGIONS_SCHEMA",
+    "MEMORY_REGION_SCHEMA",
     "MachOFile",
     "load_macho",
     "PwndbgTools",
