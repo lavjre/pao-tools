@@ -55,6 +55,18 @@ ALLOCATOR_CAPABILITIES_SCHEMA = "pao.allocator-capabilities.v1"
 # forward pointers.  Below this version the fd pointers are stored raw.
 SAFE_LINKING_MIN_VERSION: Tuple[int, int] = (2, 32)
 
+
+def encode_safe_linked(plain: int, position: int) -> int:
+    """glibc ``PROTECT_PTR`` encode: encoded = plain XOR (position >> 12).
+
+    Inverse of :meth:`GlibcBins.decode_safe_linked`.  ``position`` is the
+    address of the fd/next field itself (i.e. where the encoded pointer is
+    *stored*), not the address of the chunk that holds it -- match the
+    macro's ``pos`` argument exactly.
+    """
+    return plain ^ (position >> 12)
+
+
 # One allocator family maps to the set of pwndbg runtime commands that, when
 # present, let later stages read its internal structures.  This mirrors the
 # static readiness probe in ``paomcp.tools.backends.platform`` but is evaluated
@@ -4690,6 +4702,7 @@ class HeapTools:
         backend: Optional[BackendSpec] = None,
     ) -> None:
         self.backend = backend
+        self.session_id = session_id
         # TTL cache of the last detected allocator family (monotonic clock
         # seconds + family).  Consulted only by ``_analyzer()``; the glibc
         # components re-classify per call regardless, so a stale hit never
@@ -4748,6 +4761,7 @@ class HeapTools:
         # heap_analyzers both import this module at their top, so heap.py must
         # never import them at import time -- only here, when the facade is
         # actually built.
+        from .attack_helpers import GlibcAttackHelper  # noqa: PLC0415
         from .heap_analyzers import analyzer_for_family  # noqa: PLC0415
         from .heap_techniques import GlibcTechniqueAnalyzer  # noqa: PLC0415
 
@@ -4763,6 +4777,21 @@ class HeapTools:
             bins=self.bins,
             glibc=self.glibc,
             corruption=self.corruption,
+        )
+
+        # Attack helpers are the write-capable extension of the heap surface:
+        # they execute primitives against the live target via the guarded
+        # writer, gated behind an explicit ``dry_run=false`` opt-in.
+        self._attack_for_family = GlibcAttackHelper
+        self.attack = GlibcAttackHelper(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
+            glibc=self.glibc,
+            bins=self.bins,
+            history=self.history,
         )
 
     # How long a detected family stays cached on this facade.  Short on
@@ -4967,6 +4996,48 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.9 attack helpers ------------------------------------------
+    def poison_tcache_link(
+        self,
+        *,
+        victim_address: str,
+        target_address: str,
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Re-point a freed tcache chunk's ``fd`` (dry-run by default)."""
+        gate = self._gdb_gate("poison_tcache_link")
+        if gate is not None:
+            return gate
+        attack = getattr(self, "attack", None)
+        if attack is None:
+            # Facade assembled without ``__init__`` (the allocator-plugin
+            # test pattern); build a throwaway helper on the live components.
+            from .attack_helpers import GlibcAttackHelper  # noqa: PLC0415
+
+            attack = GlibcAttackHelper(
+                self.discovery.gdb,
+                self.discovery.inspection,
+                self.discovery.debugger,
+                self.session_id,
+                discovery=self.discovery,
+                glibc=self.glibc,
+                bins=self.bins,
+                history=self.history,
+            )
+        return attack.poison_tcache_link(
+            victim_address=victim_address,
+            target_address=target_address,
+            address_kind=address_kind,
+            dry_run=dry_run,
+            snapshot_before=snapshot_before,
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+
     # ---- S6.4 heap corruption classifier ------------------------------
     def classify_heap_corruption(
         self,
@@ -5133,6 +5204,7 @@ __all__ = [
     "DEFAULT_MAX_HEAP_SNAPSHOTS",
     "DEFAULT_MAX_HEAP_SNAPSHOT_BYTES",
     "SAFE_LINKING_MIN_VERSION",
+    "encode_safe_linked",
     "MUSL_MALLOCNG_MIN_VERSION",
     "ALLOCATOR_RUNTIME_COMMANDS",
     "PREV_INUSE",

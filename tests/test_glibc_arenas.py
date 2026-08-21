@@ -141,8 +141,9 @@ def make_arena_bytes(
 
 
 class ArenaFakeGdb:
-    def __init__(self, *, live: bool = True) -> None:
+    def __init__(self, *, live: bool = True, epoch: int = 1) -> None:
         self._live = live
+        self._epoch = epoch
         self.state = "stopped" if live else "exited"
         self._memory: Dict[int, bytes] = {}
         self.read_calls: List[tuple] = []
@@ -152,6 +153,9 @@ class ArenaFakeGdb:
 
     def get_inferior_pid(self) -> Optional[int]:
         return 4242 if self._live else None
+
+    def get_inferior_epoch(self) -> int:
+        return self._epoch
 
     def get_last_stop_record(self) -> Optional[Dict[str, Any]]:
         if not self._live:

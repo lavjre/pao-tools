@@ -6,6 +6,7 @@ from fastmcp import FastMCP
 def register_all_tools(mcp: FastMCP) -> None:
     from . import (
         artifacts,
+        attack,
         compatibility,
         crash,
         decompiler,
@@ -27,6 +28,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     )
 
     artifacts.register(mcp)
+    attack.register(mcp)
     compatibility.register(mcp)
     crash.register(mcp)
     decompiler.register(mcp)

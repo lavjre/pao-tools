@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 154
+    assert len(tools) == 155
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -80,6 +80,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "detect_uaf",
         "heap_technique_catalog",
     } <= tool_names
+    assert "poison_tcache_link" in tool_names
     assert {
         "capture_heap_snapshot",
         "list_heap_snapshots",
@@ -209,6 +210,7 @@ async def test_high_impact_mutations_expose_idempotency_keys():
         "select_frame",
         "write_memory",
         "revert_memory_patch",
+        "poison_tcache_link",
         "step_until_event",
         "run_until_crash",
         "capture_crash_snapshot",

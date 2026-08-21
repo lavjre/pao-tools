@@ -11,6 +11,7 @@ from .backend import (
 from .decompiler import GhidraDecompiler
 from .crash import CrashTriage
 from .git import GitTools
+from .attack_helpers import ATTACK_TCACHE_POISON_SCHEMA, GlibcAttackHelper
 from .gdb import GdbController
 from .lldb import LldbController
 from .heap import (
@@ -84,6 +85,8 @@ __all__ = [
     "HeapTools",
     "TcacheLayoutResolver",
     "GlibcTechniqueAnalyzer",
+    "GlibcAttackHelper",
+    "ATTACK_TCACHE_POISON_SCHEMA",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",
