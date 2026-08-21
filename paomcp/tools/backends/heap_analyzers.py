@@ -370,6 +370,12 @@ def analyzer_for_family(
         from .jemalloc import JemallocAnalyzer  # noqa: PLC0415
 
         return JemallocAnalyzer(facade)
+    if family == "libmalloc":
+        # Same lazy-import cycle: libmalloc.py imports heap.py; resolve the
+        # analyzer only when dispatch actually needs it.
+        from .libmalloc import LibmallocAnalyzer  # noqa: PLC0415
+
+        return LibmallocAnalyzer(facade)
     return UnsupportedAnalyzer(facade)
 
 

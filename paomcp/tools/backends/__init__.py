@@ -24,6 +24,13 @@ from .heap import (
     TcacheLayoutResolver,
 )
 from .heap_techniques import GlibcTechniqueAnalyzer
+from .libmalloc import (
+    LIBMALLOC_POINTER_SCHEMA,
+    LIBMALLOC_ZONE_SCHEMA,
+    LIBMALLOC_ZONES_SCHEMA,
+    LibmallocAnalyzer,
+)
+from .macho import MachOFile, load_macho, parse_macho
 from .pwndbg import PwndbgTools
 from .slub import SLUB_CACHE_SCHEMA, SLUB_FREELIST_SCHEMA, KernelSlab
 from .python import PythonTools
@@ -91,6 +98,12 @@ __all__ = [
     "KernelSlab",
     "SLUB_CACHE_SCHEMA",
     "SLUB_FREELIST_SCHEMA",
+    "LibmallocAnalyzer",
+    "LIBMALLOC_ZONES_SCHEMA",
+    "LIBMALLOC_ZONE_SCHEMA",
+    "LIBMALLOC_POINTER_SCHEMA",
+    "MachOFile",
+    "load_macho",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",

@@ -83,11 +83,19 @@ class TestAnalyzerForFamily:
         assert isinstance(analyzer, JemallocAnalyzer)
         assert analyzer.family == "jemalloc"
 
+    def test_libmalloc_resolves_to_libmalloc_analyzer(self):
+        from paomcp.tools.backends.libmalloc import LibmallocAnalyzer
+
+        analyzer = analyzer_for_family("libmalloc", facade=None)
+        assert isinstance(analyzer, LibmallocAnalyzer)
+        assert analyzer.family == "libmalloc"
+
     def test_all_analyzers_implement_the_full_surface(self):
         glibc = analyzer_for_family("glibc", facade=None)
         unsupported = analyzer_for_family("musl", facade=None)
         jemalloc = analyzer_for_family("jemalloc", facade=None)
-        for analyzer in (glibc, unsupported, jemalloc):
+        libmalloc = analyzer_for_family("libmalloc", facade=None)
+        for analyzer in (glibc, unsupported, jemalloc, libmalloc):
             assert isinstance(analyzer, AllocatorAnalyzer), type(analyzer)
             for name in ANALYZER_METHODS:
                 assert callable(getattr(analyzer, name)), name

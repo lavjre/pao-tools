@@ -243,6 +243,119 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def inspect_libmalloc_zones(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List every libmalloc zone (Apple target) with its tables.
+
+        Reads ``malloc_zone_t`` + ``malloc_introspection_t`` structures out of
+        the live inferior: zone names, function tables, and the introspection
+        (debugger/statistics) table per zone.  Discovery prefers the
+        ``_malloc_zones`` / ``_num_zones`` registry and falls back to the
+        default zone when those symbols are unavailable.  Also reports
+        best-effort Mach-O metadata for the main binary (``binary.is_macho``).
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_libmalloc_zones(
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def inspect_malloc_zone(
+        session_id: str,
+        zone_address: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Inspect one libmalloc zone deep (default zone when omitted).
+
+        Reads a single ``malloc_zone_t`` at depth: name, full function table,
+        and the ``malloc_introspection_t`` table.  For the default zone also
+        probes ``malloc_good_size`` over common size classes to sketch the
+        size-class layout.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            zone_address: Hex/decimal address of a specific zone (from
+                ``inspect_libmalloc_zones``).  Omit to inspect the default
+                zone.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_malloc_zone(
+                zone_address=zone_address,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def classify_malloc_pointer(
+        session_id: str,
+        address: str,
+        address_kind: str = "user",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Classify whether an address is a live libmalloc allocation.
+
+        Asks ``malloc_size()`` for the pointer; a nonzero size means it is a
+        live allocation (``allocated``, with the size and an owning-zone hint),
+        zero means ``not_allocated``.  When the inferior call fails the verdict
+        is ``unresolvable``.
+
+        Args:
+            session_id: Debugger session whose live inferior should be
+                inspected.
+            address: Hex/decimal address to classify.
+            address_kind: Kind of address being classified (``user``,
+                ``module``, ``stack``, ``page``, ``register``, ``file``).
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.classify_malloc_pointer(
+                address=address,
+                address_kind=address_kind,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
     async def inspect_fastbins(
         session_id: str,
         arena_address: Optional[str] = None,

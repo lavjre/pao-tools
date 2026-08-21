@@ -13,6 +13,7 @@ from paomcp.tools.backends import heap as heap_module
 from paomcp.tools.backends.heap import (
     ALLOCATOR_RUNTIME_COMMANDS,
     MUSL_MALLOCNG_MIN_VERSION,
+    TYPED_INSPECTION_FAMILIES,
     AllocatorDiscovery,
     HeapHistory,
 )
@@ -148,6 +149,46 @@ class TestJemallocClassification:
         assert result["family"] == "jemalloc"
         assert result["variant"] is None
         assert result["safe_linking"] == "not_applicable"
+
+
+class TestLibmallocClassification:
+    def test_libsystem_malloc_runtime_is_recognized(self) -> None:
+        result = AllocatorDiscovery.classify(
+            [mapping("/usr/lib/system/libsystem_malloc.dylib")], None
+        )
+        assert result["family"] == "libmalloc"
+        assert result["variant"] is None
+
+    def test_libsystem_malloc_versioned_dylib_is_recognized(self) -> None:
+        result = AllocatorDiscovery.classify(
+            [mapping("/usr/lib/system/libsystem_malloc.dylib.1")], None
+        )
+        assert result["family"] == "libmalloc"
+
+    def test_libsystem_umbrella_is_recognized(self) -> None:
+        result = AllocatorDiscovery.classify(
+            [mapping("/usr/lib/libSystem.B.dylib")], None
+        )
+        assert result["family"] == "libmalloc"
+
+    def test_libsystem_umbrella_versioned_is_recognized(self) -> None:
+        result = AllocatorDiscovery.classify(
+            [mapping("/usr/lib/libSystem.B.dylib.2")], None
+        )
+        assert result["family"] == "libmalloc"
+
+    def test_plain_elf_libc_is_not_libmalloc(self) -> None:
+        result = AllocatorDiscovery.classify(
+            [mapping("/lib/x86_64-linux-gnu/libc.so.6")], None
+        )
+        assert result["family"] == "glibc"
+
+    def test_runtime_commands_registry_includes_libmalloc(self) -> None:
+        assert "libmalloc" in ALLOCATOR_RUNTIME_COMMANDS
+        assert ALLOCATOR_RUNTIME_COMMANDS["libmalloc"] == ()
+
+    def test_libmalloc_is_in_typed_inspection_families(self) -> None:
+        assert "libmalloc" in TYPED_INSPECTION_FAMILIES
 
 
 class TestUnknownClassification:

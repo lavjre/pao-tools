@@ -76,13 +76,16 @@ ALLOCATOR_RUNTIME_COMMANDS: Dict[str, Tuple[str, ...]] = {
     "musl": ("mallocng",),
     "jemalloc": ("jemalloc",),
     "scudo": (),
+    # No pwndbg zone commands exist -- zone introspection is fully typed
+    # (scudo precedent: the runtime commands list stays empty).
+    "libmalloc": (),
     "unknown": (),
 }
 
 # The S6.2-S6.5 typed parsers operate on glibc heap structures directly
 # through GDB memory/expression APIs.  Runtime pwndbg commands remain useful
 # evidence, but their absence does not make the shipped typed API disappear.
-TYPED_INSPECTION_FAMILIES = frozenset({"glibc"})
+TYPED_INSPECTION_FAMILIES = frozenset({"glibc", "libmalloc"})
 
 # Filename evidence.  Kept deliberately narrow: a match must look like a real
 # shared object, not merely mention the word "libc" somewhere in a path.
@@ -108,6 +111,12 @@ _FAMILY_FILENAME_PATTERNS: Dict[str, Tuple[re.Pattern[str], ...]] = {
         re.compile(r"(?:^|/)libc\.so\.6(?:$|\.)", re.IGNORECASE),
         re.compile(r"(?:^|/)libc-2\.\d+(?:\.\d+)?\.so", re.IGNORECASE),
         re.compile(r"(?:^|/)libc\.so(?:$|\.)", re.IGNORECASE),
+    ),
+    "libmalloc": (
+        # The libmalloc runtime itself plus the libSystem umbrella that always
+        # re-exports it on Apple platforms (mirrors the libc.so.6 umbrella).
+        re.compile(r"(?:^|/)libsystem_malloc(?:\.dylib(?:\.\d+)?)?", re.IGNORECASE),
+        re.compile(r"(?:^|/)libSystem\.B\.dylib(?:\.\d+)?", re.IGNORECASE),
     ),
 }
 
@@ -4860,6 +4869,26 @@ class HeapTools:
             resolver = analyzer_for_family
         return resolver(self._detected_family(), self)
 
+    def _libmalloc_analyzer(self) -> Any:
+        """Resolve the libmalloc analyzer, getattr-cached on the facade.
+
+        The zone-native tools route straight to ``LibmallocAnalyzer`` regardless
+        of the detected family; the analyzer itself still reports an honest
+        ``unsupported`` verdict when the target is not libmalloc.  Same lazy
+        import / getattr-fallback shape as ``_analyzer()``.
+        """
+        cached = getattr(self, "_libmalloc_analyzer_cache", None)
+        if cached is not None:
+            return cached
+        resolver = getattr(self, "_analyzer_for_family", None)
+        if resolver is None:
+            from .heap_analyzers import analyzer_for_family  # noqa: PLC0415
+
+            resolver = analyzer_for_family
+        analyzer = resolver("libmalloc", self)
+        self._libmalloc_analyzer_cache = analyzer
+        return analyzer
+
     @property
     def _is_lldb(self) -> bool:
         backend = getattr(self, "backend", None)
@@ -5126,6 +5155,52 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.11 libmalloc zone surface --------------------------------
+    def inspect_libmalloc_zones(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """List every libmalloc zone (name + function + introspection tables)."""
+        gate = self._gdb_gate("inspect_libmalloc_zones")
+        if gate is not None:
+            return gate
+        return self._libmalloc_analyzer().inspect_zones(
+            cancellation_check=cancellation_check
+        )
+
+    def inspect_malloc_zone(
+        self,
+        *,
+        zone_address: Optional[str] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Inspect one malloc zone deep (default zone when address omitted)."""
+        gate = self._gdb_gate("inspect_malloc_zone")
+        if gate is not None:
+            return gate
+        return self._libmalloc_analyzer().inspect_zone(
+            zone_address=zone_address,
+            cancellation_check=cancellation_check,
+        )
+
+    def classify_malloc_pointer(
+        self,
+        *,
+        address: str,
+        address_kind: str = "user",
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Classify whether an address is a live libmalloc allocation."""
+        gate = self._gdb_gate("classify_malloc_pointer")
+        if gate is not None:
+            return gate
+        return self._libmalloc_analyzer().classify_pointer(
+            address=address,
+            address_kind=address_kind,
+            cancellation_check=cancellation_check,
+        )
+
     # ---- S6.4 heap corruption classifier ------------------------------
     def classify_heap_corruption(
         self,
@@ -5305,6 +5380,9 @@ __all__ = [
     "BINS_ARRAY_LEN",
     "BINMAPSIZE",
     "MAX_ARENAS_TRAVERSAL",
+    "LIBMALLOC_ZONES_SCHEMA",
+    "LIBMALLOC_ZONE_SCHEMA",
+    "LIBMALLOC_POINTER_SCHEMA",
 ]
 
 
@@ -5313,6 +5391,8 @@ __all__ = [
 # .heap_techniques import ...`` here would create an import cycle.  Keeping the
 # names in __all__ and resolving them on attribute access preserves the
 # ``from paomcp.tools.backends.heap import HEAP_TECHNIQUE_SCHEMA`` spelling.
+# The S6.11 libmalloc schemas follow the same rule (libmalloc.py imports this
+# module at its top).
 def __getattr__(name: str) -> Any:
     if name in (
         "HEAP_TECHNIQUE_SCHEMA",
@@ -5329,5 +5409,21 @@ def __getattr__(name: str) -> Any:
             "HEAP_TECHNIQUE_SCHEMA": HEAP_TECHNIQUE_SCHEMA,
             "UAF_SCAN_SCHEMA": UAF_SCAN_SCHEMA,
             "HEAP_TECHNIQUE_CATALOG_SCHEMA": HEAP_TECHNIQUE_CATALOG_SCHEMA,
+        }[name]
+    if name in (
+        "LIBMALLOC_ZONES_SCHEMA",
+        "LIBMALLOC_ZONE_SCHEMA",
+        "LIBMALLOC_POINTER_SCHEMA",
+    ):
+        from .libmalloc import (  # noqa: PLC0415
+            LIBMALLOC_POINTER_SCHEMA,
+            LIBMALLOC_ZONE_SCHEMA,
+            LIBMALLOC_ZONES_SCHEMA,
+        )
+
+        return {
+            "LIBMALLOC_ZONES_SCHEMA": LIBMALLOC_ZONES_SCHEMA,
+            "LIBMALLOC_ZONE_SCHEMA": LIBMALLOC_ZONE_SCHEMA,
+            "LIBMALLOC_POINTER_SCHEMA": LIBMALLOC_POINTER_SCHEMA,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -16,6 +16,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         heap,
         inspect,
         kernel_slub,
+        macho,
         operations,
         platform,
         processes,
@@ -39,6 +40,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     heap.register(mcp)
     inspect.register(mcp)
     kernel_slub.register(mcp)
+    macho.register(mcp)
     operations.register(mcp)
     platform.register(mcp)
     processes.register(mcp)
