@@ -222,6 +222,28 @@ class TestGuard:
         with pytest.raises(ValueError):
             analyzer.classify_pointer(address="not-a-number")
 
+    def test_bad_zone_address_raises(self):
+        # A provided-but-unparseable zone/arena address must be a contract
+        # violation, never a silent fallback to the default zone.
+        heap, _, _ = build_libmalloc()
+        analyzer = LibmallocAnalyzer(heap)
+        with pytest.raises(ValueError, match="zone_address"):
+            analyzer.inspect_zone(zone_address="not-a-number")
+        with pytest.raises(ValueError, match="arena_address"):
+            analyzer.inspect_arena(arena_address="not-a-number")
+
+    def test_bad_address_raises_for_validate_free(self):
+        heap, _, _ = build_libmalloc()
+        analyzer = LibmallocAnalyzer(heap)
+        with pytest.raises(ValueError, match="address must be an integer"):
+            analyzer.validate_free(address="not-a-number")
+
+    def test_bad_address_kind_raises(self):
+        heap, _, _ = build_libmalloc()
+        analyzer = LibmallocAnalyzer(heap)
+        with pytest.raises(ValueError, match="address_kind"):
+            analyzer.classify_pointer(address=hex(PTR), address_kind="bogus")
+
 
 # ---------------------------------------------------------------------------
 class TestZonesDiscovery:
@@ -288,6 +310,35 @@ class TestZonesDiscovery:
         assert parsed["verdict"] == "unreadable"
         assert parsed["supported"] is False
 
+    def test_registry_unreadable_warns_differently_from_missing_symbols(self):
+        # _malloc_zones/_num_zones resolve, but the registry memory itself
+        # cannot be read -- the warning must say "unreadable", not claim the
+        # symbols are unavailable.
+        heap, gdb, _ = build_libmalloc(expression_map=default_expression_map())
+        gdb.place(NAME_ADDR, b"default malloc zone\x00")
+        place_introspect(gdb)
+        place_zone(gdb, DEFAULT_ZONE, name_ptr=NAME_ADDR)  # no registry placed
+        analyzer = LibmallocAnalyzer(heap)
+
+        result = analyzer.inspect_zones()
+        parsed = result["parsed"]
+        assert parsed["source"] == "default_zone"
+        assert parsed["zone_count"] == 1
+        assert any("unreadable" in w for w in result["warnings"])
+        assert not any("symbols unavailable" in w for w in result["warnings"])
+
+    def test_corrupt_registry_count_warns(self):
+        mapping = default_expression_map()
+        mapping["(unsigned long)_num_zones"] = "999"
+        heap, gdb, _ = build_libmalloc(expression_map=mapping)
+        place_standard_scene(gdb)
+        analyzer = LibmallocAnalyzer(heap)
+
+        result = analyzer.inspect_zones()
+        parsed = result["parsed"]
+        assert parsed["source"] == "default_zone"
+        assert any("corrupt registry count" in w for w in result["warnings"])
+
 
 # ---------------------------------------------------------------------------
 class TestInspectZone:
@@ -318,6 +369,22 @@ class TestInspectZone:
         assert parsed["zone"]["name"] == "zone2"
         assert parsed["size_classes"] == []
         assert any("default zone" in w for w in result["warnings"])
+
+    def test_all_probes_failed_warns(self):
+        # Every malloc_good_size probe fails: size_classes is empty, but a
+        # warning must distinguish that from "no size classes to sketch".
+        mapping = default_expression_map()
+        for requested in (16, 32, 64, 128, 256, 512, 1024, 4096):
+            del mapping[f"(unsigned long)malloc_good_size({requested})"]
+        heap, gdb, _ = build_libmalloc(expression_map=mapping)
+        place_standard_scene(gdb)
+        analyzer = LibmallocAnalyzer(heap)
+
+        result = analyzer.inspect_zone()
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "inspected"
+        assert parsed["size_classes"] == []
+        assert any("probes failed" in w for w in result["warnings"])
 
     def test_zone_unreadable(self):
         heap, gdb, _ = build_libmalloc(expression_map=default_expression_map())
@@ -374,6 +441,36 @@ class TestClassifyPointer:
         assert parsed["verdict"] == "unresolvable"
         assert parsed["supported"] is False
         assert "malloc_size" in parsed["reason"]
+
+    def test_zone_hint_probe_failure_omits_hint_with_warning(self):
+        # malloc_size resolves (allocated) but the first zone->size probe
+        # fails: the hint must be omitted with a warning, never guessed from a
+        # later zone.
+        mapping = default_expression_map()  # no zone->size probe expression
+        mapping["(unsigned long)malloc_size((void*)0x%x)" % PTR] = "512"
+        heap, gdb, _ = build_libmalloc(expression_map=mapping)
+        place_standard_scene(gdb)
+        analyzer = LibmallocAnalyzer(heap)
+
+        result = analyzer.classify_pointer(address=hex(PTR))
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "allocated"
+        assert parsed["size"] == 512
+        assert parsed["zone_hint"] is None
+        assert any("zone_hint is omitted" in w for w in result["warnings"])
+
+    def test_address_kind_chunk_warns(self):
+        mapping = default_expression_map(size_fn_result=128)
+        mapping["(unsigned long)malloc_size((void*)0x%x)" % PTR] = "64"
+        heap, gdb, _ = build_libmalloc(expression_map=mapping)
+        place_standard_scene(gdb)
+        analyzer = LibmallocAnalyzer(heap)
+
+        result = analyzer.classify_pointer(address=hex(PTR), address_kind="chunk")
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "allocated"
+        assert parsed["zone_hint"] == "default malloc zone"
+        assert any("treated as 'user'" in w for w in result["warnings"])
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +537,122 @@ class TestProtocolRouting:
         assert parsed["verdict"] == "unsupported"
         assert parsed["supported"] is False
         assert "not classified as libmalloc" in parsed["reason"]
+
+    def test_inspect_chunk_family_gate_unsupported(self):
+        # L2: the same family re-verify must gate the ownership-classification
+        # methods, which previously ran malloc_size reads regardless of the
+        # freshly-classified family.
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.inspect_chunk(address=hex(PTR))["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    def test_validate_chunk_family_gate_unsupported(self):
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.validate_chunk(address=hex(PTR))["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    def test_inspect_arena_family_gate_unsupported(self):
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.inspect_arena(arena_address=hex(ZONE2))["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    # L9: the zone-native trio bypass the analyzer_for_family dispatch, so
+    # they must carry the same per-call family re-verify as the four protocol
+    # methods -- otherwise a glibc target gets zone_unavailable/unresolvable
+    # instead of the honest typed unsupported.
+    def test_inspect_zones_family_gate_unsupported(self):
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.inspect_zones()["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    def test_inspect_zone_family_gate_unsupported(self):
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.inspect_zone()["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    def test_classify_pointer_family_gate_unsupported(self):
+        heap, _, _ = build_libmalloc(mappings=GLIBC_MAPS)
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.classify_pointer(address=hex(PTR))["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as libmalloc" in parsed["reason"]
+
+    # M9: the malloc_zone_t reads are hard-coded to the frozen 64-bit
+    # little-endian ABI; a profile that contradicts it must be gated, never
+    # silently misread into a confident verdict.
+    def test_platform_gate_non_64_bit_target(self):
+        heap, _, _ = build_libmalloc()
+        heap.discovery.classify = (  # type: ignore[method-assign]
+            lambda mappings, libcinfo: {
+                "family": "libmalloc",
+                "version": None,
+                "confidence": 1.0,
+            }
+        )
+        heap.discovery.target_profile = (  # type: ignore[method-assign]
+            lambda mappings: {
+                "pointer_bits": 32,
+                "pointer_bits_source": "mapping_width",
+                "byteorder": "little",
+                "byteorder_source": "gdb_show_endian",
+                "architecture": "x86",
+                "architecture_source": "checksec",
+            }
+        )
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.list_arenas()["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "64-bit" in parsed["reason"]
+
+    def test_platform_gate_big_endian_target(self):
+        heap, _, _ = build_libmalloc()
+        heap.discovery.classify = (  # type: ignore[method-assign]
+            lambda mappings, libcinfo: {
+                "family": "libmalloc",
+                "version": None,
+                "confidence": 1.0,
+            }
+        )
+        heap.discovery.target_profile = (  # type: ignore[method-assign]
+            lambda mappings: {
+                "pointer_bits": 64,
+                "pointer_bits_source": "runtime_sizeof",
+                "byteorder": "big",
+                "byteorder_source": "gdb_show_endian",
+                "architecture": "x86_64",
+                "architecture_source": "checksec",
+            }
+        )
+        analyzer = LibmallocAnalyzer(heap)
+
+        parsed = analyzer.inspect_zone()["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "little-endian" in parsed["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -510,3 +723,23 @@ class TestMachoBinaryContext:
         binary_section = analyzer.inspect_zones()["parsed"]["binary"]
         assert binary_section["is_macho"] is False
         assert binary_section["reason"] == "no binary path provider wired"
+
+    def test_fat_macho_binary_reports_is_macho_true(self, tmp_path: Path):
+        # A universal (fat) image IS Mach-O; the slice is unparsed, so the
+        # binary section must say is_macho=True + is_fat=True instead of
+        # folding it into the not_macho / reason-only fallbacks.
+        from paomcp.tools.backends.macho import FAT_MAGIC
+
+        path = tmp_path / "fat"
+        path.write_bytes(FAT_MAGIC.to_bytes(4, "big") + b"\x00" * 64)
+        heap, gdb, _ = build_libmalloc(
+            expression_map=default_expression_map(),
+            binary_path_provider=lambda: str(path),
+        )
+        place_standard_scene(gdb)
+        analyzer = LibmallocAnalyzer(heap)
+
+        binary_section = analyzer.inspect_zones()["parsed"]["binary"]
+        assert binary_section["is_macho"] is True
+        assert binary_section["is_fat"] is True
+        assert "fat" in binary_section["reason"]

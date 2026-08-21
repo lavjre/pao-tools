@@ -79,6 +79,14 @@ def test_build_backend_response_extra_merges_new_keys():
         (None, None),
         ("not-a-number", None),
         ("", None),
+        # Bare hex without a 0x prefix (GDB/crash tooling renders pointers
+        # this way).  Ambiguous decimals parse as decimal via base-0 and never
+        # reach the hex fallback.
+        ("40113a", 0x40113A),
+        ("7fffdead", 0x7FFFDEAD),
+        ("12345", 12345),
+        ("abcdef", 0xABCDEF),
+        ("0x", None),
     ],
 )
 def test_parse_int(value, expected):

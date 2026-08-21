@@ -4697,8 +4697,11 @@ class HeapTools:
     The twelve allocator-layout-dependent methods (chunks, arenas, bins,
     corruption, free validation, techniques, UAF, snapshot capture) are
     dispatched per call through an :class:`AllocatorAnalyzer` resolved from
-    the detected family (``heap_analyzers.analyzer_for_family``).  ``glibc``
-    is the only family with a typed parser in Phase 0; every other family
+    the detected family (``heap_analyzers.analyzer_for_family``).  glibc,
+    jemalloc and libmalloc each have a typed analyzer (the jemalloc and
+    libmalloc analyzers re-verify the freshly-classified family inside
+    ``_prepare_context`` so a stale dispatch hit can never run their
+    family-specific reads against the wrong allocator); every other family
     resolves to ``UnsupportedAnalyzer``, which forwards to the glibc
     components that already return an honest typed ``unsupported`` verdict
     for non-glibc allocators.  A new family's parser plugs in by implementing
@@ -4715,9 +4718,14 @@ class HeapTools:
         *,
         binary_path_provider: Optional[Callable[[], Optional[str]]] = None,
         backend: Optional[BackendSpec] = None,
+        patch_recorder: Optional[Any] = None,
     ) -> None:
         self.backend = backend
         self.session_id = session_id
+        # ``PwndbgTools`` registers itself here when constructed, so writes
+        # issued by the attack helpers land in the same session patch ledger
+        # that ``list_memory_patches`` / ``revert_memory_patch`` operate on.
+        self._patch_recorder = patch_recorder
         # TTL cache of the last detected allocator family (monotonic clock
         # seconds + family).  Consulted only by ``_analyzer()``; the glibc
         # components re-classify per call regardless, so a stale hit never
@@ -4808,6 +4816,7 @@ class HeapTools:
             glibc=self.glibc,
             bins=self.bins,
             history=self.history,
+            patch_recorder=self._patch_recorder,
         )
 
         # Kernel SLUB is a dedicated self-gated surface: kernel targets are
@@ -5092,6 +5101,7 @@ class HeapTools:
                 glibc=self.glibc,
                 bins=self.bins,
                 history=self.history,
+                patch_recorder=self._patch_recorder,
             )
         return attack.poison_tcache_link(
             victim_address=victim_address,
@@ -5110,6 +5120,7 @@ class HeapTools:
         cache_address: str,
         btf_path: Optional[str] = None,
         page_size: int = DEFAULT_SLUB_PAGE_SIZE,
+        byteorder: str = "little",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Decode a kernel SLUB cache's geometry + hardening state from BTF."""
@@ -5133,6 +5144,7 @@ class HeapTools:
             cache_address=cache_address,
             btf_path=btf_path,
             page_size=page_size,
+            byteorder=byteorder,
             cancellation_check=cancellation_check,
         )
 
@@ -5145,6 +5157,7 @@ class HeapTools:
         btf_path: Optional[str] = None,
         page_size: int = DEFAULT_SLUB_PAGE_SIZE,
         max_objects: Optional[int] = None,
+        byteorder: str = "little",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Decode one kernel SLUB slab's obfuscated freelist chain."""
@@ -5169,6 +5182,7 @@ class HeapTools:
             btf_path=btf_path,
             page_size=page_size,
             max_objects=max_objects,
+            byteorder=byteorder,
             cancellation_check=cancellation_check,
         )
 

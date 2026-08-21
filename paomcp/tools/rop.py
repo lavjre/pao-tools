@@ -229,9 +229,14 @@ def register(mcp: FastMCP) -> None:
 
         * ``ret2libc``    -- loads rdi, rsi, rdx via ``pop <reg> ; ret``
           gadgets and transfers control to ``target_address`` (compute
-          this via ``identify_libc`` + a libc symbol offset first).  A
-          single ``ret`` gadget is inserted before the target call for
-          16-byte SysV stack alignment unless ``align_stack=False``.
+          this via ``identify_libc`` + a libc symbol offset first).  Stack
+          alignment is computed from the argument count: the chain enters
+          via ``ret`` with rsp at 8 (mod 16) on the first slot and pops
+          ``2*len(args) + 1`` slots (always odd), so ``align_stack=True``
+          appends a bare ``ret`` to make the total pop count even and land
+          rsp on the 16-byte SysV phase required by ``movaps`` users.
+          Set ``align_stack=False`` only when the overflow delivers the
+          chain on an already-aligned phase.
         * ``ret2syscall`` -- loads rax with ``syscall_number`` then
           sets rdi, rsi, rdx, r10, r8, r9 (Linux SYSCALL calling
           convention; SYSCALL clobbers rcx and r11) before executing a
@@ -256,8 +261,9 @@ def register(mcp: FastMCP) -> None:
                 purposes and ``target.symbol`` field.
             args: Positional arguments (int list) loaded into
                 rdi/rsi/rdx/... in order.
-            align_stack: ret2libc: prepend a bare ``ret`` gadget before
-                the final call so the target sees 16-byte-aligned rsp.
+            align_stack: ret2libc: append a bare ``ret`` gadget before
+                the final call when the chain's pop count is odd (the
+                normal case) so the target sees a 16-byte-aligned rsp.
             syscall_number: ret2syscall: syscall number for rax.
         """
         services = get_services(ctx)

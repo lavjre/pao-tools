@@ -260,6 +260,39 @@ async def test_catch_errors_reports_idempotency_in_progress(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_catch_errors_does_not_cache_failed_idempotency_results(
+    tmp_path,
+) -> None:
+    # A transient failure must abort the idempotency claim, so a retry of the
+    # same tool+args re-runs instead of replaying the poisoned failure.
+    ctx = _tool_context(tmp_path)
+    calls: list[int] = []
+    first_try = True
+
+    @catch_errors(auto_artifact=False)
+    async def flaky(
+        value: int,
+        session_id: str,
+        idempotency_key: str | None = None,
+        ctx: Any = None,
+    ) -> dict[str, Any]:
+        nonlocal first_try
+        calls.append(value)
+        if first_try:
+            first_try = False
+            raise RuntimeError("transient failure")
+        return {"success": True, "session_id": session_id, "value": value}
+
+    failed = await flaky(1, session_id="alpha", idempotency_key="retry-flaky", ctx=ctx)
+    assert failed["success"] is False
+
+    retry = await flaky(1, session_id="alpha", idempotency_key="retry-flaky", ctx=ctx)
+    assert retry["success"] is True
+    assert calls == [1, 1]
+    assert retry["meta"]["idempotency_replayed"] is False
+
+
+@pytest.mark.asyncio
 async def test_cancelled_tool_releases_operation_and_idempotency_slots(
     tmp_path,
 ) -> None:

@@ -271,13 +271,16 @@ class TestDryRun:
         assert parsed["verify"] is None
         assert parsed["revert"] is None
         assert parsed["target_mapping"]["file"] == TARGET_MAP["file"]
+        # Plan anchors on the chunk header; address + chunk_offset resolves to
+        # the fd slot (== write_target_address), so no offset double-count.
         assert parsed["write_plan"] == {
-            "address": hex(VICTIM_USER),
+            "address": hex(VICTIM_CHUNK),
             "chunk_offset": 0x10,
             "byte_count": 8,
             "data_hex": encode_safe_linked(TARGET_CHUNK, VICTIM_USER)
             .to_bytes(8, "little")
             .hex(),
+            "write_target_address": hex(VICTIM_USER),
         }
         assert parsed["follow_up"]["target_returned_on_malloc"] == 2
         assert dbg.writes == []
@@ -406,6 +409,18 @@ class TestFamilyAndVersion:
         assert parsed["safe_linking_enabled"] is False
         assert parsed["encoded_fd_hex"] == TARGET_CHUNK.to_bytes(8, "little").hex()
 
+    def test_unknown_safe_linking_refuses_write(self):
+        heap, gdb, dbg = build_attack(libc=_libc_version(None))
+        place_tcache_scene(gdb)
+        parsed = heap.poison_tcache_link(
+            victim_address=hex(VICTIM_CHUNK), target_address=hex(TARGET_USER)
+        )["parsed"]
+        assert parsed["schema"] == ATTACK_TCACHE_POISON_SCHEMA
+        assert parsed["supported"] is False
+        assert parsed["verdict"] == "unresolvable"
+        assert "safe-linking" in parsed["reason"]
+        assert dbg.writes == []
+
 
 # ---------------------------------------------------------------------------
 # Advisory target warnings (never fatal)
@@ -413,7 +428,8 @@ class TestFamilyAndVersion:
 class TestWarnings:
     def test_target_outside_any_mapping_warns(self):
         heap, gdb, _ = build_attack(
-            mappings=_extend_maps_with_heap()  # no writable global region
+            mappings=_extend_maps_with_heap(),  # no writable global region
+            libc=_libc_version("2.35"),
         )
         place_tcache_scene(gdb)
         result = heap.poison_tcache_link(

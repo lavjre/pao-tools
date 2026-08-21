@@ -15,6 +15,7 @@ from paomcp.tools.backends.regions import (
     JIT_REGIONS_SCHEMA,
     MEMORY_REGION_SCHEMA,
     JitRegionTracker,
+    _permission_flags,
 )
 
 from tests.test_glibc_arenas import (
@@ -264,6 +265,105 @@ class TestClassifyMemoryRegion:
         assert parsed["verdict"] == "unavailable"
         assert parsed["supported"] is False
         assert parsed["region"] is None
+
+    def test_mapped_but_unparseable_is_not_unmapped(self):
+        # M5: an address that IS inside a mapping whose entry cannot be
+        # normalized (undecodable permission string) must not be reported as
+        # "unmapped" -- that would change planning.  It gets its own honest
+        # "unparseable" verdict.
+        maps = [
+            vmap("/bin/chal", "0x400000", "0x401000", "r-xp"),
+            vmap("", "0x300000", "0x304000", "rw"),  # 2-char perms: undecodable
+        ]
+        heap, _ = build_regions(mappings=maps)
+        tracker = JitRegionTracker(heap)
+
+        result = tracker.classify_memory_region(address=hex(0x301000))
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "unparseable"
+        assert parsed["supported"] is True
+        assert parsed["region"] is None
+        assert any("noncanonical" in w for w in result["warnings"])
+
+    def test_5_char_and_uppercase_permissions_decode(self):
+        # 5-char perms (r-xps) decode r/w/x + private/shared without warning;
+        # uppercase permission strings normalize to lowercase.  private/shared
+        # are decoder output (region contract carries r/w/x only), so assert
+        # both the emitted region and the raw decoder.
+        flags, warn = _permission_flags("r-xps")
+        assert warn is None
+        assert flags == {
+            "readable": True,
+            "writable": False,
+            "executable": True,
+            "private": True,
+            "shared": False,
+        }
+        upper_flags, upper_warn = _permission_flags("RWXP")
+        assert upper_warn is None
+        assert upper_flags["readable"] is True
+        assert upper_flags["writable"] is True
+        assert upper_flags["executable"] is True
+        assert upper_flags["private"] is True
+
+        maps = [
+            vmap("/bin/chal", "0x400000", "0x401000", "r-xps"),
+            {
+                "file": "/lib/libx.so.6",
+                "start": "0x7f0000000000",
+                "end": "0x7f0000200000",
+                "permissions": "RWXP",  # uppercase, as some vmmap impls emit
+                "readable": True,
+                "writable": True,
+                "executable": True,
+            },
+        ]
+        heap, _ = build_regions(mappings=maps)
+        tracker = JitRegionTracker(heap)
+        regions, _raw, warnings, _available = tracker._read_maps(None)
+        assert warnings == []
+        by_start = {r["start"]: r for r in regions}
+
+        five = by_start[0x400000]
+        assert five["permissions"] == "r-xps"
+        assert five["writable"] is False
+        assert five["executable"] is True
+
+        upper = by_start[0x7F0000000000]
+        assert upper["permissions"] == "rwxp"
+        assert upper["writable"] is True
+        assert upper["executable"] is True
+
+    def test_non_string_file_field_handled(self):
+        # A None file field is anonymous; a numeric file field is treated as a
+        # file-like field (never anonymous) without crashing.
+        maps = [
+            {
+                "file": None,
+                "start": "0x300000",
+                "end": "0x304000",
+                "permissions": "rwxp",
+                "readable": True,
+                "writable": True,
+                "executable": True,
+            },
+            {
+                "file": 12345,
+                "start": "0x500000",
+                "end": "0x501000",
+                "permissions": "r-xp",
+                "readable": True,
+                "writable": False,
+                "executable": True,
+            },
+        ]
+        heap, _ = build_regions(mappings=maps)
+        tracker = JitRegionTracker(heap)
+        regions, _raw, _warnings, _available = tracker._read_maps(None)
+        by_start = {r["start"]: r for r in regions}
+
+        assert by_start[0x300000]["anonymous"] is True
+        assert by_start[0x500000]["anonymous"] is False
 
 
 # ---------------------------------------------------------------------------

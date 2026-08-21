@@ -259,7 +259,12 @@ class JitRegionTracker:
             else:
                 region = self._normalize_region(raw, warnings)
                 if region is None:
-                    verdict = "unmapped"
+                    # The address IS inside a mapping but the entry cannot be
+                    # normalized (garbage start/end or undecodable permission
+                    # string).  That is not "unmapped" -- call it what it is
+                    # so a caller never mistakes a parse failure for an
+                    # unmapped address (which would change planning).
+                    verdict = "unparseable"
                 else:
                     verdict = "mapped"
             parsed = {

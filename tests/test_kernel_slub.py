@@ -157,16 +157,17 @@ def place_cache(
     offset: int = FREEPOINTER_OFF,
     oo_x: int = (0 << 16) | 32,
     random: int = RANDOM,
+    byteorder: str = "little",
 ) -> None:
     buf = bytearray(KMEM_CACHE_SIZE)
-    buf[CACHE_OFF["name"] : CACHE_OFF["name"] + 8] = name_ptr.to_bytes(8, "little")
+    buf[CACHE_OFF["name"] : CACHE_OFF["name"] + 8] = name_ptr.to_bytes(8, byteorder)
     buf[CACHE_OFF["object_size"] : CACHE_OFF["object_size"] + 4] = object_size.to_bytes(
-        4, "little"
+        4, byteorder
     )
-    buf[CACHE_OFF["size"] : CACHE_OFF["size"] + 4] = size.to_bytes(4, "little")
-    buf[CACHE_OFF["offset"] : CACHE_OFF["offset"] + 4] = offset.to_bytes(4, "little")
-    buf[CACHE_OFF["oo"] : CACHE_OFF["oo"] + 4] = oo_x.to_bytes(4, "little")
-    buf[CACHE_OFF["random"] : CACHE_OFF["random"] + 8] = random.to_bytes(8, "little")
+    buf[CACHE_OFF["size"] : CACHE_OFF["size"] + 4] = size.to_bytes(4, byteorder)
+    buf[CACHE_OFF["offset"] : CACHE_OFF["offset"] + 4] = offset.to_bytes(4, byteorder)
+    buf[CACHE_OFF["oo"] : CACHE_OFF["oo"] + 4] = oo_x.to_bytes(4, byteorder)
+    buf[CACHE_OFF["random"] : CACHE_OFF["random"] + 8] = random.to_bytes(8, byteorder)
     gdb.place(address, bytes(buf))
 
 
@@ -179,14 +180,15 @@ def place_slab(
     objects: int = 3,
     frozen: int = 0,
     cpu: int = 0,
+    byteorder: str = "little",
 ) -> None:
     buf = bytearray(SLAB_SIZE)
     buf[SLAB_OFF["freelist"] : SLAB_OFF["freelist"] + 8] = freelist_raw.to_bytes(
-        8, "little"
+        8, byteorder
     )
     counters = inuse | (objects << 6) | (frozen << 25)
-    buf[_COUNTERS_OFF : _COUNTERS_OFF + 8] = counters.to_bytes(8, "little")
-    buf[SLAB_OFF["cpu"] : SLAB_OFF["cpu"] + 4] = cpu.to_bytes(4, "little")
+    buf[_COUNTERS_OFF : _COUNTERS_OFF + 8] = counters.to_bytes(8, byteorder)
+    buf[SLAB_OFF["cpu"] : SLAB_OFF["cpu"] + 4] = cpu.to_bytes(4, byteorder)
     gdb.place(address, bytes(buf))
 
 
@@ -207,12 +209,14 @@ def place_slub_chain(
     random: int = RANDOM,
     encoding: str = SLUB_ENCODING_SWAB,
     offset: int = FREEPOINTER_OFF,
+    byteorder: str = "little",
 ) -> None:
     for i, obj in enumerate(objects):
         nxt = objects[i + 1] if i + 1 < len(objects) else 0
         slot = obj + offset
         gdb.place(
-            slot, enc(nxt, slot, random=random, encoding=encoding).to_bytes(8, "little")
+            slot,
+            enc(nxt, slot, random=random, encoding=encoding).to_bytes(8, byteorder),
         )
 
 
@@ -520,6 +524,99 @@ class TestDecodeFreelist:
         assert parsed["verdict"] == "unresolved"
         assert parsed["supported"] is True
         assert len(parsed["attempts"]) == 4
+
+    def test_decode_empty_freelist_hardened(self, tmp_path: Path):
+        # M6: a hardened cache whose slab->freelist is NULL is an *empty*
+        # freelist, not an unresolvable one.  The zero head must be reported
+        # as a decoded count-0 chain, symmetric with the unhardened path --
+        # never routed through the count>=1 candidate filter to "unresolved".
+        heap, gdb, btf_path = build_slub(tmp_path=tmp_path)
+        place_scene(gdb, head=0, objects=[])
+
+        parsed = heap.decode_slub_freelist(
+            cache_address=hex(CACHE_ADDR),
+            slab_address=hex(SLAB_ADDR),
+            btf_path=btf_path,
+        )["parsed"]
+        assert parsed["verdict"] == "decoded"
+        freelist = parsed["freelist"]
+        assert freelist["hardened"] is True
+        assert freelist["count"] == 0
+        assert freelist["object_addresses"] == []
+        assert freelist["termination"] == "null"
+        assert freelist["head_mode"] == SLUB_HEAD_RAW
+
+    def test_decode_empty_freelist_unhardened(self, tmp_path: Path):
+        heap, gdb, btf_path = build_slub(hardened=False, tmp_path=tmp_path)
+        place_scene(gdb, head=0, objects=[], hardened=False)
+
+        parsed = heap.decode_slub_freelist(
+            cache_address=hex(CACHE_ADDR),
+            slab_address=hex(SLAB_ADDR),
+            btf_path=btf_path,
+        )["parsed"]
+        assert parsed["verdict"] == "decoded"
+        assert parsed["freelist"]["count"] == 0
+        assert parsed["freelist"]["termination"] == "null"
+
+    def test_decode_big_endian_target(self, tmp_path: Path):
+        # L3: struct reads must honor the target byte order.  Place every
+        # struct field + freepointer big-endian (s390x / ppc64 style) and
+        # decode with byteorder="big".
+        heap, gdb, btf_path = build_slub(tmp_path=tmp_path)
+        gdb.place(NAME_ADDR, b"kmalloc-64\x00")
+        place_cache(gdb, random=RANDOM, byteorder="big")
+        place_slab(gdb, freelist_raw=OBJ0, byteorder="big")
+        place_slub_chain(gdb, [OBJ0, OBJ1, OBJ2], byteorder="big")
+
+        result = heap.decode_slub_freelist(
+            cache_address=hex(CACHE_ADDR),
+            slab_address=hex(SLAB_ADDR),
+            btf_path=btf_path,
+            byteorder="big",
+        )
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "decoded"
+        assert parsed["freelist"]["object_addresses"] == [OBJ0, OBJ1, OBJ2]
+        assert parsed["freelist"]["termination"] == "null"
+        # The cache scalars decode the same regardless of endianness.
+        assert parsed["slab"]["objects_per_slab"] == 32
+        assert parsed["slab"]["order"] == 0
+
+    def test_decode_rejects_bad_byteorder(self, tmp_path: Path):
+        heap, gdb, btf_path = build_slub(tmp_path=tmp_path)
+        place_scene(gdb)
+        with pytest.raises(ValueError, match="byteorder"):
+            heap.decode_slub_freelist(
+                cache_address=hex(CACHE_ADDR),
+                slab_address=hex(SLAB_ADDR),
+                btf_path=btf_path,
+                byteorder="middle",
+            )
+
+    def test_decode_order_aware_slab_mem_derivation(self, tmp_path: Path):
+        # M4: with an order-1 slab (slab_bytes = 2 pages) whose header sits
+        # in the *second* page, the omitted-slab_mem derivation must align to
+        # the slab's full extent, not just one page, so the window still
+        # contains the first-page objects.
+        heap, gdb, btf_path = build_slub(tmp_path=tmp_path)
+        gdb.place(NAME_ADDR, b"kmalloc-64\x00")
+        place_cache(gdb, oo_x=(1 << 16) | 32, random=RANDOM)  # order 1
+        slab_header_addr = SLAB_ADDR + 0x1000  # struct slab in 2nd page
+        place_slab(gdb, address=slab_header_addr, freelist_raw=OBJ0)
+        place_slub_chain(gdb, [OBJ0, OBJ1, OBJ2])
+
+        result = heap.decode_slub_freelist(
+            cache_address=hex(CACHE_ADDR),
+            slab_address=hex(slab_header_addr),
+            btf_path=btf_path,
+        )
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "decoded"
+        assert parsed["freelist"]["object_addresses"] == [OBJ0, OBJ1, OBJ2]
+        assert parsed["slab"]["order"] == 1
+        assert parsed["slab"]["slab_bytes"] == 0x2000
+        assert any("order-aware" in w for w in result.get("warnings") or [])
 
     def test_decode_unreadable_slab(self, tmp_path: Path):
         heap, gdb, btf_path = build_slub(tmp_path=tmp_path)

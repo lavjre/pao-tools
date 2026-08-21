@@ -269,6 +269,27 @@ class TestDedupe:
         deduped = GadgetIndex._dedupe(entries)
         assert len(deduped) == 2
 
+    def test_lowest_address_sighting_wins_over_loader_order(self) -> None:
+        # Identical gadget first seen at a HIGH address, then a lower-address
+        # sighting appears later in loader order: the lowest address must win.
+        entries = [
+            {
+                "address": 0x400200,
+                "bytes": "5fc3",
+                "instruction_text": "pop rdi ; ret",
+                "instructions": ["pop rdi", "ret"],
+            },
+            {
+                "address": 0x400100,
+                "bytes": "5fc3",
+                "instruction_text": "pop rdi ; ret",
+                "instructions": ["pop rdi", "ret"],
+            },
+        ]
+        deduped = GadgetIndex._dedupe(entries)
+        assert len(deduped) == 1
+        assert deduped[0]["address"] == 0x400100
+
 
 # ---------------------------------------------------------------------------
 # Backend behavior via injected loader

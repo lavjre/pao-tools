@@ -33,10 +33,14 @@ from typing import (
     Callable,
     Dict,
     List,
+    Literal,
     Mapping,
     Optional,
     Tuple,
+    cast,
 )
+
+_Byteorder = Literal["little", "big"]
 
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.foundation import (
@@ -274,6 +278,31 @@ def slub_detect_chain(
         )
         return chain, [chain]
 
+    mask = (1 << pointer_bits) - 1
+    if head & mask == 0:
+        # Empty freelist (``slab->freelist == NULL``).  A zero head is
+        # unambiguous under both plain and hardened kernels: interpreting it
+        # as encoded would XOR NULL with ``random``/store-address and invent a
+        # pointer that walks out of the window.  Report the raw NULL-terminated
+        # empty chain directly so hardened and plain kernels produce the same
+        # "decoded, count 0" verdict instead of the hardened path falling
+        # through the count>=1 candidate filter to ``None`` (unresolved).
+        chain = slub_walk_chain(
+            head=head,
+            head_is_encoded=False,
+            head_store_addr=head_store_addr,
+            cache_offset=cache_offset,
+            cache_random=cache_random,
+            hardened=hardened,
+            encoding=None,
+            slab_mem=slab_mem,
+            slab_bytes=slab_bytes,
+            max_objects=max_objects,
+            pointer_bits=pointer_bits,
+            reader=reader,
+        )
+        return chain, [chain]
+
     attempts: List[SlubChain] = []
     candidates: List[SlubChain] = []
     for head_mode, head_is_encoded in (
@@ -340,6 +369,11 @@ class KernelSlab:
         self.debugger = debugger
         self.session_id = session_id
         self.discovery = discovery
+        # Target memory byte order.  Defaults little-endian; a caller on a
+        # big-endian kernel (s390x, ppc64, mips64, arm64_be) must pass
+        # byteorder="big" so struct reads decode correctly.  BTF itself is
+        # always little-endian, so only *target memory* reads care.
+        self._byteorder: _Byteorder = "little"
 
     # ------------------------------------------------------------------
     # Context helpers
@@ -402,12 +436,10 @@ class KernelSlab:
             "type_count": btf.type_count,
         }
 
-    @staticmethod
-    def _read_unsigned(buf: bytes, offset: int, width: int) -> int:
-        return int.from_bytes(buf[offset : offset + width], "little")
+    def _read_unsigned(self, buf: bytes, offset: int, width: int) -> int:
+        return int.from_bytes(buf[offset : offset + width], self._byteorder)
 
-    @staticmethod
-    def _read_member(buf: bytes, member: BtfMember, pointer_bits: int) -> int:
+    def _read_member(self, buf: bytes, member: BtfMember, pointer_bits: int) -> int:
         """Extract a member value from a struct buffer, bitfield-aware.
 
         Bitfields (``slab.inuse/objects/frozen`` live in the ``counters``
@@ -421,7 +453,9 @@ class KernelSlab:
                 f"member {member.name!r} at byte {byte_offset} overruns the "
                 f"{len(buf)}-byte buffer"
             )
-        word = int.from_bytes(buf[byte_offset : byte_offset + word_bytes], "little")
+        word = int.from_bytes(
+            buf[byte_offset : byte_offset + word_bytes], self._byteorder
+        )
         if not member.is_bitfield:
             return word
         shift = member.bit_offset % 8
@@ -438,14 +472,14 @@ class KernelSlab:
         return raw[:end].decode("utf-8", errors="replace")
 
     def _reader(self, pointer_bits: int) -> Callable[[int], Optional[int]]:
-        """A memory reader returning pointer-sized little-endian ints."""
+        """A memory reader returning pointer-sized ints in target byte order."""
         size = pointer_bits // 8
 
         def read(address: int) -> Optional[int]:
             raw, err = self._read_bytes(address, size)
             if err is not None or len(raw) < size:
                 return None
-            return int.from_bytes(raw, "little")
+            return int.from_bytes(raw, self._byteorder)
 
         return read
 
@@ -566,10 +600,14 @@ class KernelSlab:
         cache_address: str,
         btf_path: Optional[str] = None,
         page_size: int = DEFAULT_SLUB_PAGE_SIZE,
+        byteorder: str = "little",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Decode one ``struct kmem_cache``: geometry + hardening state."""
         request = "inspect_slub_cache"
+        if byteorder not in ("little", "big"):
+            raise ValueError(f"byteorder must be 'little' or 'big', got {byteorder!r}")
+        self._byteorder = cast(_Byteorder, byteorder)
         profile, component_status = self._prepare_context(cancellation_check)
         pointer_bits = int(profile.get("pointer_bits") or 64)
 
@@ -684,10 +722,14 @@ class KernelSlab:
         btf_path: Optional[str] = None,
         page_size: int = DEFAULT_SLUB_PAGE_SIZE,
         max_objects: Optional[int] = None,
+        byteorder: str = "little",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Decode one slab's obfuscated freelist chain."""
         request = "decode_slub_freelist"
+        if byteorder not in ("little", "big"):
+            raise ValueError(f"byteorder must be 'little' or 'big', got {byteorder!r}")
+        self._byteorder = cast(_Byteorder, byteorder)
         profile, component_status = self._prepare_context(cancellation_check)
         pointer_bits = int(profile.get("pointer_bits") or 64)
 
@@ -778,7 +820,8 @@ class KernelSlab:
         # -- slab header fields ----------------------------------------
         freelist_offset = int(slab_header["freelist"])
         head_raw = int.from_bytes(
-            slab_raw[freelist_offset : freelist_offset + pointer_bits // 8], "little"
+            slab_raw[freelist_offset : freelist_offset + pointer_bits // 8],
+            self._byteorder,
         )
         head_store_addr = slab_addr + freelist_offset
         header_source = str(slab_header["_struct"])
@@ -800,10 +843,15 @@ class KernelSlab:
         # -- derive the slab window ------------------------------------
         warnings: List[str] = []
         if slab_mem is None:
-            slab_mem = slab_addr & ~(page_size - 1)
+            # Align to the slab's *full extent* (page_size << order), not one
+            # page: a higher-order slab spans multiple pages and its struct
+            # address is the base page, so masking against the order-aware
+            # extent keeps the window base correct for order > 0 too.
+            slab_mem = slab_addr & ~(slab_bytes - 1)
             warnings.append(
                 f"slab_mem_address not given; derived slab window base "
-                f"{hex(slab_mem)} from the slab address"
+                f"{hex(slab_mem)} from the slab address (order-aware, "
+                f"slab_bytes={hex(slab_bytes)})"
             )
 
         # -- walk + detect the chain -----------------------------------

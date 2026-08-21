@@ -14,6 +14,7 @@ import pytest
 from paomcp.tools.backends.macho import (
     MH_MAGIC,
     MH_MAGIC_64,
+    FatMachOError,
     MachOError,
     MachOFile,
     MachOSegment,
@@ -208,7 +209,9 @@ class TestDylibs:
             "/usr/lib/libobjc.A.dylib",
         ]
         assert macho.links_libsystem
-        assert not macho.links_libsystem_malloc
+        # libSystem.B.dylib re-exports libsystem_malloc, so a transitive
+        # linker still counts as linking the allocator.
+        assert macho.links_libsystem_malloc
 
     def test_libsystem_malloc_direct(self):
         macho = parse_macho(
@@ -307,8 +310,14 @@ class TestErrors:
             parse_macho(b"\x7fELF" + b"\x00" * 40)
 
     def test_fat_binary_raises(self):
-        with pytest.raises(MachOError, match="fat"):
+        # A fat image is Mach-O; the parser refuses the slice with the
+        # dedicated FatMachOError so callers can distinguish it from a blob.
+        with pytest.raises(FatMachOError, match="fat"):
             parse_macho(b"\xca\xfe\xba\xbe" + b"\x00" * 64)
+
+    def test_byte_swapped_fat_raises_fat_macho_error(self):
+        with pytest.raises(FatMachOError, match="fat"):
+            parse_macho(b"\xbe\xba\xfe\xca" + b"\x00" * 64)
 
     def test_truncated_header_raises(self):
         with pytest.raises(MachOError, match="header truncated"):
@@ -349,3 +358,64 @@ class TestLoadMacho:
     def test_load_macho_missing_file_raises_oserror(self, tmp_path: Path):
         with pytest.raises(OSError):
             load_macho(str(tmp_path / "does-not-exist"))
+
+
+# ---------------------------------------------------------------------------
+class TestLinksLibsystem:
+    def _macho(self, *names):
+        commands = b"".join(load_dylib(name) for name in names)
+        return parse_macho(make_macho_64(commands=commands))
+
+    def test_libsystem_b_implies_libmalloc(self):
+        # libSystem.B.dylib re-exports libsystem_malloc, so linking it means
+        # the binary transitively links the allocator even when the allocator
+        # dylib never appears in the load-command list.
+        macho = self._macho("/usr/lib/libSystem.B.dylib")
+        assert macho.links_libsystem is True
+        assert macho.links_libsystem_malloc is True
+
+    def test_direct_libsystem_malloc(self):
+        macho = self._macho("/usr/lib/system/libsystem_malloc.dylib")
+        assert macho.links_libsystem_malloc is True
+
+    def test_versioned_libsystem_malloc(self):
+        macho = self._macho("/usr/lib/system/libsystem_malloc.dylib.1")
+        assert macho.links_libsystem_malloc is True
+
+    def test_suffixed_libsystem_malloc(self):
+        macho = self._macho("/usr/lib/system/libsystem_malloc-2.0.dylib")
+        assert macho.links_libsystem_malloc is True
+
+    def test_no_false_positive_on_lookalike_name(self):
+        # The old `"libsystem_malloc" in name` substring check would accept
+        # this; the anchored regex must not.
+        macho = self._macho("/usr/lib/evil_libsystem_malloc_eater.dylib")
+        assert macho.links_libsystem is False
+        assert macho.links_libsystem_malloc is False
+
+    def test_unrelated_dylib(self):
+        macho = self._macho("/usr/lib/libz.dylib")
+        assert macho.links_libsystem is False
+        assert macho.links_libsystem_malloc is False
+
+
+# ---------------------------------------------------------------------------
+class TestAnalyzeMachoEnvelope:
+    def test_fat_image_is_fat_macho_verdict(self, tmp_path: Path):
+        from paomcp.tools.macho import _macho_envelope
+
+        path = tmp_path / "fat"
+        path.write_bytes(b"\xca\xfe\xba\xbe" + b"\x00" * 64)
+        parsed = _macho_envelope(str(path))["parsed"]
+        assert parsed["verdict"] == "fat_macho"
+        assert parsed["is_macho"] is True
+        assert "slice" in parsed["reason"]
+
+    def test_non_macho_is_not_macho_verdict(self, tmp_path: Path):
+        from paomcp.tools.macho import _macho_envelope
+
+        path = tmp_path / "notmacho"
+        path.write_bytes(b"\x7fELF" + b"\x00" * 40)
+        parsed = _macho_envelope(str(path))["parsed"]
+        assert parsed["verdict"] == "not_macho"
+        assert parsed["is_macho"] is False

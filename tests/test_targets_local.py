@@ -164,6 +164,51 @@ class TestRegistryLifecycle:
         status = registry.get_status_response(target_id=target_id)
         assert status["parsed"]["target"]["state"] == "error"
 
+    def test_get_status_recovers_stale_error_when_target_alive_again(
+        self,
+    ) -> None:
+        # A transient failure pinned the target in ERROR with a stale error
+        # string; once the liveness re-poll says the target is back, status
+        # must restore the pre-error state and clear the error.
+        registry = TargetRegistry()
+        handle = registry.create(
+            TargetSpec.from_config(
+                "attach_pid",
+                {"pid": os.getpid()},
+                session_id="sess",
+            )
+        )
+        handle.metadata["pre_error_state"] = TargetState.RUNNING.value
+        handle._set_state(TargetState.ERROR)
+        handle.error = "transient ssh hiccup"
+        handle.error_type = "TargetError"
+
+        status = registry.get_status_response(target_id=handle.target_id)
+        payload = status["parsed"]["target"]
+        assert payload["state"] == "running"
+        assert payload["error"] is None
+        assert payload["error_type"] is None
+
+    def test_get_status_keeps_error_when_target_still_down(self) -> None:
+        # Liveness re-poll still says dead: the stale error must stay.
+        registry = TargetRegistry()
+        handle = registry.create(
+            TargetSpec.from_config(
+                "attach_pid",
+                {"pid": 1_000_000_007},  # very unlikely to be alive
+                session_id="sess",
+            )
+        )
+        handle.metadata["pre_error_state"] = TargetState.RUNNING.value
+        handle._set_state(TargetState.ERROR)
+        handle.error = "connection refused"
+        handle.error_type = "TargetError"
+
+        status = registry.get_status_response(target_id=handle.target_id)
+        payload = status["parsed"]["target"]
+        assert payload["state"] == "error"
+        assert payload["error"] == "connection refused"
+
     def test_get_capabilities_shape(self) -> None:
         registry = TargetRegistry()
         response = registry.create_target_response(

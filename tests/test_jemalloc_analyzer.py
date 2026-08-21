@@ -26,6 +26,8 @@ from paomcp.tools.backends.heap import (
 from paomcp.tools.backends.jemalloc import (
     JEMALLOC_EXTENT_LIST_SCHEMA,
     JEMALLOC_EXTENT_SCHEMA,
+    JemallocAnalyzer,
+    _JEMALLOC_WARNING,
 )
 
 from tests.test_glibc_arenas import (
@@ -212,6 +214,38 @@ class TestInspectChunk:
         assert parsed["verdict"] == "unresolvable"
         assert "Could not read memory" in parsed["reason"]
 
+    def test_empty_output_is_unresolvable_not_allocated(self):
+        # No matching command (plugin missing / undefined command) yields empty
+        # console output.  That must never be reported as "allocated".
+        heap, _ = build_jemalloc()
+        result = heap.inspect_chunk(address=hex(USER_PTR))
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "unresolvable"
+        assert parsed["extent"] is None
+        assert "no recognizable extent" in parsed["reason"]
+
+    def test_gibberish_output_is_unresolvable_not_allocated(self):
+        heap, _ = build_jemalloc(
+            commands={
+                "jemalloc find-extent": ["Jemalloc find extent\n", _BANNER, "???\n"]
+            }
+        )
+        parsed = heap.inspect_chunk(address=hex(USER_PTR))["parsed"]
+        assert parsed["verdict"] == "unresolvable"
+        assert parsed["extent"] is None
+
+    def test_banner_does_not_add_per_call_version_warning(self):
+        # pwndbg prints the "tested only for jemalloc 5.3.0" banner on every
+        # command regardless of the actual target version; it must not be
+        # misread as a per-call "below 5.3.0" warning.
+        heap, _ = build_jemalloc(commands={"jemalloc find-extent": FIND_EXTENT_FOUND})
+        result = heap.inspect_chunk(address=hex(USER_PTR))
+        # The only warning is the static plugin banner -- never a version
+        # warning derived from seeing that banner in the command output.
+        assert result["warnings"] == [_JEMALLOC_WARNING]
+        assert all("below 5.3.0" not in w for w in result["warnings"])
+        assert "below 5.3.0" not in str(result["parsed"])
+
 
 class TestValidateChunk:
     def test_valid_when_extent_found(self):
@@ -252,6 +286,15 @@ class TestListArenas:
         parsed = heap.list_arenas()["parsed"]
         assert parsed["verdict"] == "unresolvable"
         assert "rtree symbols" in parsed["reason"]
+
+    def test_empty_output_is_unresolvable_not_listed(self):
+        # No matching command (plugin missing) must never be reported as a
+        # zero-extent "listed" inventory.
+        heap, _ = build_jemalloc()
+        parsed = heap.list_arenas()["parsed"]
+        assert parsed["verdict"] == "unresolvable"
+        assert parsed["extent_count"] == 0
+        assert "no recognizable extent" in parsed["reason"]
 
 
 class TestInspectArena:
@@ -296,3 +339,41 @@ class TestUnsupportedSurface:
         assert parsed["supported"] is False
         assert parsed["schema"] == schema
         assert parsed["allocator"]["family"] == "jemalloc"
+
+
+# ---------------------------------------------------------------------------
+# Family re-verify (L2): the facade dispatches on a short TTL-cached family,
+# so the jemalloc analyzer must re-check the freshly-classified family inside
+# its supported methods and never run extent reads against a target that
+# switched allocators inside the TTL window.
+# ---------------------------------------------------------------------------
+class TestFamilyReVerify:
+    def _analyzer_classified_as(self, family: str) -> JemallocAnalyzer:
+        heap, _ = build_jemalloc()
+        heap.discovery.classify = (  # type: ignore[method-assign]
+            lambda mappings, libcinfo: {
+                "family": family,
+                "version": None,
+                "confidence": 1.0,
+            }
+        )
+        return JemallocAnalyzer(heap)
+
+    def test_validate_chunk_returns_unsupported_on_family_mismatch(self):
+        analyzer = self._analyzer_classified_as("glibc")
+        parsed = analyzer.validate_chunk(address=hex(USER_PTR))["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as jemalloc" in parsed["reason"]
+
+    def test_list_arenas_returns_unsupported_on_family_mismatch(self):
+        analyzer = self._analyzer_classified_as("libmalloc")
+        parsed = analyzer.list_arenas()["parsed"]
+        assert parsed["verdict"] == "unsupported"
+        assert parsed["supported"] is False
+        assert "not classified as jemalloc" in parsed["reason"]
+
+    def test_matching_family_still_runs(self):
+        heap, _ = build_jemalloc(commands={"jemalloc find-extent": FIND_EXTENT_FOUND})
+        parsed = heap.validate_chunk(address=hex(USER_PTR))["parsed"]
+        assert parsed["verdict"] == "valid"

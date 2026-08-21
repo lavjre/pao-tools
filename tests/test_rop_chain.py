@@ -96,6 +96,11 @@ class TestRet2LibcChain:
             assert entries[3]["symbol"] == "system"
             # raw bytes = 4 slots × 8 bytes
             assert parsed["raw_bytes_length"] == 32
+            # ALIGNMENT, not just ret-existence: the chain is entered via
+            # ``ret`` with rsp at 8 (mod 16) on the first slot, and the target
+            # is entered by the final pop, so a 16-byte-aligned target entry
+            # requires the chain length (in bytes) to be a multiple of 16.
+            assert parsed["raw_bytes_length"] % 16 == 0
             assert bytes.fromhex(parsed["raw_bytes"])[:8] == (0x400100).to_bytes(
                 8, "little"
             )
@@ -119,6 +124,10 @@ class TestRet2LibcChain:
             assert registers == ["rdi", "rsi", "rdx"]
             # 3 pops + 3 imms + align + target = 8 slots × 8 bytes
             assert parsed["raw_bytes_length"] == 8 * 8
+            # Alignment invariant (see test_single_arg): target entry is on
+            # the correct 16-byte SysV phase iff the chain length is a
+            # multiple of 16 bytes.
+            assert parsed["raw_bytes_length"] % 16 == 0
         finally:
             os.unlink(binary)
 
@@ -155,9 +164,14 @@ class TestRet2LibcChain:
                 args=[0x2000],
                 align_stack=False,
             )
-            kinds = [e["kind"] for e in response["parsed"]["entries"]]
+            parsed = response["parsed"]
+            kinds = [e["kind"] for e in parsed["entries"]]
             # pop rdi ; ret --> imm --> target
             assert kinds == ["gadget", "immediate", "target"]
+            # 3 slots (24 bytes): the natural odd pop count, i.e. the
+            # deliberately-misaligned phase for an aligned delivery point.
+            assert parsed["raw_bytes_length"] == 24
+            assert parsed["raw_bytes_length"] % 16 == 8
         finally:
             os.unlink(binary)
 
@@ -175,6 +189,72 @@ class TestRet2LibcChain:
             parsed = response["parsed"]
             assumptions = " ".join(parsed["assumptions"])
             assert "no bare 'ret' gadget available" in assumptions
+        finally:
+            os.unlink(binary)
+
+    def test_alignment_phase_for_every_arg_count(self) -> None:
+        # M2: the align decision must be parity-computed, and every emitted
+        # chain must land the target on the correct 16-byte SysV phase.  A
+        # pure pop-args chain pops 2*n + 1 slots (always odd), so with
+        # align_stack=True a bare ret is appended and the chain length is a
+        # multiple of 16 bytes; with align_stack=False the ret is omitted and
+        # the length is 8 (mod 16) -- the misaligned phase a caller must
+        # deliberately choose only for an already-aligned delivery.
+        binary = _tempbin()
+        try:
+            builder = _builder_over(_rich_gadget_set())
+            # 0..3 args: 0 uses no pop gadget, 1..3 need rdi/rsi/rdx which the
+            # rich fixture provides (the 4th SysV arg would need rcx).
+            for arg_count in range(4):
+                args = [0x7FFF_1234_9000 + i for i in range(arg_count)]
+                aligned = builder.build_rop_chain(
+                    binary_path=binary,
+                    kind="ret2libc",
+                    target_address=0x7FFF_1234_5000,
+                    target_symbol="system",
+                    args=args,
+                    align_stack=True,
+                )["parsed"]
+                assert aligned["verdict"] == "built"
+                assert aligned["raw_bytes_length"] % 16 == 0, (
+                    f"{arg_count} args with align_stack=True must leave the "
+                    f"target on the aligned phase, got length "
+                    f"{aligned['raw_bytes_length']}"
+                )
+                unaligned = builder.build_rop_chain(
+                    binary_path=binary,
+                    kind="ret2libc",
+                    target_address=0x7FFF_1234_5000,
+                    target_symbol="system",
+                    args=args,
+                    align_stack=False,
+                )["parsed"]
+                kinds = [e["kind"] for e in unaligned["entries"]]
+                assert kinds.count("gadget") == arg_count  # no align ret
+                assert unaligned["raw_bytes_length"] % 16 == 8, (
+                    f"{arg_count} args with align_stack=False keeps the "
+                    f"natural odd pop count (length 8 mod 16)"
+                )
+        finally:
+            os.unlink(binary)
+
+    def test_zero_arg_chain_gets_alignment_ret(self) -> None:
+        # A bare call (no register args) still pops one slot for the target,
+        # so the 1-slot chain is misaligned and the alignment ret is needed.
+        binary = _tempbin()
+        try:
+            builder = _builder_over(_rich_gadget_set())
+            parsed = builder.build_rop_chain(
+                binary_path=binary,
+                kind="ret2libc",
+                target_address=0x7FFF_1234_5000,
+                target_symbol="one_gadget",
+                args=[],
+            )["parsed"]
+            kinds = [e["kind"] for e in parsed["entries"]]
+            assert kinds == ["gadget", "target"]
+            assert parsed["raw_bytes_length"] == 16
+            assert parsed["raw_bytes_length"] % 16 == 0
         finally:
             os.unlink(binary)
 

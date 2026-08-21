@@ -22,6 +22,7 @@ is out of scope.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from struct import unpack_from
 from typing import Dict, List, Optional
@@ -38,6 +39,16 @@ FAT_CIGAM = 0xBEBAFECA
 
 _KNOWN_MAGICS = frozenset(
     {MH_MAGIC, MH_CIGAM, MH_MAGIC_64, MH_CIGAM_64, FAT_MAGIC, FAT_CIGAM}
+)
+
+# A libsystem_malloc dylib name, anchored the same way the heap family
+# detector anchors it (_FAMILY_FILENAME_PATTERNS): a path component that is
+# exactly ``libsystem_malloc`` followed by ``.dylib`` (optionally versioned)
+# or a ``-<suffix>.dylib`` build-name variant.  The loose ``"libsystem_malloc"
+# in name`` substring check it replaces would accept
+# ``evil_libsystem_malloc_eater.dylib``.
+_LIBSYSTEM_MALLOC_RE = re.compile(
+    r"(?:^|/)libsystem_malloc(?:\.dylib(?:\.\d+)?|-[^/]*\.dylib)"
 )
 
 _MACHO_HEADER_64 = 32
@@ -97,6 +108,15 @@ class MachOError(ValueError):
     """Raised when the Mach-O image is malformed (bad magic, truncation, ...)."""
 
 
+class FatMachOError(MachOError):
+    """Raised for a universal (fat) Mach-O image.
+
+    A fat image *is* Mach-O -- callers that distinguish it from a non-Mach-O
+    blob can catch this subclass and report ``is_macho=True`` while noting the
+    slice is not parsed.
+    """
+
+
 @dataclass(frozen=True)
 class MachOSegment:
     """One ``LC_SEGMENT(_64)`` entry: name, VM range, and initial protection."""
@@ -144,7 +164,14 @@ class MachOFile:
 
     @property
     def links_libsystem_malloc(self) -> bool:
-        return any("libsystem_malloc" in name for name in self.dylibs)
+        # libSystem.B.dylib re-exports libsystem_malloc (it is a re-export
+        # stub), so an Apple-target userspace binary that links libSystem.B
+        # transitively links the allocator even when libsystem_malloc itself
+        # never appears in the load-command list.  Direct links are matched
+        # with the anchored _LIBSYSTEM_MALLOC_RE, never a substring.
+        return self.links_libsystem or any(
+            _LIBSYSTEM_MALLOC_RE.search(name) for name in self.dylibs
+        )
 
 
 def is_macho_magic(data: bytes) -> bool:
@@ -170,7 +197,7 @@ def parse_macho(data: bytes) -> MachOFile:
     elif be in (MH_MAGIC, MH_MAGIC_64):
         endian, magic = ">", be
     elif le in (FAT_MAGIC, FAT_CIGAM):
-        raise MachOError("universal (fat) Mach-O: slice parsing not supported")
+        raise FatMachOError("universal (fat) Mach-O: slice parsing not supported")
     else:
         raise MachOError(f"not a Mach-O image: magic 0x{le:08x}")
 
@@ -299,6 +326,7 @@ __all__ = [
     "MH_MAGIC",
     "MH_MAGIC_64",
     "MH_FILETYPE_NAMES",
+    "FatMachOError",
     "MachOError",
     "MachOFile",
     "MachOSegment",

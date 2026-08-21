@@ -358,21 +358,29 @@ def register(mcp: FastMCP) -> None:
         location: str,
         session_id: str,
         condition: Optional[str] = None,
+        temporary: bool = False,
         idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Set a breakpoint using MI (-break-insert).
 
+        The direct-MI sibling of ``create_breakpoint`` (which is the typed
+        canonical mutation tool and shares this backend path).
+
         Args:
             location: Breakpoint location (symbol/address/file:line).
             condition: Optional breakpoint condition expression.
+            temporary: When true, the breakpoint auto-deletes after one hit.
         """
         services = get_services(ctx)
         session = resolve_debug_session(
             services, session_id=session_id, create_if_missing=False
         )
         result = await run_session_action(
-            session, lambda: session.tools.set_breakpoint(location, condition)
+            session,
+            lambda: session.tools.set_breakpoint(
+                location, condition, temporary=temporary
+            ),
         )
         result["session_id"] = session.session_id
         return result

@@ -713,10 +713,15 @@ class ResearchRegistry:
         if isinstance(before, dict) and isinstance(after, dict):
             before_keys = set(before.keys())
             after_keys = set(after.keys())
-            added_keys = sorted(after_keys - before_keys)
-            removed_keys = sorted(before_keys - after_keys)
+            # Dict keys may mix types (e.g. int register numbers next to str
+            # field names); str-ordering keeps the diff deterministic instead
+            # of crashing `sorted` on an int/str comparison.
+            key_sort = lambda key: (type(key).__name__, str(key))
+            added_keys = sorted(after_keys - before_keys, key=key_sort)
+            removed_keys = sorted(before_keys - after_keys, key=key_sort)
             changed_keys = sorted(
-                k for k in before_keys & after_keys if before[k] != after[k]
+                (k for k in before_keys & after_keys if before[k] != after[k]),
+                key=key_sort,
             )
             return {
                 "status": "changed",

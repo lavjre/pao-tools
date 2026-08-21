@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from paomcp.tools.backends.macho import MachOError, load_macho
+from paomcp.tools.backends.macho import FatMachOError, MachOError, load_macho
 from paomcp.tools.common import catch_errors, get_services, run_blocking
 from paomcp.utils.paths import resolve_workspace_file
 
@@ -25,6 +25,19 @@ def _macho_envelope(binary_path: str) -> Dict[str, Any]:
     """Parse a Mach-O image into the typed ``analyze_macho`` envelope."""
     try:
         macho = load_macho(binary_path)
+    except FatMachOError as exc:
+        # A universal (fat) binary IS Mach-O -- report it as such, with the
+        # slice unparsed, rather than folding it into the not_macho verdict.
+        return {
+            "success": True,
+            "command": "analyze_macho",
+            "parsed": {
+                "binary_path": binary_path,
+                "verdict": "fat_macho",
+                "is_macho": True,
+                "reason": str(exc),
+            },
+        }
     except MachOError as exc:
         return {
             "success": True,
@@ -100,7 +113,9 @@ def register(mcp: FastMCP) -> None:
         (a VM/file offset, ``None`` for dylibs), loaded dylibs (including
         whether ``libSystem.B.dylib`` / ``libsystem_malloc`` are linked),
         ``__TEXT``/``__DATA`` segments, and the build UUID.  Non-Mach-O input
-        yields an honest ``not_macho`` verdict rather than an exception.
+        yields an honest ``not_macho`` verdict rather than an exception;
+        a universal (fat) image yields ``fat_macho`` (recognized, slice
+        unparsed).
         """
         services = get_services(ctx)
         resolved = resolve_workspace_file(

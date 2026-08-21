@@ -259,6 +259,18 @@ class TestDetect:
         assert len(attempts) == 4
         assert all(a.termination == "out_of_range" for a in attempts)
 
+    def test_detect_hardened_empty_head_is_decoded_not_none(self):
+        # A hardened slab whose freelist head is NULL is an *empty* freelist.
+        # The zero head must short-circuit to a raw NULL-terminated empty
+        # chain (matching the unhardened path) instead of falling through the
+        # count>=1 candidate filter and returning None.
+        best, attempts = self._detect({}, head=0, hardened=True)
+        assert best is not None
+        assert best.count == 0
+        assert best.termination == "null"
+        assert best.hardened is True
+        assert len(attempts) == 1
+
     def test_detect_unhardened_single_candidate(self):
         mem = {OBJ0 + OFFSET: OBJ1, OBJ1 + OFFSET: OBJ2, OBJ2 + OFFSET: 0}
         best, attempts = self._detect(mem, hardened=False)

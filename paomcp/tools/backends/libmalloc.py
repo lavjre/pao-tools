@@ -197,6 +197,105 @@ class LibmallocAnalyzer:
             "confidence": classification.get("confidence"),
         }
 
+    def _verify_family(
+        self,
+        command: str,
+        schema: str,
+        *,
+        classification: Dict[str, Any],
+        profile: Dict[str, Any],
+        component_status: Dict[str, Any],
+        address: Optional[int] = None,
+        address_kind: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the typed ``unsupported`` envelope when the freshly-
+        classified target cannot be read with malloc_zone structs, else
+        ``None``.
+
+        Two gates, both checked per call so the facade's short TTL-cached
+        dispatch family (``_FAMILY_CACHE_TTL_SEC``) is harmless:
+
+        * **family** -- a target that switched allocators inside the TTL
+          window is never interrogated with malloc_zone reads; the
+          re-classified family from ``_prepare_context`` always wins.
+        * **platform** -- ``malloc_zone_t`` / ``malloc_introspection_t`` reads
+          are hard-coded to the frozen 64-bit little-endian ABI.  A profile
+          that *definitely* contradicts it (pointer width other than 64, or a
+          big-endian target) would otherwise be misread into a confident
+          ``listed``/``inspected`` verdict, so it is gated instead.  An
+          unresolved profile field (``None``) is allowed through -- there is no
+          contradiction to assert, and the family gate already covers the
+          meaningful mis-targeting.
+        """
+        if classification.get("family") != self.family:
+            return self._unsupported(
+                command,
+                schema,
+                classification=classification,
+                profile=profile,
+                component_status=component_status,
+                reason=(
+                    f"the current target is not classified as {self.family}; "
+                    "malloc zones are not meaningful here"
+                ),
+                address=address,
+                address_kind=address_kind,
+            )
+        pointer_bits = profile.get("pointer_bits")
+        if pointer_bits is not None and pointer_bits != 64:
+            return self._unsupported(
+                command,
+                schema,
+                classification=classification,
+                profile=profile,
+                component_status=component_status,
+                reason=(
+                    "malloc_zone_t reads assume a 64-bit target, but the "
+                    f"target profile reports pointer_bits={pointer_bits}"
+                ),
+                address=address,
+                address_kind=address_kind,
+            )
+        byteorder = profile.get("byteorder")
+        if byteorder is not None and byteorder != "little":
+            return self._unsupported(
+                command,
+                schema,
+                classification=classification,
+                profile=profile,
+                component_status=component_status,
+                reason=(
+                    "malloc_zone_t reads assume little-endian, but the "
+                    f"target profile reports byteorder={byteorder!r}"
+                ),
+                address=address,
+                address_kind=address_kind,
+            )
+        return None
+
+    def _validate_address_kind(self, address_kind: str) -> List[str]:
+        """Validate ``address_kind``; return warnings for accepted-but-ignored
+        kinds.
+
+        The glibc surface gives ``chunk`` a real meaning (the address is the
+        chunk header, not the user pointer).  libmalloc ownership is
+        pointer-based -- ``malloc_size`` answers for the raw address either
+        way -- so ``chunk`` is accepted for surface compatibility and warned
+        about rather than silently honored, and an unknown kind is a contract
+        violation (``ValueError``), mirroring ``_chunk_from_user``.
+        """
+        if address_kind not in ("user", "chunk"):
+            raise ValueError(
+                f"address_kind must be 'user' or 'chunk', got {address_kind!r}"
+            )
+        if address_kind != "user":
+            return [
+                "address_kind is accepted for surface compatibility, but "
+                "libmalloc ownership classification is pointer-based; 'chunk' "
+                "is treated as 'user'"
+            ]
+        return []
+
     # -- target access ------------------------------------------------
     def _eval_unsigned(self, expression: str) -> Optional[int]:
         """Evaluate an expression (inferior call or symbol) as an unsigned int."""
@@ -271,27 +370,34 @@ class LibmallocAnalyzer:
         """Resolve the default zone address via ``malloc_default_zone()``."""
         return self._eval_unsigned("(void*)malloc_default_zone()")
 
-    def _registry_zones(self) -> Optional[List[int]]:
+    def _registry_zones(self) -> Tuple[Optional[List[int]], Optional[str]]:
         """Best-effort read of the ``_malloc_zones`` registry.
 
-        Returns ``None`` when either data symbol is unavailable or the registry
-        cannot be read -- the caller falls back to the default zone.
+        Returns ``(zones, diagnostic)``.  On success ``zones`` is the address
+        list and ``diagnostic`` is ``None``.  On failure ``zones`` is ``None``
+        and ``diagnostic`` names *why* -- ``"symbols unavailable"`` (either
+        data symbol failed to evaluate) versus ``"reported 0 zones"``,
+        ``"corrupt registry count N"``, or ``"unreadable at slot N"`` (the
+        symbols resolved but the registry itself is unusable).  The caller
+        must not report the two failure classes with the same warning.
         """
         base = self._eval_unsigned("(void*)_malloc_zones")
         count = self._eval_unsigned("(unsigned long)_num_zones")
         if base is None or count is None:
-            return None
-        if count <= 0 or count > _MAX_REGISTRY_ZONES:
-            return None
+            return None, "symbols unavailable"
+        if count <= 0:
+            return None, "reported 0 zones"
+        if count > _MAX_REGISTRY_ZONES:
+            return None, f"corrupt registry count {count} (cap {_MAX_REGISTRY_ZONES})"
         zones: List[int] = []
         for index in range(count):
             raw, err = self._read_bytes(base + index * 8, 8)
             if err is not None or len(raw) < 8:
-                return None
+                return None, f"unreadable at slot {index}"
             addr = int.from_bytes(raw, "little")
             if addr:  # a zero slot is an empty registry entry, not a read failure
                 zones.append(addr)
-        return zones
+        return zones, None
 
     def _discover_zones(self) -> Tuple[List[Dict[str, Any]], str, List[str]]:
         """Discover and read every zone; returns (zones, source, warnings).
@@ -300,9 +406,9 @@ class LibmallocAnalyzer:
         (registry symbols unavailable), or ``"none"`` (nothing resolvable).
         """
         default = self._default_zone()
-        registry = self._registry_zones()
+        registry, registry_diagnostic = self._registry_zones()
         warnings: List[str] = []
-        if registry:
+        if registry is not None:
             addrs = list(registry)
             source = "registry"
             if default is not None and default not in addrs:
@@ -311,10 +417,16 @@ class LibmallocAnalyzer:
         elif default is not None:
             addrs = [default]
             source = "default_zone"
-            warnings.append(
-                "_malloc_zones/_num_zones symbols unavailable; "
-                "listing the default zone only"
-            )
+            if registry_diagnostic == "symbols unavailable":
+                warnings.append(
+                    "_malloc_zones/_num_zones symbols unavailable; "
+                    "listing the default zone only"
+                )
+            else:
+                warnings.append(
+                    f"_malloc_zones registry {registry_diagnostic}; "
+                    "listing the default zone only"
+                )
         else:
             return [], "none", warnings
 
@@ -335,8 +447,18 @@ class LibmallocAnalyzer:
         """``malloc_size()`` -- the pointer's allocation size, or 0."""
         return self._eval_unsigned(f"(unsigned long)malloc_size((void*)0x{address:x})")
 
-    def _zone_hint(self, address: int, zones: List[Dict[str, Any]]) -> Optional[str]:
-        """Ask each zone's ``size`` function which one owns the pointer."""
+    def _zone_hint(
+        self, address: int, zones: List[Dict[str, Any]]
+    ) -> Tuple[Optional[str], bool]:
+        """Ask each zone's ``size`` function which one owns the pointer.
+
+        Returns ``(hint, probes_failed)``.  A ``None`` from ``zone->size`` is
+        an inferior-call *failure*, not an answer of "does not own" -- the
+        probe stops there and ``probes_failed`` is set, because a later zone
+        claiming the pointer would otherwise be trusted even though an earlier
+        owner candidate could not be asked.  ``zone_hint`` must be omitted
+        (not guessed) in that case.
+        """
         for zone in zones:
             fn = (zone.get("function_table") or {}).get("size")
             zone_addr = zone.get("address")
@@ -346,31 +468,42 @@ class LibmallocAnalyzer:
                 f"((unsigned long (*)(void *, void *)) 0x{fn:x})"
                 f"(0x{zone_addr:x}, 0x{address:x})"
             )
+            if claimed is None:
+                return None, True
             if claimed:
                 name = zone.get("name")
-                return name or f"zone@0x{zone_addr:x}"
-        return None
+                return (name or f"zone@0x{zone_addr:x}"), False
+        return None, False
 
     def _classify_pointer(
         self, address: int
-    ) -> Tuple[str, Optional[int], Optional[str]]:
+    ) -> Tuple[str, Optional[int], Optional[str], bool]:
+        """Return ``(verdict, size, zone_hint, hint_uncertain)``."""
         size = self._malloc_size(address)
         if size is None:
-            return "unresolvable", None, None
+            return "unresolvable", None, None, False
         if size > 0:
             zones, _source, _warnings = self._discover_zones()
-            return "allocated", size, self._zone_hint(address, zones)
-        return "not_allocated", 0, None
+            hint, probes_failed = self._zone_hint(address, zones)
+            return "allocated", size, hint, probes_failed
+        return "not_allocated", 0, None, False
 
-    def _good_size_probes(self) -> List[Dict[str, Any]]:
-        """Probe ``malloc_good_size`` over common size classes (default zone)."""
+    def _good_size_probes(self) -> Tuple[List[Dict[str, Any]], int]:
+        """Probe ``malloc_good_size`` over common size classes (default zone).
+
+        Returns ``(probes, failed_count)`` so a caller can distinguish "the
+        zone has no size classes to sketch" from "the probes all failed" --
+        an empty list alone cannot tell them apart.
+        """
         probes: List[Dict[str, Any]] = []
+        failed = 0
         for requested in _GOOD_SIZE_PROBES:
             good = self._eval_unsigned(f"(unsigned long)malloc_good_size({requested})")
             if good is None:
+                failed += 1
                 continue
             probes.append({"requested": requested, "good_size": good})
-        return probes
+        return probes, failed
 
     # -- Mach-O binary context ---------------------------------------
     def _macho_binary(self) -> Dict[str, Any]:
@@ -384,10 +517,14 @@ class LibmallocAnalyzer:
             return {"is_macho": False, "reason": "binary path provider raised"}
         if not path:
             return {"is_macho": False, "reason": "binary path unavailable"}
-        from .macho import MachOError, load_macho  # noqa: PLC0415
+        from .macho import FatMachOError, MachOError, load_macho  # noqa: PLC0415
 
         try:
             macho = load_macho(path)
+        except FatMachOError as exc:
+            # A universal (fat) image is Mach-O -- say so, with no structural
+            # fields because the slice is not parsed.
+            return {"is_macho": True, "is_fat": True, "reason": str(exc)}
         except MachOError as exc:
             return {"is_macho": False, "reason": str(exc)}
         except OSError as exc:
@@ -428,6 +565,7 @@ class LibmallocAnalyzer:
         reason: str,
         address: Optional[int] = None,
         address_kind: Optional[str] = None,
+        warnings: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         parsed: Dict[str, Any] = {
             "schema": schema,
@@ -448,7 +586,7 @@ class LibmallocAnalyzer:
             raw_responses=[],
             state=self.facade.gdb.get_state(),
             parser_version=PARSER_VERSION,
-            warnings=[],
+            warnings=list(warnings) if warnings else [],
         )
 
     def _zones_envelope(
@@ -511,6 +649,15 @@ class LibmallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
+        guard = self._verify_family(
+            "inspect_libmalloc_zones",
+            LIBMALLOC_ZONES_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+        )
+        if guard is not None:
+            return guard
         return self._zones_envelope(
             "inspect_libmalloc_zones",
             LIBMALLOC_ZONES_SCHEMA,
@@ -531,10 +678,25 @@ class LibmallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
+        if zone_address is not None and parse_int(zone_address) is None:
+            # A provided-but-unparseable address must not silently fall back to
+            # the default zone (the caller would be told the requested zone was
+            # inspected).  Contract-check it like classify_pointer does.
+            raise ValueError(f"zone_address must be an integer, got {zone_address!r}")
         default = self._default_zone()
         target = parse_int(zone_address) if zone_address is not None else None
         if target is None:
             target = default
+        guard = self._verify_family(
+            "inspect_malloc_zone",
+            LIBMALLOC_ZONE_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=target,
+        )
+        if guard is not None:
+            return guard
         warnings: List[str] = []
         size_classes: List[Dict[str, Any]] = []
         size_class_note: Optional[str] = None
@@ -551,7 +713,13 @@ class LibmallocAnalyzer:
                 verdict = "inspected"
                 reason = None
                 if target == default:
-                    size_classes = self._good_size_probes()
+                    size_classes, failed_probes = self._good_size_probes()
+                    if failed_probes:
+                        warnings.append(
+                            f"{failed_probes} of {len(_GOOD_SIZE_PROBES)} "
+                            "malloc_good_size probes failed; size-class hints "
+                            "may be incomplete"
+                        )
                 else:
                     size_class_note = (
                         "probes omitted: malloc_good_size reflects the default "
@@ -594,7 +762,19 @@ class LibmallocAnalyzer:
         address_int = parse_int(address)
         if address_int is None:
             raise ValueError(f"address must be an integer, got {address!r}")
-        verdict, size, zone_hint = self._classify_pointer(address_int)
+        guard = self._verify_family(
+            "classify_malloc_pointer",
+            LIBMALLOC_POINTER_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=address_int,
+            address_kind=address_kind,
+        )
+        if guard is not None:
+            return guard
+        warnings = self._validate_address_kind(address_kind)
+        verdict, size, zone_hint, hint_uncertain = self._classify_pointer(address_int)
         parsed: Dict[str, Any] = {
             "schema": LIBMALLOC_POINTER_SCHEMA,
             "address": address_int,
@@ -612,13 +792,18 @@ class LibmallocAnalyzer:
                 "malloc_size() failed or the expression was unavailable; "
                 "ownership is unresolved"
             )
+        elif hint_uncertain:
+            warnings.append(
+                "the owning-zone hint could not be resolved because a zone "
+                "size probe failed; zone_hint is omitted rather than guessed"
+            )
         return build_backend_response(
             "classify_malloc_pointer",
             parsed=parsed,
             raw_responses=[],
             state=self.facade.gdb.get_state(),
             parser_version=PARSER_VERSION,
-            warnings=[],
+            warnings=warnings,
         )
 
     # -- AllocatorAnalyzer surface -----------------------------------
@@ -630,14 +815,31 @@ class LibmallocAnalyzer:
         include_next: bool = True,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        """Classify a pointer's libmalloc ownership via ``malloc_size``."""
+        """Classify a pointer's libmalloc ownership via ``malloc_size``.
+
+        Verdict vocabulary: ``allocated`` / ``not_allocated`` (malloc_size
+        resolved), or ``unresolvable`` (the ownership expression could not be
+        evaluated).
+        """
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
         address_int = parse_int(address)
         if address_int is None:
             raise ValueError(f"address must be an integer, got {address!r}")
-        verdict, size, zone_hint = self._classify_pointer(address_int)
+        guard = self._verify_family(
+            "inspect_chunk",
+            CHUNK_INSPECTION_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=address_int,
+            address_kind=address_kind,
+        )
+        if guard is not None:
+            return guard
+        warnings = self._validate_address_kind(address_kind)
+        verdict, size, zone_hint, hint_uncertain = self._classify_pointer(address_int)
         parsed: Dict[str, Any] = {
             "schema": CHUNK_INSPECTION_SCHEMA,
             "address": address_int,
@@ -656,13 +858,18 @@ class LibmallocAnalyzer:
                 "malloc_size() failed or the expression was unavailable; "
                 "ownership is unresolved"
             )
+        elif hint_uncertain:
+            warnings.append(
+                "the owning-zone hint could not be resolved because a zone "
+                "size probe failed; zone_hint is omitted rather than guessed"
+            )
         return build_backend_response(
             "inspect_chunk",
             parsed=parsed,
             raw_responses=[],
             state=self.facade.gdb.get_state(),
             parser_version=PARSER_VERSION,
-            warnings=[],
+            warnings=warnings,
         )
 
     def validate_chunk(
@@ -672,14 +879,31 @@ class LibmallocAnalyzer:
         address_kind: str = "user",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        """Check whether an address is a live libmalloc allocation."""
+        """Check whether an address is a live libmalloc allocation.
+
+        Verdict vocabulary: ``valid`` / ``invalid`` (malloc_size resolved
+        ownership), or ``unresolvable`` (the ownership expression could not be
+        evaluated).
+        """
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
         address_int = parse_int(address)
         if address_int is None:
             raise ValueError(f"address must be an integer, got {address!r}")
-        verdict, size, zone_hint = self._classify_pointer(address_int)
+        guard = self._verify_family(
+            "validate_chunk",
+            CHUNK_VALIDATION_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=address_int,
+            address_kind=address_kind,
+        )
+        if guard is not None:
+            return guard
+        warnings = self._validate_address_kind(address_kind)
+        verdict, size, zone_hint, hint_uncertain = self._classify_pointer(address_int)
         mapped = {"allocated": "valid", "not_allocated": "invalid"}.get(
             verdict, verdict
         )
@@ -700,13 +924,18 @@ class LibmallocAnalyzer:
                 "malloc_size() failed or the expression was unavailable; "
                 "validity is unresolved"
             )
+        elif hint_uncertain:
+            warnings.append(
+                "the owning-zone hint could not be resolved because a zone "
+                "size probe failed; zone_hint is omitted rather than guessed"
+            )
         return build_backend_response(
             "validate_chunk",
             parsed=parsed,
             raw_responses=[],
             state=self.facade.gdb.get_state(),
             parser_version=PARSER_VERSION,
-            warnings=[],
+            warnings=warnings,
         )
 
     def list_arenas(
@@ -718,18 +947,15 @@ class LibmallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
-        if classification.get("family") != "libmalloc":
-            return self._unsupported(
-                "list_arenas",
-                ARENA_LIST_SCHEMA,
-                classification=classification,
-                profile=profile,
-                component_status=component_status,
-                reason=(
-                    "the current target is not classified as libmalloc; "
-                    "malloc zones are not meaningful here"
-                ),
-            )
+        guard = self._verify_family(
+            "list_arenas",
+            ARENA_LIST_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+        )
+        if guard is not None:
+            return guard
         return self._zones_envelope(
             "list_arenas",
             ARENA_LIST_SCHEMA,
@@ -749,10 +975,25 @@ class LibmallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
+        if arena_address is not None and parse_int(arena_address) is None:
+            # A provided-but-unparseable address must not silently fall back to
+            # the default zone (the caller would be told the requested zone was
+            # inspected).  Contract-check it like inspect_zone does.
+            raise ValueError(f"arena_address must be an integer, got {arena_address!r}")
         default = self._default_zone()
         target = parse_int(arena_address) if arena_address is not None else None
         if target is None:
             target = default
+        guard = self._verify_family(
+            "inspect_arena",
+            ARENA_INSPECTION_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=target,
+        )
+        if guard is not None:
+            return guard
         if target is None:
             verdict = "zone_unavailable"
             reason = "no zone address given and the default zone is unresolvable"
@@ -883,6 +1124,11 @@ class LibmallocAnalyzer:
             cancellation_check
         )
         address_int = parse_int(address)
+        if address_int is None:
+            # Contract-check like inspect_chunk/validate_chunk so a malformed
+            # address is surfaced as a bad argument, never swallowed.
+            raise ValueError(f"address must be an integer, got {address!r}")
+        warnings = self._validate_address_kind(address_kind)
         return self._unsupported(
             "validate_free",
             FREE_VALIDATION_SCHEMA,
@@ -892,6 +1138,7 @@ class LibmallocAnalyzer:
             reason="free validation is glibc-specific; not implemented for libmalloc",
             address=address_int,
             address_kind=address_kind,
+            warnings=warnings,
         )
 
     def analyze_heap_technique(

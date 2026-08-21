@@ -424,13 +424,21 @@ def catch_errors(
                 and idempotency_claimed
                 and idempotency_key is not None
             ):
-                services.operation_registry.complete_idempotency(
-                    fn.__name__,
-                    operation_session_id,
-                    idempotency_key,
-                    argument_fingerprint,
-                    response,
-                )
+                if response.get("success"):
+                    services.operation_registry.complete_idempotency(
+                        fn.__name__,
+                        operation_session_id,
+                        idempotency_key,
+                        argument_fingerprint,
+                        response,
+                    )
+                else:
+                    # Only terminal successes are cached: a transient failure
+                    # must not permanently poison this tool+args combo by
+                    # replaying the failure on every retry until TTL eviction.
+                    services.operation_registry.abort_idempotency(
+                        fn.__name__, operation_session_id, idempotency_key
+                    )
             return response
 
         wrapper.__annotations__ = dict(wrapper.__annotations__)

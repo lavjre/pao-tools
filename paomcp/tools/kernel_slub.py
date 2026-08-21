@@ -30,6 +30,7 @@ def register(mcp: FastMCP) -> None:
         cache_address: str,
         btf_path: Optional[str] = None,
         page_size: int = 4096,
+        byteorder: str = "little",
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Inspect a kernel ``struct kmem_cache``: name, object size,
@@ -41,6 +42,8 @@ def register(mcp: FastMCP) -> None:
         host, or pass ``btf_path`` for a BTF blob file.  Read-only.  Returns
         the cache's size class, ``random`` value, hardening state, order, and
         objects-per-slab, plus the BTF source and resolved fields.
+        ``byteorder`` is the target memory byte order (``"little"`` default;
+        pass ``"big"`` for big-endian kernels like s390x / ppc64).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -53,6 +56,7 @@ def register(mcp: FastMCP) -> None:
                 cache_address=cache_address,
                 btf_path=btf_path,
                 page_size=page_size,
+                byteorder=byteorder,
                 cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
                     operation_id
                 ),
@@ -71,19 +75,23 @@ def register(mcp: FastMCP) -> None:
         btf_path: Optional[str] = None,
         page_size: int = 4096,
         max_objects: Optional[int] = None,
+        byteorder: str = "little",
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Decode a SLUB slab's free-object freelist.
 
         ``cache_address`` is a ``struct kmem_cache``; ``slab_address`` is the
         address of the slab's ``struct slab`` (or ``struct page`` on older
-        kernels) header.  ``slab_mem_address`` optionally names the slab page
-        itself (its header lives at the page base); when omitted it is derived
-        from the decoded objects.  Object slots are XOR/swap-obfuscated when
-        the cache is hardened (``CONFIG_SLAB_FREELIST_HARDENED``); both the
-        5.x legacy and >=5.7 ``swab`` encodings and both raw and encoded head
-        interpretations are auto-detected.  Returns the decoded object
-        addresses, per-link evidence, and every candidate attempt.
+        kernels) header.  ``slab_mem_address`` optionally names the base of
+        the slab's page window; when omitted it is derived from the slab
+        address, aligned to the slab's full extent (order-aware).  Object
+        slots are XOR/swap-obfuscated when the cache is hardened
+        (``CONFIG_SLAB_FREELIST_HARDENED``); both the 5.x legacy and >=5.7
+        ``swab`` encodings and both raw and encoded head interpretations are
+        auto-detected.  ``byteorder`` is the target memory byte order
+        (``"little"`` default; ``"big"`` for big-endian kernels).  Returns the
+        decoded object addresses, per-link evidence, and every candidate
+        attempt.
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -99,6 +107,7 @@ def register(mcp: FastMCP) -> None:
                 btf_path=btf_path,
                 page_size=page_size,
                 max_objects=max_objects,
+                byteorder=byteorder,
                 cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
                     operation_id
                 ),

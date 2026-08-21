@@ -406,6 +406,47 @@ class SubprocessTools:
             return False
 
     @staticmethod
+    def _command_segment_heads(cmd_parts: List[str]) -> List[int]:
+        """Return the index of every shell segment's executable-position token.
+
+        ``sh -lc`` parses the whole command string, so a first-token-only
+        guardrail is trivially bypassed by ``cd x && ./chal``,
+        ``env python3 -c ...`` or ``; ./chal``.  This walks the token list
+        and collects the head index of each ``&&`` / ``||`` / ``;`` / ``|`` /
+        ``&`` segment so every command that will actually run is inspected.
+        """
+        if not cmd_parts:
+            return []
+        separators = {"&&", "||", ";", "|", "&"}
+        heads = [0]
+        for i, token in enumerate(cmd_parts):
+            if token in separators and i + 1 < len(cmd_parts):
+                nxt = cmd_parts[i + 1]
+                if nxt not in separators:
+                    heads.append(i + 1)
+        return heads
+
+    @staticmethod
+    def _contains_dash_c(cmd_parts: List[str], token_index: int) -> bool:
+        """Whether ``-c`` follows the python executable at ``token_index``.
+
+        Scans the tokens after the executable: option flags (``-O``, ``-u``)
+        are skipped, ``-c`` itself is a hit, and a shell separator or the
+        first non-option argument ends the lookahead.  This keeps
+        ``python3 -c``, ``python3 -O -c`` and ``env python3 -c`` blocked while
+        ``grep -c python3`` (``-c`` precedes python3) and ``python3 -V file``
+        are left alone.
+        """
+        for nxt in cmd_parts[token_index + 1 :]:
+            if nxt in {"&&", "||", ";", "|", "&"}:
+                break
+            if not nxt.startswith("-"):
+                break
+            if nxt == "-c" or nxt.startswith("-c"):
+                return True
+        return False
+
+    @staticmethod
     def _resolve_candidate_executable(token: str, cwd: Optional[str]) -> Optional[str]:
         if os.path.isabs(token):
             return os.path.normpath(token)
@@ -492,13 +533,27 @@ class SubprocessTools:
 
         executable = cmd_parts[0]
 
-        if self._is_python_executable(executable) and "-c" in cmd_parts:
-            return self._guardrail_error(
-                command=command,
-                cwd=cwd,
-                error=("Do not use 'python -c' here. Use execute_python_code."),
-                recommended_tool="execute_python_code",
-            )
+        # The command string is executed as ``sh -lc <command>``, so the
+        # guardrails must inspect EVERY shell segment's executable position,
+        # not just ``cmd_parts[0]`` -- ``cd /workspace && ./chal`` or
+        # ``env python3 -c ...`` would otherwise sail past a first-token-only
+        # check while the shell happily runs the workspace ELF / python.
+        segment_heads = self._command_segment_heads(cmd_parts)
+
+        # Scan every token, not just segment heads: ``env python3 -c ...`` and
+        # ``sudo python3 -c ...`` run python from a wrapper argument, and the
+        # inline-script branch below already scans the whole sh -c body, so a
+        # whole-token scan is the consistent rule.
+        for token_index, token in enumerate(cmd_parts):
+            if self._is_python_executable(token) and self._contains_dash_c(
+                cmd_parts, token_index
+            ):
+                return self._guardrail_error(
+                    command=command,
+                    cwd=cwd,
+                    error=("Do not use 'python -c' here. Use execute_python_code."),
+                    recommended_tool="execute_python_code",
+                )
 
         if executable in {"sh", "bash", "/bin/sh", "/bin/bash"}:
             inline_script = ""
@@ -522,24 +577,25 @@ class SubprocessTools:
                     recommended_tool="execute_python_code",
                 )
 
-        candidate = self._resolve_candidate_executable(executable, cwd)
-        if (
-            candidate
-            and self._is_under_workspace(candidate)
-            and self._is_elf_file(candidate)
-        ):
-            action = "run under debugger" if operation == "run_command" else "spawn"
-            return self._guardrail_error(
-                command=command,
-                cwd=cwd,
-                error=(
-                    f"Do not use {operation} to {action} a target ELF under "
-                    f"{self.workspace_root}. "
-                    "Use set_file + run (or attach). Use paocli for interactive "
-                    "exploit-driver workflows."
-                ),
-                recommended_tool="set_file+run",
-            )
+        for head_index in segment_heads:
+            candidate = self._resolve_candidate_executable(cmd_parts[head_index], cwd)
+            if (
+                candidate
+                and self._is_under_workspace(candidate)
+                and self._is_elf_file(candidate)
+            ):
+                action = "run under debugger" if operation == "run_command" else "spawn"
+                return self._guardrail_error(
+                    command=command,
+                    cwd=cwd,
+                    error=(
+                        f"Do not use {operation} to {action} a target ELF under "
+                        f"{self.workspace_root}. "
+                        "Use set_file + run (or attach). Use paocli for interactive "
+                        "exploit-driver workflows."
+                    ),
+                    recommended_tool="set_file+run",
+                )
 
         return None
 

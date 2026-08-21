@@ -119,20 +119,25 @@ def register(mcp: FastMCP) -> None:
         include_next: bool = True,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Read + parse a glibc malloc_chunk at ``address`` with full evidence.
+        """Inspect the allocation an ``address`` belongs to, per allocator
+        family.
 
-        Reads the ``2 * pointer_size`` chunk header from the live inferior,
-        decodes ``prev_size``/``size``/flags (``PREV_INUSE``, ``IS_MMAPPED``,
-        ``NON_MAIN_ARENA``) with per-field raw hex evidence, and returns the
-        chunk vs user address, the physical next/previous chunk addresses, and
-        structural checks (alignment, minimum chunk size, mapping containment).
+        The tool is family-routed (see ``detect_allocator``).  On a glibc
+        target it reads the ``2 * pointer_size`` chunk header from the live
+        inferior, decodes ``prev_size``/``size``/flags (``PREV_INUSE``,
+        ``IS_MMAPPED``, ``NON_MAIN_ARENA``) with per-field raw hex evidence,
+        and returns the chunk vs user address, the physical next/previous
+        chunk addresses, and structural checks (alignment, minimum chunk
+        size, mapping containment).  On a jemalloc target it resolves the
+        address to its rtree extent; on libmalloc it classifies pointer
+        ownership via ``malloc_size``.  Other allocators (musl / scudo /
+        unknown) yield ``verdict = "unsupported"``.
 
-        When ``include_next`` is true the physically next chunk's header is
-        also read so the allocation status of this chunk can be inferred from
-        that chunk's ``PREV_INUSE`` bit; ``IS_MMAPPED`` chunks report
-        ``allocated`` by construction because they stand outside heap arenas.
-        The tool refuses to parse a non-glibc target and returns
-        ``verdict = "unsupported"``.
+        When ``include_next`` is true (glibc targets) the physically next
+        chunk's header is also read so the allocation status of this chunk
+        can be inferred from that chunk's ``PREV_INUSE`` bit; ``IS_MMAPPED``
+        chunks report ``allocated`` by construction because they stand
+        outside heap arenas.
 
         Args:
             session_id: Debugger session whose live inferior should be inspected.
@@ -168,15 +173,18 @@ def register(mcp: FastMCP) -> None:
         session_id: str,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Enumerate glibc arenas by walking the ``main_arena.next`` chain.
+        """Enumerate the allocator's top-level structures, per family.
 
-        Requires libc built with debug symbols to resolve ``main_arena`` and
-        the ``malloc_state.next`` field offset; without them the tool
-        returns ``verdict = "unresolvable"`` rather than guessing.  The
-        traversal is bounded (256 arenas max) with cycle detection so a
-        corrupted heap cannot hang the tool.
+        The tool is family-routed (see ``detect_allocator``): glibc walks the
+        ``main_arena.next`` chain (requiring libc debug symbols to resolve
+        ``main_arena`` and the ``malloc_state.next`` offset; without them
+        ``verdict = "unresolvable"`` rather than guessing; traversal bounded
+        at 256 arenas with cycle detection so a corrupted heap cannot hang
+        the tool), jemalloc reports its rtree extent inventory, and libmalloc
+        lists its malloc zones.  Other allocators (musl / scudo / unknown)
+        yield ``verdict = "unsupported"``.
 
-        Each returned arena carries its address, index in the chain, a
+        Each glibc arena carries its address, index in the chain, a
         ``is_main`` flag, whether the address lies in any known memory
         mapping, and the next-arena pointer read from live memory.
 
@@ -207,15 +215,18 @@ def register(mcp: FastMCP) -> None:
         arena_address: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Read and decode a full glibc ``malloc_state`` struct.
+        """Inspect one arena-like structure deep, per allocator family.
 
-        Reads ``sizeof(struct malloc_state)`` bytes at the arena address
-        and decodes each field (mutex, flags, have_fastchunks, fastbinsY,
-        top, last_remainder, bins, binmap, next, next_free,
-        attached_threads, system_mem, max_system_mem) using offsets
-        resolved from libc debug symbols.  Fields whose offset cannot be
-        resolved or whose byte range falls outside the read are reported
-        under ``unreadable_fields`` rather than silently defaulted.
+        The tool is family-routed (see ``detect_allocator``): glibc reads and
+        decodes a full ``malloc_state`` struct (mutex, flags, have_fastchunks,
+        fastbinsY, top, last_remainder, bins, binmap, next, next_free,
+        attached_threads, system_mem, max_system_mem) using offsets resolved
+        from libc debug symbols, with unresolvable or out-of-range fields
+        reported under ``unreadable_fields`` rather than silently defaulted;
+        jemalloc resolves ``arena_address`` as an rtree extent; libmalloc
+        inspects the given malloc zone (default zone when omitted).  Other
+        allocators (musl / scudo / unknown) yield
+        ``verdict = "unsupported"``.
 
         Args:
             session_id: Debugger session whose live inferior should be
@@ -375,6 +386,10 @@ def register(mcp: FastMCP) -> None:
         Each chain is bounded (default 128 chunks per bin) with cycle
         detection so a corrupted allocator can never hang the tool.
 
+        This surface is glibc-specific; the family-routed dispatch returns
+        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
+        allocators.
+
         Args:
             session_id: Debugger session whose live inferior should be
                 inspected.
@@ -425,6 +440,10 @@ def register(mcp: FastMCP) -> None:
         error).  Missing debug symbols yield
         ``verdict = "unresolvable"``.
 
+        This surface is glibc-specific; the family-routed dispatch returns
+        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
+        allocators.
+
         Args:
             session_id: Debugger session whose live inferior should be
                 inspected.
@@ -470,6 +489,10 @@ def register(mcp: FastMCP) -> None:
         prev_inuse, fd, bk, and in_mapping.  Large bin secondary
         size-sorted lists (fd_nextsize / bk_nextsize) are deferred.
 
+        This surface is glibc-specific; the family-routed dispatch returns
+        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
+        allocators.
+
         Args:
             session_id: Debugger session whose live inferior should be
                 inspected.
@@ -503,15 +526,21 @@ def register(mcp: FastMCP) -> None:
         address_kind: str = "user",
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Return a conservative structural verdict for a glibc chunk.
+        """Return an allocation-validity verdict, routed by allocator family.
 
-        Runs the same read + parse as ``inspect_chunk`` and summarizes the
-        outcome as one of ``unsupported`` (non-glibc target), ``unreadable``
-        (header could not be read), ``corrupted`` (alignment / minimum-size /
-        containment check failed), ``suspicious`` (header in a mapping but the
-        declared size extends past its end), or ``valid`` (every check passed).
-        The response includes the individual check results and the list of
-        failed check names so a heuristic is never promoted to a fact.
+        The tool is family-routed (see ``detect_allocator``): the verdict
+        vocabulary differs by family.  On a glibc target it runs the same
+        read + parse as ``inspect_chunk`` and summarizes the outcome as
+        ``unsupported`` (non-glibc), ``unreadable`` (header could not be
+        read), ``corrupted`` (alignment / minimum-size / containment check
+        failed), ``suspicious`` (header in a mapping but the declared size
+        extends past its end), or ``valid`` (every check passed).  On a
+        jemalloc or libmalloc target it reports allocation ownership instead:
+        ``valid`` / ``invalid`` (a live allocation via find-extent or
+        ``malloc_size``), or ``unresolvable`` (the ownership check could not
+        run).  The response includes the individual check results and the
+        list of failed check names so a heuristic is never promoted to a
+        fact.
 
         Args:
             session_id: Debugger session whose live inferior should be inspected.
@@ -558,6 +587,9 @@ def register(mcp: FastMCP) -> None:
         ``pointer_out_of_mapping``, ``unreadable_chunk`` and
         ``unreadable_bin``.  The tcache is thread-local so its findings
         always reflect the current thread regardless of ``arena_address``.
+        This surface is glibc-specific; the family-routed dispatch returns
+        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
+        allocators.
 
         Args:
             session_id: Debugger session whose live inferior should be
@@ -596,7 +628,9 @@ def register(mcp: FastMCP) -> None:
         the chunk against the current thread's tcache and main_arena's
         fastbins to catch a double-free before ``free()`` fires.
 
-        Verdict vocabulary: ``unsupported`` (non-glibc), ``unreadable``
+        Verdict vocabulary: ``unsupported`` (non-glibc; this surface is
+        glibc-specific and the family-routed dispatch returns ``unsupported``
+        on jemalloc / libmalloc / unknown allocators), ``unreadable``
         (header could not be read), ``double_free`` (chunk already present
         in tcache or fastbins), ``corrupted`` (alignment / mapping / min-size
         check failed), ``suspicious`` (payload extends past mapping end), or
@@ -650,8 +684,9 @@ def register(mcp: FastMCP) -> None:
         Snapshots are stored session-locally under a bounded budget (16
         entries and 64 MiB total, oldest-first eviction).  Re-capturing
         under an existing ``name`` evicts the previous entry so the name
-        always points at the latest capture.  A non-glibc allocator
-        yields a stored ``unsupported`` snapshot with an empty ledger.
+        always points at the latest capture.  The capture is family-routed:
+        a jemalloc / libmalloc / other allocator yields a stored
+        ``unsupported`` snapshot with an empty ledger.
 
         Args:
             session_id: Debugger session whose live inferior should be
@@ -754,7 +789,8 @@ def register(mcp: FastMCP) -> None:
         per-arena presence and top-address delta.  Either identifier may
         be a ``snapshot_id`` or a name.  Diffing a snapshot against
         itself is rejected.  If either snapshot was captured on a
-        non-glibc allocator the diff returns ``verdict=unsupported``.
+        non-glibc allocator (the capture is family-routed) the diff
+        returns ``verdict=unsupported``.
 
         Args:
             session_id: Debugger session that owns both snapshots.
@@ -830,7 +866,9 @@ def register(mcp: FastMCP) -> None:
 
         The aggregate ``verdict`` is ``clean`` (nothing observed),
         ``suspicious`` (only low/medium findings), ``exploitable`` (any
-        critical/high finding), ``unsupported`` (non-glibc target), or
+        critical/high finding), ``unsupported`` (non-glibc target -- this
+        surface is glibc-specific and the family-routed dispatch returns
+        ``unsupported`` on jemalloc / libmalloc / unknown allocators), or
         ``unresolvable`` (arena bin layout could not be resolved via debug
         symbols).  The ``mmap_chunk_scan`` detector is a bounded sweep of
         writable non-heap mappings (``mmap_max_mappings`` mappings, at most

@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 from paomcp.artifacts import ArtifactStore
 from paomcp.operations import OperationRegistry
 from paomcp.paopipe import PaoPipe
-from paomcp.state import DebugSessionRegistry
+from paomcp.state import DebugSession, DebugSessionRegistry
 from paomcp.tools.backends import (
     GhidraDecompiler,
     GitTools,
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class AppServices:
     runtime_paths: RuntimePaths
     session_registry: DebugSessionRegistry
-    default_session_id: str
+    default_session_id: Optional[str]
     subprocess_tools: SubprocessTools
     git_tools: GitTools
     python_tools: PythonTools
@@ -65,21 +65,39 @@ def create_services(
         else build_runtime_paths(workspace_root, runtime_root)
     )
     session_registry = DebugSessionRegistry(runtime_paths)
-    default_session = session_registry.create_session("default")
-
-    init_result = default_session.gdb.initialize()
-    logger.info("GDB initialization: %s", init_result.get("status"))
+    default_session: Optional[DebugSession] = None
     try:
-        debugger_compatibility = default_session.tools.get_debugger_capabilities(
-            refresh=True
-        )
+        # Creating the default session resolves the debugger executable and
+        # initializes it; a missing/unusable debugger must degrade the server
+        # (non-debugger tools keep working) instead of failing startup.
+        default_session = session_registry.create_session("default")
     except Exception as exc:
-        logger.exception("Pwndbg compatibility probe failed")
+        logger.exception("Failed to create the default debug session")
+        logger.warning("Continuing without a default debug session: %s", exc)
+
+    if default_session is not None:
+        init_result = default_session.gdb.initialize()
+        logger.info("GDB initialization: %s", init_result.get("status"))
+
+    if default_session is not None:
+        try:
+            debugger_compatibility = default_session.tools.get_debugger_capabilities(
+                refresh=True
+            )
+        except Exception as exc:
+            logger.exception("Pwndbg compatibility probe failed")
+            debugger_compatibility = {
+                "success": False,
+                "ready": False,
+                "error": str(exc),
+                "type": type(exc).__name__,
+            }
+    else:
         debugger_compatibility = {
             "success": False,
             "ready": False,
-            "error": str(exc),
-            "type": type(exc).__name__,
+            "error": "no default debug session (debugger spawn failed at startup)",
+            "type": "DebugSessionUnavailable",
         }
     if debugger_compatibility.get("ready"):
         logger.info(
@@ -106,7 +124,9 @@ def create_services(
     services = AppServices(
         runtime_paths=runtime_paths,
         session_registry=session_registry,
-        default_session_id=default_session.session_id,
+        default_session_id=(
+            default_session.session_id if default_session is not None else None
+        ),
         subprocess_tools=SubprocessTools(
             process_root=runtime_paths.processes_dir,
             workspace_root=runtime_paths.workspace_root,

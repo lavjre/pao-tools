@@ -8,6 +8,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
 from paomcp.tools.common import catch_errors, get_services
+from paomcp.utils.paths import resolve_workspace_path
 
 
 def register(mcp: FastMCP) -> None:
@@ -358,9 +359,18 @@ def register(mcp: FastMCP) -> None:
 
         Args:
             session_id: Research session to export.
-            destination: Local file path for the ``.zip`` bundle.
+            destination: Workspace-relative path (under ``/workspace``) for
+                the ``.zip`` bundle; relative paths resolve under the
+                workspace and host absolute paths are remapped like every
+                other file-taking tool.
         """
         services = get_services(ctx)
+        destination = resolve_workspace_path(
+            destination,
+            workspace_root=services.runtime_paths.workspace_root,
+            require_exists=False,
+            kind="destination",
+        )
         return services.research_bundle.export_response(
             session_id=session_id, destination=destination
         )
@@ -384,11 +394,25 @@ def register(mcp: FastMCP) -> None:
         re-ingest them into the local artifact store.
 
         Args:
-            source_path: Local path to the bundle ``.zip``.
-            artifact_destination_dir: Optional directory to extract
-                artifact payloads into.  Omit to skip extraction.
+            source_path: Workspace-relative path (under ``/workspace``) to
+                the bundle ``.zip``.
+            artifact_destination_dir: Optional workspace-relative directory
+                to extract artifact payloads into.  Omit to skip extraction.
         """
         services = get_services(ctx)
+        source_path = resolve_workspace_path(
+            source_path,
+            workspace_root=services.runtime_paths.workspace_root,
+            require_exists=True,
+            kind="source_path",
+        )
+        if artifact_destination_dir is not None:
+            artifact_destination_dir = resolve_workspace_path(
+                artifact_destination_dir,
+                workspace_root=services.runtime_paths.workspace_root,
+                require_exists=False,
+                kind="artifact_destination_dir",
+            )
         return services.research_bundle.import_response(
             source_path=source_path,
             artifact_destination_dir=artifact_destination_dir,
@@ -447,9 +471,16 @@ def register(mcp: FastMCP) -> None:
         import.
 
         Args:
-            source_path: Local path to the bundle ``.zip``.
+            source_path: Workspace-relative path (under ``/workspace``) to
+                the bundle ``.zip``.
         """
         services = get_services(ctx)
+        source_path = resolve_workspace_path(
+            source_path,
+            workspace_root=services.runtime_paths.workspace_root,
+            require_exists=True,
+            kind="source_path",
+        )
         return services.research_bundle.verify_response(source_path=source_path)
 
 

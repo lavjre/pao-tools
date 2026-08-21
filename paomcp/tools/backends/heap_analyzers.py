@@ -1,30 +1,33 @@
 """Allocator-family dispatch for the heap-analysis surface.
 
-Every typed heap tool routes through :class:`HeapTools`, but only the glibc
-family has real internal parsers.  This module is the seam that separates
-*which* allocator was detected from *which* component family does the work,
-so a later stage can add a ``JemallocAnalyzer`` / ``SlabAnalyzer`` /
-``LibmallocAnalyzer`` without touching the facade or the tool layer.
+Every typed heap tool routes through :class:`HeapTools`.  This module is the
+seam that separates *which* allocator was detected from *which* component
+family does the work, so a new analyzer (``SlabAnalyzer``, ``tcmalloc``,
+...) plugs in without touching the facade or the tool layer.
 
-Phase 0 contract
-----------------
+Contract
+--------
 * :class:`AllocatorAnalyzer` is the per-family surface: the twelve methods
   that depend on allocator-internal layout (chunks, arenas, bins, corruption,
   techniques, snapshot capture).  One implementer exists per supported family.
 * :func:`analyzer_for_family` maps a detected family to an analyzer.  ``glibc``
-  resolves to :class:`GlibcAnalyzer` (full typed parser); ``jemalloc`` resolves
-  to ``JemallocAnalyzer`` (Phase 1: extent/rtree core via pwndbg's plugin);
+  resolves to :class:`GlibcAnalyzer` (full typed structural parser); ``jemalloc``
+  resolves to ``JemallocAnalyzer`` (extent/rtree core via pwndbg's plugin);
+  ``libmalloc`` resolves to ``LibmallocAnalyzer`` (malloc_zone introspection);
   every other family (``musl``, ``scudo``, ``unknown``) resolves to
   :class:`UnsupportedAnalyzer`.
-* Both analyzers *forward* to the existing glibc components
-  (``facade.glibc`` / ``facade.arenas`` / ``facade.bins`` /
-  ``facade.corruption`` / ``facade.techniques`` / ``facade.history``).  Those
-  components already re-classify the inferior per call and return the typed
-  ``unsupported`` verdict for non-glibc families, so forwarding is behavior-
-  identical to today and keeps every existing ``verdict == "unsupported"``
-  assertion intact.  The components are read from the facade **at call time**,
-  not captured at construction -- tests replace ``facade.glibc`` and friends
-  with stand-ins after ``HeapTools`` is built.
+* :class:`GlibcAnalyzer` and :class:`UnsupportedAnalyzer` *forward* to the
+  existing glibc components (``facade.glibc`` / ``facade.arenas`` /
+  ``facade.bins`` / ``facade.corruption`` / ``facade.techniques`` /
+  ``facade.history``).  Those components already re-classify the inferior per
+  call and return the typed ``unsupported`` verdict for non-glibc families,
+  so forwarding is behavior-identical and keeps every existing
+  ``verdict == "unsupported"`` assertion intact.  The components are read
+  from the facade **at call time**, not captured at construction -- tests
+  replace ``facade.glibc`` and friends with stand-ins after ``HeapTools`` is
+  built.  ``JemallocAnalyzer`` and ``LibmallocAnalyzer`` are real parsers;
+  each re-verifies the freshly-classified family inside ``_prepare_context``
+  and returns the typed ``unsupported`` envelope on mismatch.
 
   A later phase replaces :class:`UnsupportedAnalyzer`'s forwarding with a
   real per-family parser (same envelope shape, same return types); the rest
@@ -334,7 +337,7 @@ class _ForwardingAnalyzer:
 
 
 class GlibcAnalyzer(_ForwardingAnalyzer):
-    """Analyzer for the glibc family (the only typed parser in Phase 0)."""
+    """Analyzer for the glibc family (the typed structural parser)."""
 
     family: Optional[str] = "glibc"
 
@@ -342,7 +345,7 @@ class GlibcAnalyzer(_ForwardingAnalyzer):
 class UnsupportedAnalyzer(_ForwardingAnalyzer):
     """Analyzer for families without a typed parser yet.
 
-    Phase 0 forwards to the glibc components, which re-classify the inferior
+    Forwards to the glibc components, which re-classify the inferior
     themselves and return the honest typed ``unsupported`` verdict.  A later
     phase replaces the forwarding on this class with a real parser.
     """
@@ -356,8 +359,10 @@ def analyzer_for_family(
     """Return the analyzer for a detected allocator family.
 
     ``glibc`` maps to :class:`GlibcAnalyzer`, ``jemalloc`` maps to
-    :class:`~paomcp.tools.backends.jemalloc.JemallocAnalyzer` (Phase 1:
-    extent/rtree core); every other family -- and an unresolvable detection
+    :class:`~paomcp.tools.backends.jemalloc.JemallocAnalyzer` (extent/rtree
+    core), ``libmalloc`` maps to
+    :class:`~paomcp.tools.backends.libmalloc.LibmallocAnalyzer` (malloc_zone
+    introspection); every other family -- and an unresolvable detection
     (``None``) -- maps to :class:`UnsupportedAnalyzer`.  This is the single
     extension point for a new family's parser: add the family name to the
     dispatch and the facade starts routing to it.

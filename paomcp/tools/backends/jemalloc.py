@@ -169,6 +169,42 @@ class JemallocAnalyzer:
             "confidence": classification.get("confidence"),
         }
 
+    def _verify_family(
+        self,
+        command: str,
+        schema: str,
+        *,
+        classification: Dict[str, Any],
+        profile: Dict[str, Any],
+        component_status: Dict[str, Any],
+        address: Optional[int] = None,
+        address_kind: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the typed ``unsupported`` envelope when the freshly-
+        classified family is not jemalloc, else ``None``.
+
+        The facade dispatches on a short TTL-cached family (``_FAMILY_CACHE_
+        TTL_SEC``); this per-call re-verify makes that cache harmless -- a
+        target that switched allocators inside the TTL window is never parsed
+        with jemalloc commands, and the re-classified family from
+        ``_prepare_context`` always wins over the dispatch-time guess.
+        """
+        if classification.get("family") == self.family:
+            return None
+        return self._unsupported(
+            command,
+            schema,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            reason=(
+                f"the current target is not classified as {self.family}; "
+                "jemalloc extent reads are not meaningful here"
+            ),
+            address=address,
+            address_kind=address_kind,
+        )
+
     def _command_result(self, command: str) -> Tuple[Dict[str, Any], str]:
         result = self.facade.gdb.execute_command(command)
         return result, _console_text(result)
@@ -237,9 +273,12 @@ class JemallocAnalyzer:
         }
         if reason is not None:
             parsed["reason"] = reason
+        # ``_JEMALLOC_WARNING`` (the static "tested only for jemalloc 5.3.0"
+        # banner) is emitted once per response.  It must NOT be re-read from
+        # the command text: pwndbg prints the banner on every jemalloc command
+        # regardless of the actual target version, so keying a per-call
+        # version warning off it would fire on every 5.3.0+ inspection.
         warnings = [_JEMALLOC_WARNING]
-        if "tested only for jemalloc" in text:
-            warnings.append("target version below 5.3.0 is unsupported by pwndbg")
         return build_backend_response(
             command,
             parsed=parsed,
@@ -292,6 +331,30 @@ class JemallocAnalyzer:
                 raw_responses=raw,
                 reason=error,
             )
+        values = _parse_key_values(text)
+        if not text.strip() or not values:
+            # The command produced no recognizable extent block: either the
+            # plugin is missing (undefined command / empty output) or the
+            # response format changed.  Report that honestly instead of
+            # claiming the address is a live jemalloc allocation.
+            return self._extent_response(
+                command,
+                schema=JEMALLOC_EXTENT_SCHEMA,
+                classification=classification,
+                profile=profile,
+                component_status=component_status,
+                address=address_int,
+                address_kind=address_kind,
+                verdict="unresolvable",
+                extent=None,
+                text=text,
+                raw_responses=raw,
+                reason=(
+                    "the jemalloc command produced no recognizable extent "
+                    "output; the pwndbg jemalloc plugin may be missing "
+                    "(undefined command) or the response format is unknown"
+                ),
+            )
         return self._extent_response(
             command,
             schema=JEMALLOC_EXTENT_SCHEMA,
@@ -301,7 +364,7 @@ class JemallocAnalyzer:
             address=address_int,
             address_kind=address_kind,
             verdict="allocated",
-            extent=_extent_from_keyvalues(_parse_key_values(text)),
+            extent=_extent_from_keyvalues(values),
             text=text,
             raw_responses=raw,
         )
@@ -323,6 +386,17 @@ class JemallocAnalyzer:
             cancellation_check
         )
         command = f"jemalloc find-extent {address_int}"
+        guard = self._verify_family(
+            command,
+            JEMALLOC_EXTENT_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=address_int,
+            address_kind=address_kind,
+        )
+        if guard is not None:
+            return guard
         return self._find_extent(
             command,
             address_int,
@@ -339,7 +413,13 @@ class JemallocAnalyzer:
         address_kind: str = "user",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        """Check whether an address is a live jemalloc allocation."""
+        """Check whether an address is a live jemalloc allocation.
+
+        Verdict vocabulary: ``valid`` / ``invalid`` (the rtree lookup
+        resolved the address to a live extent or not), or ``unresolvable``
+        (the find-extent command could not run or produced no recognizable
+        output).
+        """
         address_int = parse_int(address)
         if address_int is None:
             raise ValueError(f"address must be an integer, got {address!r}")
@@ -347,6 +427,17 @@ class JemallocAnalyzer:
             cancellation_check
         )
         command = f"jemalloc find-extent {address_int}"
+        guard = self._verify_family(
+            command,
+            JEMALLOC_EXTENT_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=address_int,
+            address_kind=address_kind,
+        )
+        if guard is not None:
+            return guard
         response = self._find_extent(
             command,
             address_int,
@@ -377,6 +468,15 @@ class JemallocAnalyzer:
             cancellation_check
         )
         command = "jemalloc heap"
+        guard = self._verify_family(
+            command,
+            JEMALLOC_EXTENT_LIST_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+        )
+        if guard is not None:
+            return guard
         result, text = self._command_result(command)
         raw = result.get("responses", [])
         if "No extents found" in text:
@@ -420,6 +520,30 @@ class JemallocAnalyzer:
                 warnings=[_JEMALLOC_WARNING],
             )
         blocks = _parse_extent_blocks(text)
+        if not text.strip() or not blocks:
+            parsed = {
+                "schema": JEMALLOC_EXTENT_LIST_SCHEMA,
+                "allocator": self._allocator(classification),
+                "target_profile": profile,
+                "supported": True,
+                "verdict": "unresolvable",
+                "extent_count": 0,
+                "extents": [],
+                "component_status": component_status,
+                "reason": (
+                    "the jemalloc command produced no recognizable extent "
+                    "blocks; the pwndbg jemalloc plugin may be missing "
+                    "(undefined command) or the response format is unknown"
+                ),
+            }
+            return build_backend_response(
+                command,
+                parsed=parsed,
+                raw_responses=raw,
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[_JEMALLOC_WARNING],
+            )
         extents = [
             _extent_from_keyvalues(block)
             for block in blocks
@@ -458,6 +582,16 @@ class JemallocAnalyzer:
             cancellation_check
         )
         target = parse_int(arena_address) if arena_address is not None else None
+        guard = self._verify_family(
+            "inspect_arena",
+            ARENA_INSPECTION_SCHEMA,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+            address=target,
+        )
+        if guard is not None:
+            return guard
         if target is None:
             return self._unsupported(
                 "inspect_arena",

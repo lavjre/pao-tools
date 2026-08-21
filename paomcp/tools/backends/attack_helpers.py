@@ -58,11 +58,6 @@ from paomcp.tools.backends.inspection import PwndbgInspection
 
 ATTACK_TCACHE_POISON_SCHEMA = "pao.attack.tcache-poison.v1"
 
-# Offset of the ``fd`` slot within a freed glibc chunk: the tcache ``next``
-# field is offset 0 of the user area (chunk + 2*SIZE_SZ).  The poison write
-# therefore lands at the chunk's *user* address, not at the header.
-_TCACHE_NEXT_OFFSET = 0x10
-
 
 class GlibcAttackHelper:
     """Execute glibc heap primitives against a live target (write-capable).
@@ -84,6 +79,7 @@ class GlibcAttackHelper:
         glibc: Any,
         bins: Any,
         history: Any,
+        patch_recorder: Optional[Any] = None,
     ) -> None:
         self.gdb = gdb
         self.inspection = inspection
@@ -93,6 +89,7 @@ class GlibcAttackHelper:
         self.glibc = glibc
         self.bins = bins
         self.history = history
+        self.patch_recorder = patch_recorder
 
     # ------------------------------------------------------------------
     # Live-target helpers (mirror GlibcTechniqueAnalyzer)
@@ -204,8 +201,6 @@ class GlibcAttackHelper:
         pointer_bits = int(profile.get("pointer_bits") or 64)
         byteorder = cast(Literal["little", "big"], profile.get("byteorder") or "little")
         size_sz = pointer_bits // 8
-        safe_linking = classification.get("safe_linking")
-        safe_linking_enabled = safe_linking == "enabled"
 
         victim = parse_int(victim_address)
         target = parse_int(target_address)
@@ -215,6 +210,36 @@ class GlibcAttackHelper:
             raise ValueError(f"invalid target_address: {target_address!r}")
         victim = self.glibc._chunk_from_user(victim, address_kind, size_sz)
         target_chunk = target - 2 * size_sz
+
+        safe_linking = classification.get("safe_linking")
+        safe_linking_enabled = safe_linking == "enabled"
+        if safe_linking not in ("enabled", "disabled"):
+            # glibc >= 2.32 encodes tcache fds with PROTECT_PTR; older glibc
+            # stores them raw.  With the version unresolved we cannot know
+            # which encoding to write, so writing either form is a guess that
+            # the next malloc will decode into the wrong pointer.  Refuse
+            # instead of silently treating "unknown" as "disabled".
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_TCACHE_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": (
+                        f"safe-linking state is {safe_linking!r}; refusing to "
+                        "write an fd without knowing whether PROTECT_PTR "
+                        "encoding applies (glibc >= 2.32 encodes tcache fds, "
+                        "older glibc does not)"
+                    ),
+                    "component_status": component_status,
+                    "target_address": target,
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
 
         # -- locate the victim in a tcache bin -------------------------
         tcache = self.bins.inspect_tcache(
@@ -368,11 +393,17 @@ class GlibcAttackHelper:
             )
 
         # -- plan ------------------------------------------------------
+        # The fd slot lives at chunk + 2*SIZE_SZ (offset 0 of the user area).
+        # The plan anchors on the chunk header so ``address + chunk_offset``
+        # resolves exactly to the fd slot; ``write_target_address`` is that
+        # resolved location, matching where the write actually lands.
+        fd_slot_offset = 2 * size_sz
         write_plan = {
-            "address": hex(victim_user),
-            "chunk_offset": _TCACHE_NEXT_OFFSET,
+            "address": hex(victim),
+            "chunk_offset": fd_slot_offset,
             "byte_count": size_sz,
             "data_hex": encoded_hex,
+            "write_target_address": hex(victim_user),
         }
         base_parsed: Dict[str, Any] = {
             "schema": ATTACK_TCACHE_POISON_SCHEMA,
@@ -435,7 +466,15 @@ class GlibcAttackHelper:
                     f"(verdict={snap_parsed.get('verdict')!r})"
                 )
 
-        write_result = self.debugger.write_memory(
+        # Route through the patch-recording wrapper (``PwndbgTools.write_``
+        # ``memory``) when one is wired, so the poison lands in the same
+        # session patch ledger that ``list_memory_patches`` / ``revert_memory_``
+        # ``patch`` operate on.  Falls back to the raw guarded writer only in
+        # direct-construction contexts (tests) where no ledger exists.
+        writer = (
+            self.patch_recorder if self.patch_recorder is not None else self.debugger
+        )
+        write_result = writer.write_memory(
             address=hex(victim_user),
             data_hex=encoded_hex,
             verify=True,
@@ -487,6 +526,7 @@ class GlibcAttackHelper:
         revert = {
             "original_hex": write_parsed.get("original_hex"),
             "address": hex(victim_user),
+            "patch_id": write_parsed.get("patch_id"),
             "how": (
                 "restore by writing original_hex back via the write_memory "
                 "tool at this address"

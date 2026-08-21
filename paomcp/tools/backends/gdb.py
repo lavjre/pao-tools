@@ -8,6 +8,7 @@ immediate responses suitable for LLM interaction.
 
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -15,7 +16,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Tuple, Union
 
 from pygdbmi import gdbcontroller
 from pygdbmi.IoManager import IoManager
@@ -55,7 +56,78 @@ class _SessionIsolatedController(gdbcontroller.GdbController):
     only clean seam for ``start_new_session`` is to override the single spawn
     method.  The body mirrors upstream exactly except for the injected kwargs,
     keeping us forward-compatible with the pinned pygdbmi version.
+
+    The second deviation is **lazy spawning**.  Upstream ``__init__`` Popen's
+    gdb unconditionally, which means constructing a session -- e.g. the default
+    session ``create_services`` builds just to read an id -- starts a full gdb
+    subprocess, and a missing ``pwndbg`` on ``PATH`` fails the entire server.
+    Here the executable is still resolved at construction (cheap and fail-fast),
+    but the process itself is deferred to the first ``write`` /
+    ``get_gdb_response``.
     """
+
+    def __init__(
+        self,
+        command: Optional[List[str]] = None,
+        time_to_check_for_additional_output_sec: float = gdbcontroller.DEFAULT_TIME_TO_CHECK_FOR_ADDITIONAL_OUTPUT_SEC,
+    ) -> None:
+        # Mirrors upstream __init__ except the trailing
+        # spawn_new_gdb_subprocess() -- deferred to first use.
+        if command is None:
+            command = gdbcontroller.DEFAULT_GDB_LAUNCH_COMMAND
+        if not any(("--interpreter=mi" in c) for c in command):
+            gdbcontroller.logger.warning(
+                "Adding `--interpreter=mi3` (or similar) is recommended "
+                "to get structured output. See "
+                "https://sourceware.org/gdb/onlinedocs/gdb/Mode-Options.html"
+                "#Mode-Options."
+            )
+        self.abs_gdb_path: Optional[str] = None
+        self.command = list(command)
+        self.time_to_check_for_additional_output_sec = float(
+            time_to_check_for_additional_output_sec
+        )
+        self.gdb_process: Optional[subprocess.Popen[Any]] = None
+        self._allow_overwrite_timeout_times = (
+            self.time_to_check_for_additional_output_sec > 0
+        )
+        gdb_path = command[0]
+        if not gdb_path:
+            raise ValueError("a valid path to gdb must be specified")
+        abs_gdb_path = shutil.which(gdb_path)
+        if abs_gdb_path is None:
+            raise ValueError(
+                'gdb executable could not be resolved from "%s"' % gdb_path
+            )
+        self.abs_gdb_path = abs_gdb_path
+        # No spawn here: io_manager exists only once the process does.
+
+    def _ensure_spawned(self) -> None:
+        if self.gdb_process is None:
+            self.spawn_new_gdb_subprocess()
+
+    def write(
+        self,
+        mi_cmd_to_write: Union[str, List[str]],
+        timeout_sec: float = gdbcontroller.DEFAULT_GDB_TIMEOUT_SEC,
+        raise_error_on_timeout: bool = True,
+        read_response: bool = True,
+    ) -> List[Dict[str, Any]]:
+        self._ensure_spawned()
+        return super().write(
+            mi_cmd_to_write,
+            timeout_sec,
+            raise_error_on_timeout,
+            read_response,
+        )
+
+    def get_gdb_response(
+        self,
+        timeout_sec: float = gdbcontroller.DEFAULT_GDB_TIMEOUT_SEC,
+        raise_error_on_timeout: bool = True,
+    ) -> List[Dict[str, Any]]:
+        self._ensure_spawned()
+        return super().get_gdb_response(timeout_sec, raise_error_on_timeout)
 
     @staticmethod
     def _process_running(process: subprocess.Popen[Any]) -> bool:

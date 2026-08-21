@@ -869,7 +869,13 @@ class GadgetIndex:
 
     @classmethod
     def _dedupe(cls, gadgets: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-        """Deduplicate identical (bytes, instruction_text) sightings."""
+        """Deduplicate identical (bytes, instruction_text) sightings.
+
+        When identical gadget bytes+text appear at several addresses, the
+        lowest-address sighting wins: address-space planners prefer the
+        earliest placement, and that choice must not depend on loader scan
+        order.
+        """
         seen: Dict[Tuple[bytes, str], Dict[str, Any]] = {}
         for gadget in gadgets:
             key = (
@@ -881,7 +887,10 @@ class GadgetIndex:
                 gadget.get("instruction_text")
                 or " ; ".join(gadget.get("instructions", []) or []),
             )
-            if key not in seen:
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = dict(gadget)
+            elif int(gadget.get("address") or 0) < int(existing.get("address") or 0):
                 seen[key] = dict(gadget)
         return list(seen.values())
 
@@ -1600,9 +1609,15 @@ class ChainBuilder:
 
     * ``ret2libc``    -- x86_64 SysV: load rdi/rsi/rdx via ``pop <reg>``
       gadgets then transfer control to a target libc symbol (typically
-      ``system``, ``execve`` or ``one_gadget``).  A single ``ret`` is
-      appended before the call so the target sees a 16-byte aligned rsp
-      -- required by any function that uses ``movaps``.
+      ``system``, ``execve`` or ``one_gadget``).  Stack alignment is
+      computed, not assumed: the chain is entered via ``ret`` with rsp at
+      8 (mod 16) on the first slot, every argument pops exactly two slots,
+      and the target is entered by the final pop -- so rsp lands on the
+      16-byte phase required by ``movaps``-using functions exactly when the
+      total pop count is even.  A pure pop-args chain pops ``2*n + 1``
+      slots (always odd), so ``align_stack=True`` appends a single bare
+      ``ret`` to make the count even; the parity check is explicit so a
+      chain shape that already leaves an even pop count skips the ``ret``.
     * ``ret2syscall`` -- x86_64 Linux: load rax with a syscall number,
       then set rdi/rsi/rdx/r10/r8/r9 (SYSCALL replaces rcx with r10)
       via pop gadgets, then execute a ``syscall ; ret`` gadget.
@@ -1794,25 +1809,54 @@ class ChainBuilder:
                 }
             )
         if align_stack:
-            ret_gadget = self._find_bare_ret(
-                binary_path=binary_path,
-                arch="x86_64",
-                image_base=image_base,
-                bad_bytes=bad_bytes,
-            )
-            if ret_gadget is None:
-                assumptions.append(
-                    "no bare 'ret' gadget available for stack alignment; "
-                    "the target may crash on movaps if rsp is not 16-byte aligned"
+            # SysV alignment model (documented so a caller can verify the
+            # emitted chain, not just trust that a ``ret`` exists):
+            #
+            #   * The chain is entered via ``ret`` from the overflowed frame.
+            #     When that pivot ``ret`` executes, rsp points at the first
+            #     chain slot and is 8 (mod 16) -- the standard epilogue state
+            #     (the ABI leaves the saved return-address slot at 8 mod 16).
+            #   * Each argument contributes exactly two 8-byte pops: the
+            #     ``pop <reg>`` consumes the immediate and the gadget's own
+            #     ``ret`` consumes the next slot.  A bare ``ret`` contributes
+            #     one pop.
+            #   * The target is entered by the final pop, so rsp must be 8
+            #     (mod 16) there -- i.e. the total pop count from the pivot
+            #     slot through the target pop must be EVEN.
+            #   * A pure pop-args chain pops ``2*len(args) + 1`` slots, which
+            #     is always odd, so a bare ``ret`` is appended to reach an
+            #     even count and land rsp on the correct phase.  The parity
+            #     check is written explicitly rather than as an unconditional
+            #     insert, so a future chain-shape change (a leading pivot or
+            #     extra-grooming gadget that adds slots) re-derives the
+            #     alignment instead of blindly appending a ``ret`` that would
+            #     flip an already-correct phase.
+            pop_count = 2 * len(args) + 1
+            if pop_count % 2 == 1:
+                ret_gadget = self._find_bare_ret(
+                    binary_path=binary_path,
+                    arch="x86_64",
+                    image_base=image_base,
+                    bad_bytes=bad_bytes,
                 )
+                if ret_gadget is None:
+                    assumptions.append(
+                        "no bare 'ret' gadget available for stack alignment; "
+                        "the target may crash on movaps if rsp is not 16-byte aligned"
+                    )
+                else:
+                    entries.append(
+                        {
+                            "kind": "gadget",
+                            "address": ret_gadget["address"],
+                            "instructions": ret_gadget["instruction_text"],
+                            "purpose": "align rsp to 16 bytes before the target call",
+                        }
+                    )
             else:
-                entries.append(
-                    {
-                        "kind": "gadget",
-                        "address": ret_gadget["address"],
-                        "instructions": ret_gadget["instruction_text"],
-                        "purpose": "align rsp to 16 bytes before the target call",
-                    }
+                assumptions.append(
+                    "chain pop count is already even; rsp is on the correct "
+                    "16-byte phase at target entry without an alignment ret"
                 )
         entries.append(
             {

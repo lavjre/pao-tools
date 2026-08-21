@@ -324,10 +324,19 @@ class TargetHandle:
         self._touch()
 
     def _record_error(self, exc: BaseException) -> None:
+        # Remember where we were before the failure so get_status_response can
+        # restore the live state once a remote target recovers, instead of
+        # pinning a stale ERROR (and error string) forever.
+        self.metadata["pre_error_state"] = self.state.value
         self.error = str(exc)
         self.error_type = type(exc).__name__
         self.state = TargetState.ERROR
         self._touch()
+
+    def _clear_error(self) -> None:
+        self.error = None
+        self.error_type = None
+        self.metadata.pop("pre_error_state", None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -372,6 +381,16 @@ class TargetProvider(Protocol):
     ) -> Dict[str, Any]: ...
 
     def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]: ...
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        """Return a definitive liveness signal, or ``None`` when the provider
+        has no cheap probe (callers then leave the handle untouched).
+
+        ``get_status_response`` re-polls this so a transient failure cannot
+        pin a target in ERROR forever after the underlying process /
+        container / ssh transport has recovered.
+        """
+        return None
 
 
 class LocalProcessProvider:
@@ -482,6 +501,9 @@ class LocalProcessProvider:
             "notes": "spawns a local subprocess and attaches gdb via PID",
         }
 
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        return handle.process is not None and handle.process.poll() is None
+
 
 class AttachPidProvider:
     """Attach to an existing PID we do not own."""
@@ -546,6 +568,14 @@ class AttachPidProvider:
                 "terminating the inferior"
             ),
         }
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # Before start() populates handle.pid the spec still names the pid;
+        # a stale-ERROR handle from a failed start must still be probed.
+        pid = handle.pid or handle.spec.pid
+        if pid is None:
+            return None
+        return _pid_is_alive(pid)
 
 
 def _find_free_tcp_port(host: str = "127.0.0.1") -> int:
@@ -759,6 +789,10 @@ class GdbserverProvider:
             ),
         }
 
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # Same subprocess-ownership contract as LocalProcessProvider.
+        return handle.process is not None and handle.process.poll() is None
+
 
 class TcpRemoteProvider:
     """Attach to an already-running gdbserver-style remote we do not own.
@@ -843,6 +877,15 @@ class TcpRemoteProvider:
                 "stop() detaches but never kills the remote"
             ),
         }
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # We do not own a process -- liveness is whether host:port accepts
+        # a connection again.
+        host = handle.host or handle.spec.host
+        port = handle.port or handle.spec.port
+        if host is None or port is None:
+            return None
+        return _wait_for_tcp_listen(host, port, timeout_sec=self._probe_timeout_sec)
 
 
 class SshClientFactory(Protocol):
@@ -993,6 +1036,21 @@ class SshProvider:
                 "attach_debugger deferred to a tcp_remote target"
             ),
         }
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # _client_for() re-establishes a dropped transport, which is exactly
+        # the recovery we want to detect; a failure to (re)connect means the
+        # remote is not reachable right now.
+        try:
+            client = self._client_for(handle)
+        except Exception:
+            return False
+        transport = client.get_transport() if hasattr(client, "get_transport") else None
+        if transport is None:
+            return False
+        if hasattr(transport, "is_active"):
+            return bool(transport.is_active())
+        return True
 
     # ------------------------------------------------------------------
     # File sync
@@ -1217,6 +1275,21 @@ class DockerProvider:
             ),
         }
 
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        container_id = handle.metadata.get("container_id") or handle.metadata.get(
+            "container_name"
+        )
+        if not container_id:
+            return False
+        try:
+            rc, stdout, _stderr = self._docker(
+                ["docker", "inspect", "-f", "{{.State.Running}}", str(container_id)],
+                timeout_sec=10.0,
+            )
+        except Exception:
+            return False
+        return rc == 0 and stdout.strip().lower() == "true"
+
     # ------------------------------------------------------------------
     # File sync via docker cp
     # ------------------------------------------------------------------
@@ -1391,6 +1464,10 @@ class QemuUserProvider:
             ),
         }
 
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # Same subprocess-ownership contract as LocalProcessProvider.
+        return handle.process is not None and handle.process.poll() is None
+
 
 class QemuSystemProvider:
     """Boot a full-system QEMU VM with a paused gdb stub bound to a TCP port.
@@ -1539,6 +1616,10 @@ class QemuSystemProvider:
                 "attaches via '-target-select remote host:port'"
             ),
         }
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        # Same subprocess-ownership contract as LocalProcessProvider.
+        return handle.process is not None and handle.process.poll() is None
 
 
 class TargetRegistry:
@@ -1770,6 +1851,27 @@ class TargetRegistry:
             warnings=None,
         )
 
+    @staticmethod
+    def _recover_handle(handle: TargetHandle) -> None:
+        """Restore a handle from ERROR to its live state after recovery.
+
+        The state before the failure is captured in ``_record_error``
+        (``metadata["pre_error_state"]``); an unrecoverable prior state
+        (created/detached/stopped/dead) resolves to ``running`` because the
+        remote is demonstrably up again.
+        """
+        prior = handle.metadata.get("pre_error_state")
+        if prior in (
+            TargetState.RUNNING.value,
+            TargetState.ATTACHED.value,
+            TargetState.CONNECTED.value,
+        ):
+            restored = TargetState(prior)
+        else:
+            restored = TargetState.RUNNING
+        handle._set_state(restored)
+        handle._clear_error()
+
     def get_status_response(self, *, target_id: str) -> Dict[str, Any]:
         handle = self.get(target_id)
         with handle._lock:
@@ -1792,6 +1894,18 @@ class TargetRegistry:
                 ):
                     handle._set_state(TargetState.DEAD)
                     handle.stopped_at = datetime.now(timezone.utc).isoformat()
+            # Recovery re-poll for remote targets: a transient start/attach
+            # error must not pin an ERROR state (and stale error string)
+            # forever once the underlying process / container / ssh transport
+            # is reachable again.
+            if handle.state == TargetState.ERROR:
+                provider = self.provider_for(handle.kind)
+                try:
+                    alive = provider.check_alive(handle)
+                except Exception:
+                    alive = None
+                if alive is True:
+                    self._recover_handle(handle)
             payload = handle.to_dict()
         return build_backend_response(
             "get_target_status",

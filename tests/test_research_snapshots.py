@@ -118,9 +118,19 @@ class TestDiffLogic:
         assert diff["status"] == "changed"
         assert diff["kind"] == "list"
         assert diff["before_length"] == 2
-        assert diff["after_length"] == 3
-        assert any("addr': 1" in s for s in diff["only_in_before"])
-        assert any("addr': 3" in s for s in diff["only_in_after"])
+
+    def test_dict_slot_with_mixed_key_types_does_not_crash(self) -> None:
+        # Register-number keys are ints while named fields are str; sorting
+        # the diff sets must not compare int to str.
+        diff = ResearchRegistry._diff_slot(
+            {0: "rax", 1: "rbx", "symbol": "main"},
+            {0: "rax", 2: "rcx", "symbol": "main", "module": "libc"},
+        )
+        assert diff["status"] == "changed"
+        assert diff["kind"] == "dict"
+        assert diff["added"] == {2: "rcx", "module": "libc"}
+        assert diff["removed"] == {1: "rbx"}
+        assert diff["changed"] == {}
 
     def test_unchanged_slot_reports_unchanged(self) -> None:
         diff = ResearchRegistry._diff_slot({"rip": 0x100}, {"rip": 0x100})

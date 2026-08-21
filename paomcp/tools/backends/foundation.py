@@ -19,6 +19,9 @@ from paomcp.artifacts import WriterNotQuiescentError
 
 DEFAULT_PARSER_VERSION = "1"
 _HEX_VALUE_PATTERN = re.compile(r"0x[0-9a-fA-F]+")
+# A bare hex integer with no 0x prefix ("40113a").  Only consulted when
+# base-auto-detection fails, so decimal-looking values never reach it.
+_BARE_HEX_PATTERN = re.compile(r"^-?[0-9a-fA-F]+$")
 
 
 def build_backend_response(
@@ -81,9 +84,16 @@ def parse_int(value: Any) -> Optional[int]:
     match = _HEX_VALUE_PATTERN.search(str(value))
     if match is not None:
         return int(match.group(0), 16)
+    text = str(value).strip()
     try:
-        return int(str(value), 0)
+        return int(text, 0)
     except (TypeError, ValueError):
+        # GDB / crash tooling sometimes renders pointers as plain bare hex
+        # with no 0x prefix.  Accept the WHOLE value as hex only when base
+        # auto-detection failed -- an unambiguous decimal ("12345") parses
+        # above, so this fallback can only ever see strings containing a-f.
+        if _BARE_HEX_PATTERN.match(text) is not None:
+            return int(text, 16)
         return None
 
 

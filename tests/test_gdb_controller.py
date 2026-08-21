@@ -29,6 +29,37 @@ def test_stopped_notification_allows_null_payload():
     assert record["is_live"] is True
 
 
+def test_isolated_controller_init_is_lazy_and_does_not_spawn(monkeypatch):
+    # create_services builds the default session just to read an id; it must
+    # not Popen a full gdb subprocess at construction.
+    spawned: list[bool] = []
+    monkeypatch.setattr(gdb_module.shutil, "which", lambda path: f"/fake/{path}")
+    monkeypatch.setattr(
+        gdb_module._SessionIsolatedController,
+        "spawn_new_gdb_subprocess",
+        lambda self: spawned.append(True) or 1,
+    )
+
+    controller = gdb_module._SessionIsolatedController(
+        command=["pwndbg", "--interpreter=mi3", "--quiet"]
+    )
+
+    assert controller.gdb_process is None
+    assert spawned == []
+    controller._ensure_spawned()
+    assert spawned == [True]
+
+
+def test_isolated_controller_init_fails_fast_on_unresolvable_executable(
+    monkeypatch,
+):
+    monkeypatch.setattr(gdb_module.shutil, "which", lambda path: None)
+    with pytest.raises(ValueError, match="could not be resolved"):
+        gdb_module._SessionIsolatedController(
+            command=["pwndbg", "--interpreter=mi3", "--quiet"]
+        )
+
+
 def test_thread_group_started_allows_null_payload():
     controller = bare_controller()
 

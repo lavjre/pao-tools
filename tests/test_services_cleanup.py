@@ -7,7 +7,7 @@ import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from paomcp.services import close_services
+from paomcp.services import close_services, create_services
 from paomcp.tools.backends.targets import (
     TargetHandle,
     TargetKind,
@@ -121,3 +121,27 @@ def test_close_services_continues_after_a_pipe_kill_failure() -> None:
 
     assert events == ["paopipe", "subprocess", "debug-sessions", "artifacts"]
     assert services.paopipe_sessions == {}
+
+
+def test_create_services_degrades_when_default_session_spawn_fails(
+    tmp_path, monkeypatch
+) -> None:
+    """A debugger spawn failure at startup must not kill the whole server."""
+
+    def _fail_create_session(self, *args, **kwargs):
+        raise RuntimeError("pwndbg could not be spawned")
+
+    monkeypatch.setattr(
+        "paomcp.services.DebugSessionRegistry.create_session",
+        _fail_create_session,
+    )
+
+    services = create_services(
+        workspace_root=str(tmp_path / "workspace"),
+        runtime_root=str(tmp_path / "runtime"),
+    )
+
+    assert services.default_session_id is None
+    assert services.debugger_compatibility["success"] is False
+    assert "spawn failed" in services.debugger_compatibility["error"]
+    close_services(services)

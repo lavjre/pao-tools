@@ -50,6 +50,11 @@ async def test_python_execution_tool_guidance_in_descriptions():
     assert "no external" in descriptions["decompile_binary"]
     assert "availability" in descriptions["get_decompiler_status"]
 
+    # set_breakpoint and create_breakpoint are the same backend surface; the
+    # direct-MI sibling documents the canonical typed mutation tool.
+    assert "sibling of ``create_breakpoint``" in descriptions["set_breakpoint"]
+    assert "temporary" in descriptions["set_breakpoint"]
+
 
 @pytest.mark.asyncio
 async def test_all_mcp_tools_publish_unified_response_schema():

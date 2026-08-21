@@ -119,6 +119,7 @@ class PwndbgTools:
             session_state.session_id,
             binary_path_provider=lambda: self.session.binary_path,
             backend=backend,
+            patch_recorder=self,
         )
         self.max_memory_patches = (
             max_memory_patches
