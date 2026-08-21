@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "pao-tools": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "run",
+        "python",
+        "-m",
+        "paomcp",
+        "--stdio"
+      ],
+      "env": {
+        "PWNDBG_NO_AUTOUPDATE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PAO_RUNTIME_ROOT": "${CLAUDE_PLUGIN_ROOT}/runtime"
+      }
+    }
+  }
+}

@@ -132,6 +132,47 @@ For stdio transport:
 python -m paomcp --stdio
 ```
 
+## Install as a Claude Code plugin
+
+The repository ships an in-repo Claude Code plugin (`.claude-plugin/` +
+`.mcp.json`), so it installs the way [ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp)
+does — no manual MCP config.
+
+Requirements on the host: `uv`, GDB with `pwndbg` on `PATH` (gdb backend), and
+optionally `pwndbg-lldb` for the lldb backend. The server is launched over stdio
+by `uv` from the plugin root.
+
+```bash
+# Point Claude Code at this repository as a marketplace. From a local checkout:
+claude plugin marketplace add ./pao-tools
+
+# Or from GitHub (clone/install goes through your existing gh/ssh/https auth,
+# so a private repository works for you and any collaborator with access):
+claude plugin marketplace add git@github.com:lavjre/pao-tools.git
+
+claude plugin install pao-tools@pao-tools
+```
+
+After install, the `pao-tools` MCP server appears as a stdio server and its 150+
+tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
+available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
+(`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
+git-ignored.
+
+Backend selection is environment-controlled and per-session:
+
+- `PAO_DEBUGGER_BACKEND=gdb|lldb|auto` — default `auto` (prefers gdb; falls back
+  to lldb when gdb is unavailable or the target is Mach-O).
+- Each `create_debug_session` / `create_target` accepts `backend=` to override.
+- All heap/ELF/pwndbg typed tooling requires the gdb/pwndbg backend; on an lldb
+  session those tools return a typed `requires the gdb/pwndbg backend` verdict.
+
+Validate the packaging locally with:
+
+```bash
+claude plugin validate .
+```
+
 ## Local development
 
 Python 3.12 or newer is required. GDB and pwndbg must be available for debugger

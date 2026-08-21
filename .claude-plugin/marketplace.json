@@ -1,0 +1,14 @@
+{
+  "name": "pao-tools",
+  "owner": {
+    "name": "Pao Tools"
+  },
+  "description": "Autonomous low-level security research MCP server: pwndbg/gdb + pwndbg-lldb debugger backends, glibc heap analysis, ROP tooling, and exploit-research session management.",
+  "plugins": [
+    {
+      "name": "pao-tools",
+      "source": ".",
+      "description": "Autonomous low-level security research MCP server: pwndbg/gdb + pwndbg-lldb debugger backends, glibc heap analysis, ROP tooling, exploit-research sessions."
+    }
+  ]
+}

@@ -227,3 +227,6 @@ claude/
 
 # Session exports
 session-export-*.zip
+
+# Claude Code plugin runtime state (created by .mcp.json at install time)
+runtime/
