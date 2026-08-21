@@ -1,46 +1,112 @@
 # pao-tools
 
 `pao-tools` is a stateful MCP server for binary exploitation and low-level
-security research. It gives AI agents controlled access to GDB/pwndbg,
-interactive exploit processes, Python tooling, repositories, and supporting
-analysis workflows.
+security research. It gives AI agents controlled access to a live debugging
+environment — GDB/pwndbg, interactive exploit processes, Python tooling,
+repositories, and the analysis workflows built on top of them — and returns
+typed, versioned evidence instead of raw ANSI-formatted terminal output.
+
+Every conclusion the server produces (allocator state, heap corruption,
+crash attribution, JIT memory surface, ROP chain validity, research findings)
+carries the runtime evidence it was derived from, so an agent can act on the
+answer and trust the record.
+
+## What it does
+
+At the core, `pao-tools` runs one debugger session per target and exposes
+typed tooling over it:
+
+- **Debugger control** — sessions, run/attach/stop, registers, memory, threads,
+  breakpoints/watchpoints, expression evaluation, disassembly, and
+  event-oriented stepping.
+- **Target lifecycle** — one contract for local processes, PID attach,
+  gdbserver, GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system targets.
+- **Static and runtime analysis** — ELF mitigations and structure, Mach-O
+  parsing, libc identification, decompilation, and crash triage.
+- **Heap analysis** — allocator detection and typed parsers for the families
+  it supports, plus allocator-independent memory-region helpers.
+- **Exploit engineering** — ROP gadget indexing, chain construction and
+  validation, and targeted attack helpers.
+- **Research workspace** — notes, hypotheses, evidence, snapshots, timelines,
+  and exportable bundles for a private investigation.
+
+Responses are structured and bounded: big payloads spill to integrity-checked
+artifacts, long-running operations expose progress and cancellation, and every
+tool answers in the same envelope.
 
 ## Features
 
-- Independent GDB/pwndbg sessions for parallel research
-- Runtime-verified GDB/pwndbg versions, commands, categories, and feature groups
-- Unified platform manifest for debugger, decompiler, helper, architecture,
+### Debugger and process control
+
+- Independent GDB/pwndbg sessions for parallel research, with runtime-verified
+  versions, commands, categories, and feature groups
+- Deterministic execution control through GDB/MI: run/attach/stop, stepping,
+  interrupts, and asynchronous event polling
+- Typed registers, register groups, frames/inferiors, memory search and write,
+  disassembly, thread/frame selection, and reversible memory patches
+- Typed breakpoint/watchpoint CRUD and debugger snapshots
+- A unified platform manifest for debugger, decompiler, helper, architecture,
   allocator, emulator, and provider readiness
-- Typed ELF mitigations, sections, GOT/PLT, mappings, threads, libc, and address data
-- Complete cached static ELF models, strings, fingerprints, and binary comparison
-- Typed breakpoint/watchpoint CRUD, registers, expressions, memory search/write,
-  disassembly, thread selection, and event-oriented stepping
-- Typed frames/inferiors, register groups, debugger snapshots, and reversible patches
-- Typed fatal-signal records, crash snapshots, cyclic offsets, core artifacts, and reports
-- Typed allocator discovery plus glibc chunks, arenas, bins, corruption checks,
-  free validation, and bounded heap snapshot diffs
+
+### Target management
+
+- One target lifecycle contract across local processes, PID attach, gdbserver,
+  GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers
+- Binary-safe interactive exploit workflows through `paocli`
+- Managed helper processes with process-tree cleanup and a shared Python
+  research environment with pwntools
+
+### Static and crash analysis
+
+- Typed ELF mitigations, sections, GOT/PLT, mappings, threads, libc, and address
+  data, backed by cached static ELF models, strings, fingerprints, and binary
+  comparison
+- Mach-O parsing for macOS/iOS targets (`analyze_macho`)
+- Typed fatal-signal records, crash snapshots, cyclic offsets, core artifacts,
+  and evidence-preserving crash reports
+- Offline Ghidra headless decompilation by function name, address, or full
+  binary
+
+### Heap analysis
+
+- Allocator detection and family classification for glibc, musl mallocng,
+  jemalloc, Scudo, and Apple libmalloc
+- Typed glibc parsers: chunks, arenas, fastbins/tcache/regular bins with
+  safe-linking evidence, corruption checks, free validation, and bounded heap
+  snapshot diffs
+- Apple libmalloc zone introspection: zone discovery, per-zone function and
+  introspection tables, size-class probes, and pointer-ownership classification
+- Kernel SLUB slab analysis: `struct kmem_cache` geometry and hardened
+  freelist decoding from BTF
+- Allocator-independent memory-region tracking: anonymous-executable (V8 JIT
+  heap) candidate scanning and per-address region classification over vmmap
+- Targeted attack helpers such as `poison_tcache_link` for write-what-where
+  planning
+
+### Exploit engineering
+
 - Static ROP gadget and side-effect analysis, libc candidate scoring, optional
   one-gadget integration, typed chain construction, validation, and export
-- One target lifecycle contract for local processes, PID attach, gdbserver,
-  GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers
-- Bounded in-memory research workspaces with notes, hypotheses, evidence,
-  snapshots, timelines, export/import bundles, and final reports
-- Deterministic execution control through GDB/MI
-- Register, stack, memory, disassembly, and backtrace inspection
-- Breakpoints, stepping, attach, interrupt, and asynchronous event polling
-- Binary-safe interactive exploit workflows through `paocli`
-- Managed helper processes with process-tree cleanup
-- Shared Python research environment with pwntools
-- Workspace-scoped command execution and repository fetching
-- Versioned structured responses shared by every MCP tool
-- Pollable operation IDs, progress, cooperative cancellation, and resource caps
-- Session-owned lossless artifacts with chunk delivery and integrity verification
+- SROP frame construction and static chain-constraint checks
+
+### Research workspace
+
+- Bounded in-memory research sessions with notes, hypotheses, evidence,
+  snapshots, timelines, and typed final reports
+- Research bundle export/import with SHA-256 integrity verification and
+  rehydration quotas
+
+### Operational
+
+- Session-owned lossless artifacts with chunk delivery, SHA-256 verification,
+  and retention control
+- Versioned structured responses shared by every MCP tool, with pollable
+  operation IDs, progress, cooperative cancellation, and resource caps
 - HTTP and stdio MCP transports
-- Offline Ghidra headless decompilation by function name, address, or full binary
 
 ## Response API
 
-The current server contract exposes 150 MCP tools. Every tool returns the same
+The current server contract exposes 163 MCP tools. Every tool returns the same
 `api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
@@ -153,7 +219,7 @@ claude plugin marketplace add git@github.com:lavjre/pao-tools.git
 claude plugin install pao-tools@pao-tools
 ```
 
-After install, the `pao-tools` MCP server appears as a stdio server and its 150+
+After install, the `pao-tools` MCP server appears as a stdio server and its 163
 tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
 available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
 (`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
@@ -220,48 +286,21 @@ compatibility report. Use `get_debugger_capabilities`, `list_pwndbg_commands`, a
 `get_pwndbg_command_help` instead of assuming commands found in another environment
 are installed in pao-tools.
 
-## Roadmap
+## Scope and limits
 
-Stages 1-4 established the response/artifact foundation, compatibility and platform
-discovery, typed ELF/static analysis, and the debugger/memory API. Stages 5-9 now
-have implemented baselines; the status column records their intentionally bounded
-scope and the remaining extension points.
+`pao-tools` is designed for a private, single-user research workflow. The typed
+heap surface covers glibc deeply; musl mallocng, jemalloc, and Scudo are detected
+and represented through the allocator contract, but do not yet have typed internal
+parsers, and allocation-event tracking is not included. The PartitionAlloc family
+is deliberately not walked — its freelists are per-PartitionPage and encoded
+`((slot ^ random) << 16)`, its metadata changes across Chrome versions, and
+release builds are stripped — so Chrome work uses the allocator-independent
+JIT/memory-region helpers instead of a parser.
 
-| Stage | Goal | Status |
-| --- | --- | --- |
-| S5 | Typed crash triage: run, snapshot, analyze, classify, compare, cyclic scan, core evidence, and per-crash report artifact | Implemented. The CI definitions gate image publication on Linux container boot, `/healthz`, an HTTP MCP registration check, and a real crash/core smoke test; consult the workflow run for the current candidate rather than assuming that live gate passed. |
-| S6 | Typed heap analysis: allocator discovery, glibc chunks, arenas, fastbins/tcache/regular bins, safe-linking evidence, corruption/free validation, and bounded snapshot history | Implemented for glibc, including reconciled typed-capability metadata. musl mallocng, jemalloc, and Scudo are detected through the allocator/plugin contract but do not yet have typed internal parsers. Allocation-event tracking is not included. |
-| S7 | ROP gadget analysis, libc identification, one-gadget lookup, chain construction, static validation, and export | Implemented baseline. Gadget analysis is multi-architecture, but chain construction is currently x86-64 `ret2libc`/`ret2syscall`; SROP frames support x86-64/i386 and validation is static. The standard Docker image pins `one_gadget` 1.10.0; it remains optional for non-Docker installs. |
-| S8 | Local process, PID attach, gdbserver, GDB-remote TCP, SSH, Docker, QEMU user, and QEMU system providers behind one target contract | Implemented provider matrix with reconciled aggregate metadata, strict SSH host-key verification, and registry-wide shutdown cleanup. Runtime availability still depends on the corresponding host executables, credentials, known-host entries, images, kernels, and root filesystems. SSH and Docker targets use a separate gdbserver/GDB-remote target for debugger attachment. |
-| S9 | Research notes, hypotheses, evidence, named snapshots, timeline, export/import bundles, and final reporting | Implemented baseline. ZIP verification/import applies compressed, uncompressed, entry, control-document, expansion-ratio, integrity, canonical-path, and per-session record quotas before rehydration. The live registry remains bounded and in-memory, so explicit ZIP export/import is the durability path. |
-
-The S5 `generate_crash_report` tool is an evidence-preserving report for one exact
-crash. The S9 `generate_final_report` tool instead summarizes the evidence,
-hypotheses, snapshots, and timeline that a caller linked into a research session.
-
-The Linux image build and publish definitions now include a live S6-S9 gate that
-checks tool registration plus representative glibc inspection, gadget/one-gadget
-analysis, local target lifecycle, and research export/verify/import workflows.
-This describes the configured CI gate, not a claimed local Docker pass; consult
-the workflow run for the exact image candidate.
-
-### Potential builds
-
-- Add allocation-event tracking and typed musl, jemalloc, and Scudo internals.
-- Extend ROP chain construction to more architectures and add debugger-backed
-  dynamic chain validation.
-- Expand live provider coverage beyond the current local-target smoke with
-  repeatable SSH, Docker-provider, gdbserver, and QEMU integration fixtures.
-- Add research autosave, direct artifact re-ingestion on import, and optionally
-  signed or encrypted research bundles. Stream the bounded compressed ZIP
-  container directly from disk if avoiding its current in-memory copy becomes
-  important for very large private investigations.
-
-This roadmap assumes a private, single-user research tool. Authentication, RBAC,
-multi-user tenancy, and public-service audit infrastructure are intentionally out of
-scope. Resource caps, cleanup, artifact integrity, loopback defaults, and debugger
-isolation remain operational safeguards for the owner's machine rather than a
-separate product stage. There is intentionally no S10 in this roadmap.
+Authentication, RBAC, multi-user tenancy, and public-service audit infrastructure
+are intentionally out of scope. Resource caps, cleanup, artifact integrity,
+loopback defaults, and debugger isolation remain operational safeguards for the
+owner's machine.
 
 ## License
 
