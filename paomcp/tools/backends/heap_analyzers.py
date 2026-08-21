@@ -12,9 +12,10 @@ Phase 0 contract
   that depend on allocator-internal layout (chunks, arenas, bins, corruption,
   techniques, snapshot capture).  One implementer exists per supported family.
 * :func:`analyzer_for_family` maps a detected family to an analyzer.  ``glibc``
-  is the only family with a typed parser, so it resolves to
-  :class:`GlibcAnalyzer`; every other family (``musl``, ``jemalloc``,
-  ``scudo``, ``unknown``) resolves to :class:`UnsupportedAnalyzer`.
+  resolves to :class:`GlibcAnalyzer` (full typed parser); ``jemalloc`` resolves
+  to ``JemallocAnalyzer`` (Phase 1: extent/rtree core via pwndbg's plugin);
+  every other family (``musl``, ``scudo``, ``unknown``) resolves to
+  :class:`UnsupportedAnalyzer`.
 * Both analyzers *forward* to the existing glibc components
   (``facade.glibc`` / ``facade.arenas`` / ``facade.bins`` /
   ``facade.corruption`` / ``facade.techniques`` / ``facade.history``).  Those
@@ -354,13 +355,21 @@ def analyzer_for_family(
 ) -> AllocatorAnalyzer:
     """Return the analyzer for a detected allocator family.
 
-    ``glibc`` maps to :class:`GlibcAnalyzer`; every other family -- and an
-    unresolvable detection (``None``) -- maps to :class:`UnsupportedAnalyzer`.
-    This is the single extension point for a new family's parser: add the
-    family name to the dispatch and the facade starts routing to it.
+    ``glibc`` maps to :class:`GlibcAnalyzer`, ``jemalloc`` maps to
+    :class:`~paomcp.tools.backends.jemalloc.JemallocAnalyzer` (Phase 1:
+    extent/rtree core); every other family -- and an unresolvable detection
+    (``None``) -- maps to :class:`UnsupportedAnalyzer`.  This is the single
+    extension point for a new family's parser: add the family name to the
+    dispatch and the facade starts routing to it.
     """
     if family == "glibc":
         return GlibcAnalyzer(facade)
+    if family == "jemalloc":
+        # Lazy import: jemalloc imports heap.py, and heap.py lazily imports
+        # this module -- resolve at dispatch time to keep the cycle broken.
+        from .jemalloc import JemallocAnalyzer  # noqa: PLC0415
+
+        return JemallocAnalyzer(facade)
     return UnsupportedAnalyzer(facade)
 
 

@@ -71,15 +71,23 @@ class TestAnalyzerForFamily:
         assert isinstance(analyzer, GlibcAnalyzer)
         assert analyzer.family == "glibc"
 
-    @pytest.mark.parametrize("family", ["musl", "jemalloc", "scudo", "unknown", None])
+    @pytest.mark.parametrize("family", ["musl", "scudo", "unknown", None])
     def test_non_glibc_families_resolve_to_unsupported(self, family):
         analyzer = analyzer_for_family(family, facade=None)
         assert isinstance(analyzer, UnsupportedAnalyzer)
 
-    def test_both_analyzers_implement_the_full_surface(self):
+    def test_jemalloc_resolves_to_jemalloc_analyzer(self):
+        from paomcp.tools.backends.jemalloc import JemallocAnalyzer
+
+        analyzer = analyzer_for_family("jemalloc", facade=None)
+        assert isinstance(analyzer, JemallocAnalyzer)
+        assert analyzer.family == "jemalloc"
+
+    def test_all_analyzers_implement_the_full_surface(self):
         glibc = analyzer_for_family("glibc", facade=None)
         unsupported = analyzer_for_family("musl", facade=None)
-        for analyzer in (glibc, unsupported):
+        jemalloc = analyzer_for_family("jemalloc", facade=None)
+        for analyzer in (glibc, unsupported, jemalloc):
             assert isinstance(analyzer, AllocatorAnalyzer), type(analyzer)
             for name in ANALYZER_METHODS:
                 assert callable(getattr(analyzer, name)), name
