@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -4664,10 +4665,18 @@ class HeapTools:
     (extend ``_FAMILY_FILENAME_PATTERNS`` and the runtime-command map) and
     -- when supported -- have a sibling introspection class hanging off
     this facade (mirror :class:`GlibcHeap`, :class:`GlibcArenas`,
-    :class:`GlibcBins`).  Every glibc-specific method returns an
-    ``unsupported`` response for non-glibc allocators; that is the honest
-    default and any new family that adds a real parser must replace it
-    with a typed response of the same envelope shape.
+    :class:`GlibcBins`).
+
+    The twelve allocator-layout-dependent methods (chunks, arenas, bins,
+    corruption, free validation, techniques, UAF, snapshot capture) are
+    dispatched per call through an :class:`AllocatorAnalyzer` resolved from
+    the detected family (``heap_analyzers.analyzer_for_family``).  ``glibc``
+    is the only family with a typed parser in Phase 0; every other family
+    resolves to ``UnsupportedAnalyzer``, which forwards to the glibc
+    components that already return an honest typed ``unsupported`` verdict
+    for non-glibc allocators.  A new family's parser plugs in by implementing
+    the analyzer surface and adding its name to the dispatch; nothing else
+    changes.
     """
 
     def __init__(
@@ -4681,6 +4690,11 @@ class HeapTools:
         backend: Optional[BackendSpec] = None,
     ) -> None:
         self.backend = backend
+        # TTL cache of the last detected allocator family (monotonic clock
+        # seconds + family).  Consulted only by ``_analyzer()``; the glibc
+        # components re-classify per call regardless, so a stale hit never
+        # changes behavior -- it only picks which forwarder runs.
+        self._family_cache: Optional[Tuple[float, Optional[str]]] = None
         self.gdb = gdb
         self.discovery = AllocatorDiscovery(
             gdb,
@@ -4730,10 +4744,14 @@ class HeapTools:
             arenas=self.arenas,
             bins=self.bins,
         )
-        # Lazy import to break the module-level cycle: heap_techniques imports
-        # this module at its top, so heap.py must never import heap_techniques
-        # at import time -- only here, when the facade is actually built.
+        # Lazy imports to break module-level cycles: heap_techniques and
+        # heap_analyzers both import this module at their top, so heap.py must
+        # never import them at import time -- only here, when the facade is
+        # actually built.
+        from .heap_analyzers import analyzer_for_family  # noqa: PLC0415
         from .heap_techniques import GlibcTechniqueAnalyzer  # noqa: PLC0415
+
+        self._analyzer_for_family = analyzer_for_family
 
         self.techniques = GlibcTechniqueAnalyzer(
             gdb,
@@ -4746,6 +4764,53 @@ class HeapTools:
             glibc=self.glibc,
             corruption=self.corruption,
         )
+
+    # How long a detected family stays cached on this facade.  Short on
+    # purpose: the components re-classify per call anyway, so this only avoids
+    # a second full classification when consecutive dispatched calls land
+    # within the window.
+    _FAMILY_CACHE_TTL_SEC = 1.0
+
+    def _detected_family(self) -> Optional[str]:
+        """Classify the current inferior's allocator family (TTL-cached).
+
+        Returns ``None`` when the detection cannot resolve a family (no live
+        inferior, classification failure); the dispatch treats that exactly
+        like ``unknown``.  Failures never propagate here -- the analyzer
+        forwarders surface the same typed errors the components already raise.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_family_cache", None)
+        if cached is not None:
+            ts, family = cached
+            if now - ts < self._FAMILY_CACHE_TTL_SEC:
+                return family
+        try:
+            envelope = self.discovery.detect_allocator()
+        except Exception:  # noqa: BLE001 -- detection is best-effort here
+            self._family_cache = (now, None)
+            return None
+        parsed = envelope.get("parsed") if isinstance(envelope, dict) else None
+        family = (parsed or {}).get("family")
+        self._family_cache = (now, family)
+        return family
+
+    def _analyzer(self) -> Any:
+        """Resolve the per-family analyzer for this call's detected family.
+
+        ``_analyzer_for_family`` is normally set in ``__init__``; fall back to
+        a lazy import when the facade was assembled without ``__init__`` (the
+        allocator-plugin test pattern builds ``HeapTools`` shells via
+        ``__new__`` and attaches components directly).  The import is deferred
+        to call time to keep the ``heap_analyzers`` <-> ``heap`` module cycle
+        broken.
+        """
+        resolver = getattr(self, "_analyzer_for_family", None)
+        if resolver is None:
+            from .heap_analyzers import analyzer_for_family  # noqa: PLC0415
+
+            resolver = analyzer_for_family
+        return resolver(self._detected_family(), self)
 
     @property
     def _is_lldb(self) -> bool:
@@ -4805,7 +4870,7 @@ class HeapTools:
         gate = self._gdb_gate("inspect_chunk")
         if gate is not None:
             return gate
-        return self.glibc.inspect_chunk(
+        return self._analyzer().inspect_chunk(
             address=address,
             address_kind=address_kind,
             include_next=include_next,
@@ -4822,7 +4887,7 @@ class HeapTools:
         gate = self._gdb_gate("validate_chunk")
         if gate is not None:
             return gate
-        return self.glibc.validate_chunk(
+        return self._analyzer().validate_chunk(
             address=address,
             address_kind=address_kind,
             cancellation_check=cancellation_check,
@@ -4837,7 +4902,7 @@ class HeapTools:
         gate = self._gdb_gate("list_arenas")
         if gate is not None:
             return gate
-        return self.arenas.list_arenas(cancellation_check=cancellation_check)
+        return self._analyzer().list_arenas(cancellation_check=cancellation_check)
 
     def inspect_arena(
         self,
@@ -4848,7 +4913,7 @@ class HeapTools:
         gate = self._gdb_gate("inspect_arena")
         if gate is not None:
             return gate
-        return self.arenas.inspect_arena(
+        return self._analyzer().inspect_arena(
             arena_address=arena_address,
             cancellation_check=cancellation_check,
         )
@@ -4864,7 +4929,7 @@ class HeapTools:
         gate = self._gdb_gate("inspect_fastbins")
         if gate is not None:
             return gate
-        return self.bins.inspect_fastbins(
+        return self._analyzer().inspect_fastbins(
             arena_address=arena_address,
             max_chunks_per_bin=max_chunks_per_bin,
             cancellation_check=cancellation_check,
@@ -4880,7 +4945,7 @@ class HeapTools:
         gate = self._gdb_gate("inspect_tcache")
         if gate is not None:
             return gate
-        return self.bins.inspect_tcache(
+        return self._analyzer().inspect_tcache(
             max_chunks_per_bin=max_chunks_per_bin,
             cancellation_check=cancellation_check,
         )
@@ -4896,7 +4961,7 @@ class HeapTools:
         gate = self._gdb_gate("inspect_bins")
         if gate is not None:
             return gate
-        return self.bins.inspect_bins(
+        return self._analyzer().inspect_bins(
             arena_address=arena_address,
             max_chunks_per_bin=max_chunks_per_bin,
             cancellation_check=cancellation_check,
@@ -4912,7 +4977,7 @@ class HeapTools:
         gate = self._gdb_gate("classify_heap_corruption")
         if gate is not None:
             return gate
-        return self.corruption.classify_heap_corruption(
+        return self._analyzer().classify_heap_corruption(
             arena_address=arena_address,
             cancellation_check=cancellation_check,
         )
@@ -4927,7 +4992,7 @@ class HeapTools:
         gate = self._gdb_gate("validate_free")
         if gate is not None:
             return gate
-        return self.corruption.validate_free(
+        return self._analyzer().validate_free(
             address=address,
             address_kind=address_kind,
             cancellation_check=cancellation_check,
@@ -4955,7 +5020,7 @@ class HeapTools:
         gate = self._gdb_gate("analyze_heap_technique")
         if gate is not None:
             return gate
-        return self.techniques.analyze_heap_technique(
+        return self._analyzer().analyze_heap_technique(
             arena_address=arena_address,
             techniques=techniques,
             scan_mmap_mappings=scan_mmap_mappings,
@@ -4983,7 +5048,7 @@ class HeapTools:
         gate = self._gdb_gate("detect_uaf")
         if gate is not None:
             return gate
-        return self.techniques.detect_uaf(
+        return self._analyzer().detect_uaf(
             max_bytes=max_bytes,
             max_mappings=max_mappings,
             max_chunks=max_chunks,
@@ -5009,7 +5074,7 @@ class HeapTools:
         gate = self._gdb_gate("capture_heap_snapshot")
         if gate is not None:
             return gate
-        return self.history.capture_heap_snapshot(
+        return self._analyzer().capture_heap_snapshot(
             name=name,
             max_chunks_per_bin=max_chunks_per_bin,
             cancellation_check=cancellation_check,
