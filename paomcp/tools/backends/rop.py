@@ -30,6 +30,8 @@ heuristic is never promoted to a fact.
 
 from __future__ import annotations
 
+import logging
+import multiprocessing
 import os
 import re
 from typing import (
@@ -45,6 +47,8 @@ from typing import (
 )
 
 from paomcp.tools.backends.foundation import build_backend_response, parse_int
+
+logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "1"
 GADGET_LIST_SCHEMA = "pao.gadget-list.v1"
@@ -81,6 +85,21 @@ DEFAULT_MAX_GADGETS = 500
 MAX_MAX_GADGETS = 20000
 DEFAULT_MAX_INSTRUCTIONS = 8  # per-gadget instruction budget
 MAX_SEQUENCE_STEPS = 32
+
+# First-analysis pass parallelism.  Analyzing side effects is pure per-record
+# work, so large binaries (libc dumps are 50k+ gadgets) can be chunked across
+# worker processes the first time they are cached.  The threshold is high
+# enough that small binaries never pay pool-spawn overhead; both knobs are
+# overridable for sandboxes that forbid multiprocessing.
+PARALLEL_ANALYSIS_THRESHOLD = int(
+    os.environ.get("PAO_PARALLEL_GADGET_THRESHOLD", "20000")
+)
+PARALLEL_ANALYSIS_CHUNK = 4096
+MAX_ANALYSIS_WORKERS = 8
+PARALLEL_ANALYSIS_TIMEOUT_SEC = 300
+_PARALLEL_ANALYSIS_DISABLED = os.environ.get(
+    "PAO_DISABLE_PARALLEL_GADGETS", ""
+).strip().lower() in ("1", "true", "yes")
 
 # Canonical stack pointer per architecture; used for stack-delta accounting.
 _STACK_POINTERS: Dict[str, str] = {
@@ -319,9 +338,31 @@ def _extract_instruction(line: Any) -> Optional[str]:
     return body.strip()
 
 
+def _analyze_gadget_batch(
+    payload: Tuple[List[Dict[str, Any]], Optional[str]],
+) -> List[Dict[str, Any]]:
+    """Analyze a chunk of raw gadget records (module-level for pickling).
+
+    Runs inside ``multiprocessing`` workers during the first-analysis pass.
+    ``analyze_gadget`` is a pure per-record transform with no shared state,
+    so chunked execution is order-preserving and byte-identical to a
+    sequential pass -- which is exactly what the fallback path relies on.
+    ``arch_override`` is threaded through so the cached analysis matches
+    the original caller-supplied arch exactly.
+    """
+    records, arch_override = payload
+    return [
+        GadgetIndex.analyze_gadget(record, arch_override=arch_override)
+        for record in records
+    ]
+
+
 # ---------------------------------------------------------------------------
 # GadgetIndex backend
 # ---------------------------------------------------------------------------
+_CacheKey = Tuple[str, float, Optional[str], Optional[int]]
+
+
 class GadgetIndex:
     """Typed gadget indexing over an injectable engine loader.
 
@@ -330,6 +371,16 @@ class GadgetIndex:
     same binary many times does not re-invoke the loader.  Cache eviction
     is intentionally file-driven -- an mtime bump invalidates -- so the
     caller never has to remember to flush after rebuilding.
+
+    What is cached is the *analyzed* gadget stream (normalized records run
+    through :meth:`analyze_gadget` once, chunked across worker processes
+    when the binary is large) plus two lookup indexes over it: a
+    first-mnemonic inverted index used to short-circuit anchored regex
+    steps in :meth:`find_gadget_sequence`, and an address -> gadget index
+    used by :meth:`inspect_gadget`.  Query-time concerns that vary per call
+    -- bad bytes, regex filters, dedupe/sort order -- are deliberately
+    applied *after* the cached pass so one binary's analysis is paid once
+    and every repeated search is a pure in-memory filter.
     """
 
     def __init__(
@@ -341,19 +392,28 @@ class GadgetIndex:
         if max_cached_binaries <= 0:
             raise ValueError("max_cached_binaries must be positive")
         self._loader = loader
-        self._cache: "Dict[Tuple[str, float, Optional[str], Optional[int]], List[Dict[str, Any]]]" = ({})
-        self._cache_order: List[Tuple[str, float, Optional[str], Optional[int]]] = []
+        self._analyzed: Dict[_CacheKey, List[Dict[str, Any]]] = {}
+        self._first_mnemonic: Dict[_CacheKey, Dict[str, List[int]]] = {}
+        self._by_address: Dict[_CacheKey, Dict[int, int]] = {}
+        self._cache_order: List[_CacheKey] = []
         self._max_cached_binaries = max_cached_binaries
 
     # ------------------------------------------------------------------
     # Cache
     # ------------------------------------------------------------------
-    def _load(
+    def _load_analyzed(
         self,
         binary_path: str,
         arch: Optional[str],
         image_base: Optional[int],
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, List[int]], Dict[int, int]]:
+        """Return the analyzed gadget stream plus its lookup indexes.
+
+        The first call for a given key runs the engine loader, normalizes
+        every record, and analyzes side effects (in parallel for large
+        dumps); every later call is a dict hit.  A mutated binary changes
+        its mtime and therefore its key, so rebuilds are implicit.
+        """
         abspath = os.path.abspath(binary_path)
         try:
             mtime = os.path.getmtime(abspath)
@@ -362,21 +422,126 @@ class GadgetIndex:
                 f"binary '{binary_path}' is not readable: {exc}"
             ) from exc
         key = (abspath, mtime, arch, image_base)
-        cached = self._cache.get(key)
+        cached = self._analyzed.get(key)
         if cached is not None:
-            return cached
+            return cached, self._first_mnemonic[key], self._by_address[key]
         records = list(self._loader(abspath, arch, image_base) or [])
         normalized: List[Dict[str, Any]] = []
         for raw in records:
             parsed = self._normalize_record(raw)
             if parsed is not None:
                 normalized.append(parsed)
-        self._cache[key] = normalized
+        analyzed = self._analyze_many(normalized, arch)
+        self._analyzed[key] = analyzed
+        self._first_mnemonic[key] = self._build_first_mnemonic_index(analyzed)
+        self._by_address[key] = {
+            int(gadget["address"]): index for index, gadget in enumerate(analyzed)
+        }
         self._cache_order.append(key)
         while len(self._cache_order) > self._max_cached_binaries:
             evicted = self._cache_order.pop(0)
-            self._cache.pop(evicted, None)
-        return normalized
+            for store in (self._analyzed, self._first_mnemonic, self._by_address):
+                store.pop(evicted, None)
+        return analyzed, self._first_mnemonic[key], self._by_address[key]
+
+    def _analyze_many(
+        self,
+        records: List[Dict[str, Any]],
+        arch_override: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Run :meth:`analyze_gadget` over every record, optionally in parallel."""
+        if (
+            not _PARALLEL_ANALYSIS_DISABLED
+            and len(records) >= PARALLEL_ANALYSIS_THRESHOLD
+            and os.name != "nt"
+        ):
+            try:
+                chunks = [
+                    (records[i : i + PARALLEL_ANALYSIS_CHUNK], arch_override)
+                    for i in range(0, len(records), PARALLEL_ANALYSIS_CHUNK)
+                ]
+                context = multiprocessing.get_context("fork")
+                with context.Pool(
+                    processes=min(len(chunks), MAX_ANALYSIS_WORKERS),
+                    maxtasksperchild=2,
+                ) as pool:
+                    async_result = pool.map_async(_analyze_gadget_batch, chunks)
+                    result_chunks = async_result.get(
+                        timeout=PARALLEL_ANALYSIS_TIMEOUT_SEC
+                    )
+                return [gadget for chunk in result_chunks for gadget in chunk]
+            except Exception as exc:  # pragma: no cover - environment dependent
+                # Any pool failure degrades to the sequential pass; the
+                # analysis itself is pure, so results stay identical.
+                logger.warning(
+                    "Parallel gadget analysis failed (%s); falling back to "
+                    "sequential analysis",
+                    exc,
+                )
+        return _analyze_gadget_batch((records, arch_override))
+
+    @staticmethod
+    def _build_first_mnemonic_index(
+        gadgets: Sequence[Dict[str, Any]],
+    ) -> Dict[str, List[int]]:
+        """Invert the analyzed stream by each gadget's first instruction."""
+        index: Dict[str, List[int]] = {}
+        for gadget_index, gadget in enumerate(gadgets):
+            analyzed_instructions = gadget.get("instructions_analyzed") or []
+            if not analyzed_instructions:
+                continue
+            mnemonic = analyzed_instructions[0].get("mnemonic")
+            if mnemonic:
+                index.setdefault(mnemonic, []).append(gadget_index)
+        return index
+
+    @classmethod
+    def _leading_mnemonic_for_anchor(cls, raw_pattern: str) -> Optional[str]:
+        """Return the literal first mnemonic an anchored pattern pins, if any.
+
+        A pattern like ``"^pop rdi ; ret"`` can only match a gadget whose
+        instruction text *starts* with ``pop`` -- i.e. whose first
+        instruction's mnemonic is ``pop``.  Extracting that literal token
+        lets :meth:`find_gadget_sequence` narrow to the inverted index.
+        Returns ``None`` when the pattern is not anchored, or when the
+        leading token is a regex (metacharacters) rather than a literal
+        mnemonic; both cases fall back to a full scan.
+        """
+        stripped = raw_pattern.lstrip()
+        if not stripped.startswith("^"):
+            return None
+        rest = stripped[1:].lstrip()
+        match = re.match(r"[A-Za-z][A-Za-z0-9_.]*", rest)
+        if match is None:
+            return None
+        token = match.group(0)
+        # A token carrying a regex wildcard (e.g. "p.op") is not a literal
+        # mnemonic; the caller checks membership against the index, which
+        # only ever contains real disassembled mnemonics, so a metachar
+        # token fails the membership test and degrades to a full scan.
+        return token if token.isalnum() else None
+
+    @classmethod
+    def _filter_and_sort(
+        cls,
+        gadgets: Sequence[Dict[str, Any]],
+        normalized_bad_bytes: Sequence[int],
+        prefer_shortest: bool,
+    ) -> List[Dict[str, Any]]:
+        """Bad-byte filter, dedupe, then order for a sequence search."""
+        clean = [
+            gadget
+            for gadget in gadgets
+            if not cls._address_contains_bad_byte(
+                gadget["address"], gadget["pointer_bytes"], normalized_bad_bytes
+            )
+        ]
+        deduped = cls._dedupe(clean)
+        if prefer_shortest:
+            deduped.sort(key=lambda g: (len(g["instructions"]), g["address"]))
+        else:
+            deduped.sort(key=lambda g: g["address"])
+        return deduped
 
     @staticmethod
     def _normalize_record(record: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -817,12 +982,13 @@ class GadgetIndex:
             raise GadgetIndexError("max_instructions must be positive")
         compiled_filter = self._compile_pattern(filter_pattern)
         normalized_bad_bytes = self._normalize_bad_bytes(bad_bytes)
-        records = self._load(binary_path, arch, image_base)
-        analyzed: List[Dict[str, Any]] = []
-        for record in records:
-            if len(record["instructions"]) > max_instructions:
+        # The analyzed stream is cached (and built in parallel on first
+        # sight), so this method is a pure in-memory filter on repeat calls.
+        analyzed, _, _ = self._load_analyzed(binary_path, arch, image_base)
+        candidates: List[Dict[str, Any]] = []
+        for gadget in analyzed:
+            if len(gadget["instructions"]) > max_instructions:
                 continue
-            gadget = self.analyze_gadget(record, arch_override=arch)
             if compiled_filter is not None and not compiled_filter.search(
                 gadget["instruction_text"]
             ):
@@ -831,8 +997,8 @@ class GadgetIndex:
                 gadget["address"], gadget["pointer_bytes"], normalized_bad_bytes
             ):
                 continue
-            analyzed.append(gadget)
-        deduped = self._dedupe(analyzed)
+            candidates.append(gadget)
+        deduped = self._dedupe(candidates)
         deduped.sort(key=lambda g: g["address"])
         truncated = len(deduped) > max_results
         page = deduped[:max_results]
@@ -852,7 +1018,7 @@ class GadgetIndex:
                 "bad_bytes": normalized_bad_bytes,
                 "max_results": max_results,
                 "max_instructions": max_instructions,
-                "total_scanned": len(records),
+                "total_scanned": len(analyzed),
                 "matched": len(deduped),
                 "returned": len(page),
                 "truncated": truncated,
@@ -889,34 +1055,40 @@ class GadgetIndex:
             )
         compiled_steps = [self._compile_pattern(step) for step in steps]
         normalized_bad_bytes = self._normalize_bad_bytes(bad_bytes)
-        records = self._load(binary_path, arch, image_base)
-        analyzed: List[Dict[str, Any]] = []
-        for record in records:
-            gadget = self.analyze_gadget(record, arch_override=arch)
-            # Filter tainted gadgets BEFORE dedupe so a clean-addr sighting
-            # is not silently displaced by a bad-byte sibling with the
-            # same instruction bytes.
-            if self._address_contains_bad_byte(
-                gadget["address"], gadget["pointer_bytes"], normalized_bad_bytes
-            ):
-                continue
-            analyzed.append(gadget)
-        deduped = self._dedupe(analyzed)
-        if prefer_shortest:
-            deduped.sort(key=lambda g: (len(g["instructions"]), g["address"]))
-        else:
-            deduped.sort(key=lambda g: g["address"])
+        # Reuse the cached analyzed stream (built in parallel on first
+        # sight).  Anchored steps narrow to the first-mnemonic index;
+        # anything else lazily builds the filtered/deduped/sorted full
+        # list once and reuses it across steps.
+        analyzed, mnemonic_index, _ = self._load_analyzed(binary_path, arch, image_base)
+        full_candidates: Optional[List[Dict[str, Any]]] = None
         results: List[Dict[str, Any]] = []
-        for step_index, pattern in enumerate(compiled_steps):
+        for step_index, (raw_step, pattern) in enumerate(zip(steps, compiled_steps)):
             match: Optional[Dict[str, Any]] = None
-            for gadget in deduped:
-                if pattern is None:
-                    match = gadget
-                    break
-                if not pattern.search(gadget["instruction_text"]):
-                    continue
-                match = gadget
-                break
+            if pattern is None:
+                if full_candidates is None:
+                    full_candidates = self._filter_and_sort(
+                        analyzed, normalized_bad_bytes, prefer_shortest
+                    )
+                if full_candidates:
+                    match = full_candidates[0]
+            else:
+                token = self._leading_mnemonic_for_anchor(raw_step)
+                if token is not None and token in mnemonic_index:
+                    candidates = self._filter_and_sort(
+                        [analyzed[index] for index in mnemonic_index[token]],
+                        normalized_bad_bytes,
+                        prefer_shortest,
+                    )
+                else:
+                    if full_candidates is None:
+                        full_candidates = self._filter_and_sort(
+                            analyzed, normalized_bad_bytes, prefer_shortest
+                        )
+                    candidates = full_candidates
+                for gadget in candidates:
+                    if pattern.search(gadget["instruction_text"]):
+                        match = gadget
+                        break
             results.append(
                 {
                     "step_index": step_index,
@@ -956,25 +1128,25 @@ class GadgetIndex:
         target = parse_int(address)
         if target is None:
             raise GadgetIndexError(f"address must be an integer, got {address!r}")
-        records = self._load(binary_path, arch, image_base)
-        for record in records:
-            if int(record["address"]) == target:
-                gadget = self.analyze_gadget(record, arch_override=arch)
-                return build_backend_response(
-                    "inspect_gadget",
-                    parsed={
-                        "schema": GADGET_INSPECTION_SCHEMA,
-                        "binary_path": os.path.abspath(binary_path),
-                        "arch": arch,
-                        "image_base": image_base,
-                        "verdict": "found",
-                        "gadget": gadget,
-                    },
-                    raw_responses=[],
-                    state="STATIC",
-                    parser_version=PARSER_VERSION,
-                    warnings=None,
-                )
+        analyzed, _, by_address = self._load_analyzed(binary_path, arch, image_base)
+        index = by_address.get(target)
+        if index is not None:
+            gadget = analyzed[index]
+            return build_backend_response(
+                "inspect_gadget",
+                parsed={
+                    "schema": GADGET_INSPECTION_SCHEMA,
+                    "binary_path": os.path.abspath(binary_path),
+                    "arch": arch,
+                    "image_base": image_base,
+                    "verdict": "found",
+                    "gadget": gadget,
+                },
+                raw_responses=[],
+                state="STATIC",
+                parser_version=PARSER_VERSION,
+                warnings=None,
+            )
         return build_backend_response(
             "inspect_gadget",
             parsed={

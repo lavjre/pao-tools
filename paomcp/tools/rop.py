@@ -7,7 +7,13 @@ from typing import Any, Dict, List, Mapping, Optional
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from paomcp.tools.common import catch_errors, get_services
+from paomcp.tools.backends.chain_confirm import ChainConfirmer
+from paomcp.tools.common import (
+    catch_errors,
+    get_services,
+    resolve_debug_session,
+    run_session_action,
+)
 
 
 def register(mcp: FastMCP) -> None:
@@ -374,6 +380,75 @@ def register(mcp: FastMCP) -> None:
             bad_bytes=bad_bytes,
             arch=arch,
         )
+
+    @mcp.tool()
+    @catch_errors()
+    async def confirm_chain(
+        chain: List[Any],
+        session_id: Optional[str] = None,
+        stack_address: Optional[Any] = None,
+        target_address: Optional[Any] = None,
+        max_steps: int = 200,
+        arch: str = "x86_64",
+        restore: bool = True,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Dry-run a ROP chain inside the resident debugger session.
+
+        The dynamic counterpart to ``validate_rop_chain``: writes the chain
+        values onto a scratch stack region in the *live* inferior, points
+        ``$pc``/``$sp`` at them, single-steps until the chain reaches
+        ``target_address`` (default: the last chain value), crashes, or
+        exhausts ``max_steps`` -- then restores ``$pc``/``$sp`` so the
+        session is left untouched.  Verdicts:
+
+        * ``reached_target``  -- control transferred to the target;
+          ``stack_aligned`` reports SysV alignment (``rsp % 16 == 0``).
+        * ``crashed``         -- signal received mid-chain (``crash``
+          carries ``{signal, step}``).
+        * ``steps_exhausted`` -- budget ran out (loop gadget, or a chain
+          longer than the budget; raise ``max_steps``).
+        * ``step_failed`` / ``write_failed`` / ``setup_failed`` /
+          ``invalid_setup`` -- harness-level failures.
+
+        Each step records ``{step, rip, rsp, reason}`` in ``trace``.  The
+        session must already have a loaded, stopped inferior (e.g. after
+        ``run`` to a breakpoint).
+
+        Args:
+            chain: Ordered list of chain values (addresses/immediates) as
+                they sit on the stack, exactly like an overflow payload.
+                ``chain[0]`` is the first gadget to execute.
+            session_id: Debugger session holding the stopped inferior.
+                Defaults to the active session.
+            stack_address: Scratch region to write the chain into.  Omit
+                to write at the inferior's current ``$sp`` (a stopped
+                inferior's stack top is caller-owned scratch).
+            target_address: Success address.  Defaults to the last chain
+                value (the target call / one-gadget).
+            max_steps: Single-step budget (bounded at 512).
+            arch: Target architecture (``x86_64`` or ``i386``).
+            restore: When true (default), restore ``$pc``/``$sp`` after
+                the run so the session is undisturbed.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+
+        def _do_confirm() -> Dict[str, Any]:
+            return ChainConfirmer(session.gdb).confirm(
+                chain=list(chain),
+                stack_address=stack_address,
+                target_address=target_address,
+                max_steps=max_steps,
+                arch=arch,
+                restore=restore,
+            )
+
+        result = await run_session_action(session, _do_confirm)
+        result["session_id"] = session.session_id
+        return result
 
     @mcp.tool()
     @catch_errors()

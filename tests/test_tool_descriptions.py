@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 150
+    assert len(tools) == 151
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -82,7 +82,12 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "diff_heap_snapshots",
         "link_snapshot_to_crash",
     } <= tool_names
-    assert {"find_gadgets", "find_gadget_sequence", "inspect_gadget"} <= tool_names
+    assert {
+        "find_gadgets",
+        "find_gadget_sequence",
+        "inspect_gadget",
+        "confirm_chain",
+    } <= tool_names
     assert {"identify_libc", "find_one_gadgets"} <= tool_names
     assert {
         "build_rop_chain",
