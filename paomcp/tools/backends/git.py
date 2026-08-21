@@ -56,12 +56,28 @@ class GitTools:
                     repo_name = repo_name[:-4]
                 target_dir = repo_name
 
-            # Full path for the repository
-            repo_path = (
-                target_dir
-                if os.path.isabs(target_dir)
-                else os.path.join(self.workspace_dir, target_dir)
+            # Containment: the repository must land inside the workspace so
+            # overwrite=True can never rmtree caller-owned content outside it.
+            # Use realpath so a symlinked workspace path cannot smuggle a
+            # target outside the root.
+            workspace_root = os.path.realpath(self.workspace_dir)
+            candidate = (
+                os.path.realpath(os.path.join(workspace_root, target_dir))
+                if not os.path.isabs(target_dir)
+                else os.path.realpath(target_dir)
             )
+            if candidate != workspace_root and not candidate.startswith(
+                workspace_root + os.sep
+            ):
+                return {
+                    "success": False,
+                    "error": (
+                        f"target_dir escapes the git workspace '{workspace_root}'"
+                    ),
+                    "path": candidate,
+                    "type": "ValueError",
+                }
+            repo_path = candidate
 
             # Never destroy caller-owned workspace content implicitly.
             if os.path.exists(repo_path):
@@ -75,11 +91,12 @@ class GitTools:
                 logger.info("Replacing repository at %s", repo_path)
                 shutil.rmtree(repo_path)
 
-            # Clone the repository
+            # Clone the repository.  A shallow clone has no history to
+            # satisfy an arbitrary version ref, so when a version is
+            # requested we always fetch the full history before checkout.
             clone_cmd = ["git", "clone"]
-            if shallow:
+            if shallow and not version:
                 clone_cmd.extend(["--depth", "1"])
-
             clone_cmd.extend([repo_url, repo_path])
 
             logger.info(f"Cloning repository: {repo_url}")
@@ -102,6 +119,16 @@ class GitTools:
             checkout_info = None
             if version:
                 logger.info(f"Checking out version: {version}")
+
+                # A depth-1 clone cannot fetch arbitrary tags/SHAs, so
+                # unshallow before fetching the specific ref.
+                if shallow:
+                    subprocess.run(
+                        ["git", "fetch", "--unshallow", "origin"],
+                        cwd=repo_path,
+                        capture_output=True,
+                        text=True,
+                    )
 
                 # First, fetch the specific ref if needed
                 fetch_result = subprocess.run(

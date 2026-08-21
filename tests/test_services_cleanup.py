@@ -86,3 +86,38 @@ def test_close_services_continues_after_a_target_provider_cleanup_failure() -> N
     ]
     assert services.paopipe_sessions == {}
     assert registry.list() == []
+
+
+def test_close_services_continues_after_a_pipe_kill_failure() -> None:
+    """A pipe whose kill() raises must not abort the rest of shutdown."""
+    events: List[str] = []
+
+    class CloseRecorder:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close_all(self) -> None:
+            events.append(self.name)
+
+        def close(self) -> None:
+            events.append(self.name)
+
+    class FailingPipe:
+        def kill(self) -> None:
+            events.append("paopipe")
+            raise RuntimeError("injected pipe kill failure")
+
+    registry = TargetRegistry()
+    services = SimpleNamespace(
+        paopipe_lock=threading.Lock(),
+        paopipe_sessions={"stuck": FailingPipe()},
+        target_registry=registry,
+        subprocess_tools=CloseRecorder("subprocess"),
+        session_registry=CloseRecorder("debug-sessions"),
+        artifact_store=CloseRecorder("artifacts"),
+    )
+
+    close_services(services)  # type: ignore[arg-type]
+
+    assert events == ["paopipe", "subprocess", "debug-sessions", "artifacts"]
+    assert services.paopipe_sessions == {}

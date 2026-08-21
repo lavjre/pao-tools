@@ -76,3 +76,37 @@ def test_paopipe_replaces_invalid_utf8():
         assert "\ufffd" in output
     finally:
         pipe.kill()
+
+
+def test_paopipe_kill_after_process_exited_does_not_raise():
+    pipe = PaoPipe([sys.executable, "-c", "pass"])
+    pipe.proc.wait(timeout=5)
+    assert pipe.is_alive() is False
+    # kill() after exit exercises the ProcessLookupError path (group already
+    # gone) and must swallow it rather than aborting shutdown callers.
+    pipe.kill()
+    assert pipe.get_exit_code() == 0
+
+
+def test_paopipe_kill_terminates_live_process_tree():
+    import subprocess
+    import time
+
+    pipe = PaoPipe(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+        ]
+    )
+    try:
+        pipe.wait_ready(timeout=2)
+        assert pipe.is_alive() is True
+        pipe.kill()
+        assert pipe.is_alive() is False
+        assert pipe.proc.poll() is not None
+    finally:
+        try:
+            pipe.kill()
+        except Exception:
+            pass

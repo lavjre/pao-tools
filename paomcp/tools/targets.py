@@ -13,6 +13,7 @@ from paomcp.tools.common import (
     resolve_debug_session,
     run_session_action,
 )
+from paomcp.utils.paths import resolve_workspace_path
 
 
 def _resolve_session_id(services: Any, session_id: Optional[str]) -> Optional[str]:
@@ -230,6 +231,25 @@ def register(mcp: FastMCP) -> None:
         than silently no-op-ing.
         """
         services = get_services(ctx)
+        workspace_root = services.runtime_paths.workspace_root
+        # The provider writes/reads the LOCAL side of the transfer, so
+        # contain it under the workspace: ``destination`` on download,
+        # ``source`` on upload.  Remote-side paths are the operator's
+        # business on the target host and are not resolvable here.
+        if direction == "upload":
+            source = resolve_workspace_path(
+                source,
+                workspace_root=workspace_root,
+                require_exists=True,
+                kind="source",
+            )
+        else:
+            destination = resolve_workspace_path(
+                destination,
+                workspace_root=workspace_root,
+                require_exists=False,
+                kind="destination",
+            )
         return services.target_registry.sync_target_files_response(
             target_id=target_id,
             source=source,
@@ -256,6 +276,12 @@ def register(mcp: FastMCP) -> None:
         libc.
         """
         services = get_services(ctx)
+        destination_dir = resolve_workspace_path(
+            destination_dir,
+            workspace_root=services.runtime_paths.workspace_root,
+            require_exists=False,
+            kind="destination_dir",
+        )
         return services.target_registry.fetch_runtime_libraries_response(
             target_id=target_id,
             destination_dir=destination_dir,

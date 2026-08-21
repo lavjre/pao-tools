@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from paomcp.artifacts import ArtifactStore
 from paomcp.tools.backends.research import ResearchRegistry
 from paomcp.tools.backends.research_bundle import (
     ARTIFACTS_DIRNAME,
@@ -537,6 +538,92 @@ class TestImport:
         with pytest.raises(BundleError, match="registry cap"):
             bundle.import_bytes(data)
         assert registry.list_sessions() == []
+
+
+def _first_hypothesis_id(session) -> str:
+    return next(iter(session.hypotheses.values())).hypothesis_id
+
+
+class TestManifestIntegrity:
+    def test_export_integrity_covers_manifest(self, tmp_path: Path) -> None:
+        registry = ResearchRegistry()
+        sid = _seeded_session(registry)
+        bundle = ResearchBundle(registry)
+        data, summary = bundle.export_to_bytes(session_id=sid)
+
+        assert (
+            summary["manifest_sha256"]
+            == hashlib.sha256(
+                json.dumps(
+                    json.loads(
+                        zipfile.ZipFile(io.BytesIO(data)).read(MANIFEST_ARCNAME)
+                    ),
+                    sort_keys=True,
+                    indent=2,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
+
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            integrity = json.loads(zf.read(INTEGRITY_ARCNAME))
+        assert integrity[MANIFEST_ARCNAME] == summary["manifest_sha256"]
+        assert len(integrity[MANIFEST_ARCNAME]) == 64
+
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "valid"
+        assert result["problems"] == []
+
+    def test_tampered_manifest_is_rejected(self, tmp_path: Path) -> None:
+        registry = ResearchRegistry()
+        sid = _seeded_session(registry)
+        bundle = ResearchBundle(registry)
+        data, _ = bundle.export_to_bytes(session_id=sid)
+
+        # Rebuild the zip with a modified manifest but keep integrity.json
+        # unchanged, so the observed manifest sha diverges from the recorded one.
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(buf, "w") as dst:
+            for name in src.namelist():
+                payload = src.read(name)
+                if name == MANIFEST_ARCNAME:
+                    manifest = json.loads(payload)
+                    manifest["session"]["name"] = "TAMPERED"
+                    payload = json.dumps(manifest).encode("utf-8")
+                dst.writestr(name, payload)
+        result = bundle.verify_bytes(buf.getvalue())
+        assert result["verdict"] == "invalid"
+        assert any("manifest.json sha256 mismatch" in p for p in result["problems"])
+
+    def test_verify_requires_manifest_digest(self, tmp_path: Path) -> None:
+        # A hand-built bundle whose integrity covers only artifacts/ must be
+        # flagged: the session narrative would be unprotected.
+        manifest = _minimal_manifest()
+        data = _build_bundle(manifest, integrity={})
+        registry = ResearchRegistry()
+        bundle = ResearchBundle(registry)
+        result = bundle.verify_bytes(data)
+        assert result["verdict"] == "invalid"
+        assert any("does not cover manifest.json" in p for p in result["problems"])
+
+    def test_export_skips_invalid_artifact_ref(self, tmp_path: Path) -> None:
+        # The real ArtifactStore raises ValueError for non-canonical ids.
+        # Export must degrade to a warning + unresolved entry, never crash.
+        store = ArtifactStore(str(tmp_path / "store"))
+        registry = ResearchRegistry()
+        sid = _seeded_session(registry)
+        registry.link_evidence_response(
+            session_id=sid, kind="artifact", ref="not-a-real-id"
+        )
+        bundle = ResearchBundle(registry, artifact_store=store)
+        data, summary = bundle.export_to_bytes(session_id=sid)
+
+        assert any("not a valid artifact id" in w for w in summary["warnings"])
+        index = json.loads(zipfile.ZipFile(io.BytesIO(data)).read(MANIFEST_ARCNAME))[
+            "artifact_index"
+        ]
+        assert index[0]["resolved"] is False
+        assert index[0]["reason"] == "invalid_ref"
+        assert bundle.verify_bytes(data)["verdict"] == "valid"
 
 
 def _first_hypothesis_id(session) -> str:

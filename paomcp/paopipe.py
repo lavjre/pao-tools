@@ -2,12 +2,15 @@ import threading
 import subprocess
 import queue
 import json
+import logging
 import os
 import shlex
 import signal
 import time
 import codecs
 from typing import Optional, List, Dict, Any, Sequence, Union
+
+logger = logging.getLogger(__name__)
 
 
 class PaoPipe:
@@ -274,11 +277,24 @@ class PaoPipe:
     def kill(self):
         try:
             if self.proc and self.proc.poll() is None:
-                if os.name == "nt":
-                    self.proc.kill()
-                else:
-                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
-                self.proc.wait(timeout=5)
+                try:
+                    if os.name == "nt":
+                        self.proc.kill()
+                    else:
+                        os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    # Process group already exited between the poll() and
+                    # the killpg(); nothing left to signal.
+                    pass
+                try:
+                    self.proc.wait(timeout=5)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    # An unkillable (e.g. D-state) child must not block or
+                    # abort shutdown; the caller has no path to it anyway.
+                    logger.warning(
+                        "PaO pipe process (pid %s) did not exit after SIGKILL",
+                        self.proc.pid,
+                    )
         finally:
             with self._lock:
                 self._alive = False

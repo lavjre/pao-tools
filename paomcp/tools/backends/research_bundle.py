@@ -11,10 +11,13 @@ tool can read it too:
                           timeline) plus a ``bundle`` header
                           (schema version, tool/parser versions,
                           created-at, artifact index).
-    integrity.json     -- SHA-256 over every payload in ``artifacts/``,
-                          keyed by ``arcname``.  Signed only by the
-                          hash function; a caller who needs a real
-                          signature layers that on top of the bundle.
+    integrity.json     -- SHA-256 over every payload in ``artifacts/``
+                          (keyed by ``arcname``) plus the digest of
+                          ``manifest.json`` itself, so verify covers the
+                          session narrative and not just the blobs.
+                          Signed only by the hash function; a caller who
+                          needs a real signature layers that on top of
+                          the bundle.
     artifacts/<sha256>  -- one file per referenced artifact,
                           content-addressed by SHA-256 so identical
                           payloads are stored once even across
@@ -34,7 +37,9 @@ can still cite them, but does not duplicate their bytes here.
      ``integrity.json``.
   2. Every artifact listed in the manifest / integrity file exists
      in ``artifacts/`` and its SHA-256 matches the recorded value.
-  3. No files outside the documented layout are present (defensive
+  3. ``manifest.json`` has a recorded SHA-256 in ``integrity.json``
+     and its bytes match it, so the session record itself is covered.
+  4. No files outside the documented layout are present (defensive
      against accidental leakage of unrelated files).
 
 ``import_research_session`` verifies first, then rehydrates a new
@@ -225,9 +230,38 @@ class ResearchBundle:
                     }
                 )
                 continue
+            except ValueError:
+                warnings.append(
+                    f"artifact '{evidence.ref}' referenced by evidence "
+                    f"'{evidence.evidence_id}' is not a valid artifact id"
+                )
+                index_entries.append(
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "artifact_id": evidence.ref,
+                        "resolved": False,
+                        "reason": "invalid_ref",
+                    }
+                )
+                continue
             data_path = self._artifact_store._data_path(evidence.ref)
-            with open(data_path, "rb") as handle:
-                payload = handle.read()
+            try:
+                with open(data_path, "rb") as handle:
+                    payload = handle.read()
+            except OSError:
+                warnings.append(
+                    f"artifact '{evidence.ref}' referenced by evidence "
+                    f"'{evidence.evidence_id}' could not be read"
+                )
+                index_entries.append(
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "artifact_id": evidence.ref,
+                        "resolved": False,
+                        "reason": "read_failed",
+                    }
+                )
+                continue
             observed_sha = _sha256_bytes(payload)
             if observed_sha != metadata.sha256:
                 warnings.append(
@@ -290,9 +324,14 @@ class ResearchBundle:
             )
             manifest = self._build_manifest(session, artifact_index=index_entries)
         manifest_bytes = json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8")
+        # The manifest carries the session narrative (notes, hypotheses,
+        # evidence, snapshots, timeline).  Hash it into the integrity index so
+        # verify detects tampering of the record itself, not just artifacts/.
+        manifest_sha = _sha256_bytes(manifest_bytes)
         integrity: Dict[str, str] = {
             f"{ARTIFACTS_DIRNAME}/{sha}": sha for sha in blob_by_sha
         }
+        integrity[MANIFEST_ARCNAME] = manifest_sha
         integrity_bytes = json.dumps(integrity, sort_keys=True, indent=2).encode(
             "utf-8"
         )
@@ -383,6 +422,7 @@ class ResearchBundle:
             "bundle_schema": BUNDLE_SCHEMA_VERSION,
             "bundle_bytes": len(bundle_bytes),
             "sha256": _sha256_bytes(bundle_bytes),
+            "manifest_sha256": manifest_sha,
             "artifact_count": len(blob_by_sha),
             "note_count": len(session.notes),
             "hypothesis_count": len(session.hypotheses),
@@ -880,7 +920,20 @@ class ResearchBundle:
             return problems
 
         listed_artifacts = set()
+        declared_manifest_sha = None
         for arcname, expected_sha in integrity.items():
+            if arcname == MANIFEST_ARCNAME:
+                if not isinstance(expected_sha, str) or not _SHA256_RE.fullmatch(
+                    expected_sha
+                ):
+                    problems.append("integrity manifest.json has an invalid SHA-256")
+                    continue
+                declared_manifest_sha = expected_sha
+                if MANIFEST_ARCNAME not in info_by_name:
+                    problems.append(
+                        "integrity references missing entry 'manifest.json'"
+                    )
+                continue
             if not isinstance(arcname, str) or not _CANONICAL_ARTIFACT_RE.fullmatch(
                 arcname
             ):
@@ -957,6 +1010,11 @@ class ResearchBundle:
                         f"manifest artifact index {index} size does not match "
                         "the ZIP entry"
                     )
+        if declared_manifest_sha is None:
+            problems.append(
+                "integrity.json does not cover manifest.json; "
+                "the session narrative is unprotected"
+            )
         return problems
 
     def verify_bytes(self, bundle_bytes: bytes) -> Dict[str, Any]:
@@ -1003,6 +1061,23 @@ class ResearchBundle:
                     )
                 if isinstance(integrity, dict):
                     for arcname, expected_sha in integrity.items():
+                        if arcname == MANIFEST_ARCNAME:
+                            if (
+                                isinstance(expected_sha, str)
+                                and _SHA256_RE.fullmatch(expected_sha)
+                                and MANIFEST_ARCNAME in info_by_name
+                            ):
+                                info = info_by_name[MANIFEST_ARCNAME]
+                                observed_sha = self._hash_member(
+                                    zf, info, limit=self._max_manifest_bytes
+                                )
+                                if observed_sha != expected_sha:
+                                    problems.append(
+                                        f"manifest.json sha256 mismatch "
+                                        f"(expected={expected_sha[:12]}, "
+                                        f"observed={observed_sha[:12]})"
+                                    )
+                            continue
                         if (
                             not isinstance(arcname, str)
                             or not _CANONICAL_ARTIFACT_RE.fullmatch(arcname)

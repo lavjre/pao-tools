@@ -113,7 +113,10 @@ def create_services(
             artifact_store=artifact_store,
             operation_registry=operation_registry,
         ),
-        git_tools=GitTools(workspace_dir=runtime_paths.repos_dir),
+        # Git repos land in the caller-visible workspace (docs promise
+        # /workspace/<name>), and fetch_repo enforces containment against
+        # this same root.
+        git_tools=GitTools(workspace_dir=runtime_paths.workspace_root),
         python_tools=PythonTools(workspace_dir=runtime_paths.python_dir),
         decompiler=decompiler,
         artifact_store=artifact_store,
@@ -136,7 +139,13 @@ def close_services(services: AppServices) -> None:
 
     with services.paopipe_lock:
         for pipe in services.paopipe_sessions.values():
-            pipe.kill()
+            try:
+                pipe.kill()
+            except Exception:
+                # A wedged pipe must not abort the rest of shutdown:
+                # target / subprocess / session / artifact cleanup still
+                # needs to run below.
+                logger.exception("Failed to stop a PaO pipe during shutdown")
         services.paopipe_sessions.clear()
 
     target_cleanup = services.target_registry.close_all()

@@ -4394,7 +4394,7 @@ class HeapHistory:
         chunk_ledger: List[Dict[str, Any]] = []
 
         for arena_entry in raw_arenas:
-            addr = arena_entry.get("arena_address")
+            addr = arena_entry.get("address")
             if addr is None:
                 continue
             addr_int = int(addr)
@@ -4403,15 +4403,15 @@ class HeapHistory:
                 arena_address=addr_str, cancellation_check=cancellation_check
             )
             arena_parsed = arena_inspect.get("parsed", {}) or {}
-            malloc_state = arena_parsed.get("malloc_state") or {}
+            fields = arena_parsed.get("fields") or {}
             arena_summaries.append(
                 {
                     "arena_address": addr_int,
-                    "is_main_arena": arena_parsed.get("is_main_arena"),
-                    "top": malloc_state.get("top"),
-                    "last_remainder": malloc_state.get("last_remainder"),
-                    "system_mem": malloc_state.get("system_mem"),
-                    "next": malloc_state.get("next"),
+                    "is_main_arena": arena_parsed.get("is_main"),
+                    "top": fields.get("top"),
+                    "last_remainder": fields.get("last_remainder"),
+                    "system_mem": fields.get("system_mem"),
+                    "next": fields.get("next"),
                     "verdict": arena_parsed.get("verdict"),
                 }
             )

@@ -630,19 +630,15 @@ class TestCaptureGlibc:
         arena_addr = 0x7FFF_F7E0_0000
         arenas_response = _canned_backend_response(
             "list_arenas",
-            {
-                "arenas": [
-                    {"arena_address": arena_addr, "is_main_arena": True, "index": 0}
-                ]
-            },
+            {"arenas": [{"address": arena_addr, "is_main": True, "index": 0}]},
         )
         inspect_arena_by_addr = {
             arena_addr: _canned_backend_response(
                 "inspect_arena",
                 {
                     "arena_address": arena_addr,
-                    "is_main_arena": True,
-                    "malloc_state": {
+                    "is_main": True,
+                    "fields": {
                         "top": 0x5555_5559_0000,
                         "last_remainder": 0,
                         "system_mem": 0x21000,
@@ -704,6 +700,11 @@ class TestCaptureGlibc:
         ledger_addrs = [entry["chunk_address"] for entry in parsed["chunk_ledger"]]
         assert ledger_addrs == [0x1000, 0x2000, 0x3000]
         assert parsed["arenas"][0]["top"] == 0x5555_5559_0000
+        assert parsed["arenas"][0]["last_remainder"] == 0
+        assert parsed["arenas"][0]["system_mem"] == 0x21000
+        assert parsed["arenas"][0]["next"] == arena_addr
+        assert parsed["arenas"][0]["is_main_arena"] is True
+        assert parsed["arenas"][0]["arena_address"] == arena_addr
         assert parsed["tcache_summary"]["verdict"] == "parsed"
         assert parsed["inferior"] == {"pid": 4242, "epoch": 3}
 
