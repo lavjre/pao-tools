@@ -15,6 +15,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         elf_runtime,
         heap,
         inspect,
+        kernel_slub,
         operations,
         platform,
         processes,
@@ -37,6 +38,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     elf_runtime.register(mcp)
     heap.register(mcp)
     inspect.register(mcp)
+    kernel_slub.register(mcp)
     operations.register(mcp)
     platform.register(mcp)
     processes.register(mcp)

@@ -25,6 +25,7 @@ from .heap import (
 )
 from .heap_techniques import GlibcTechniqueAnalyzer
 from .pwndbg import PwndbgTools
+from .slub import SLUB_CACHE_SCHEMA, SLUB_FREELIST_SCHEMA, KernelSlab
 from .python import PythonTools
 from .research import (
     ResearchError,
@@ -87,6 +88,9 @@ __all__ = [
     "GlibcTechniqueAnalyzer",
     "GlibcAttackHelper",
     "ATTACK_TCACHE_POISON_SCHEMA",
+    "KernelSlab",
+    "SLUB_CACHE_SCHEMA",
+    "SLUB_FREELIST_SCHEMA",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",

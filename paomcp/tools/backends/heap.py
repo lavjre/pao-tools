@@ -1979,6 +1979,12 @@ BIN_INSPECTION_SCHEMA = "pao.glibc-bins.v1"
 # chain that never returns to its bin head.
 DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN = 1024
 
+# Stage 6.10 -- kernel SLUB.  Default system page size for slab geometry
+# (slab_bytes = PAGE_SIZE << order).  Holds for x86_64/arm64 kernels and is
+# the value a bare gdbstub guest rarely overrides; callers can pass their own
+# when the kernel uses a different base page.
+DEFAULT_SLUB_PAGE_SIZE = 0x1000
+
 
 class GlibcBins:
     """Walk glibc bin chains (fastbins today; tcache/regular bins later).
@@ -4764,6 +4770,7 @@ class HeapTools:
         from .attack_helpers import GlibcAttackHelper  # noqa: PLC0415
         from .heap_analyzers import analyzer_for_family  # noqa: PLC0415
         from .heap_techniques import GlibcTechniqueAnalyzer  # noqa: PLC0415
+        from .slub import KernelSlab  # noqa: PLC0415
 
         self._analyzer_for_family = analyzer_for_family
 
@@ -4792,6 +4799,18 @@ class HeapTools:
             glibc=self.glibc,
             bins=self.bins,
             history=self.history,
+        )
+
+        # Kernel SLUB is a dedicated self-gated surface: kernel targets are
+        # not classified by the userspace allocator protocol, so this
+        # component never routes through ``classify`` -- the caller names a
+        # cache address and BTF resolves the layout.
+        self.slub = KernelSlab(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
         )
 
     # How long a detected family stays cached on this facade.  Short on
@@ -5038,6 +5057,75 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- S6.10 kernel SLUB (dedicated self-gated surface) --------------
+    def inspect_slub_cache(
+        self,
+        *,
+        cache_address: str,
+        btf_path: Optional[str] = None,
+        page_size: int = DEFAULT_SLUB_PAGE_SIZE,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Decode a kernel SLUB cache's geometry + hardening state from BTF."""
+        gate = self._gdb_gate("inspect_slub_cache")
+        if gate is not None:
+            return gate
+        slub = getattr(self, "slub", None)
+        if slub is None:
+            # Facade assembled without ``__init__`` (the allocator-plugin
+            # test pattern); build a throwaway component on the discovery.
+            from .slub import KernelSlab  # noqa: PLC0415
+
+            slub = KernelSlab(
+                self.discovery.gdb,
+                self.discovery.inspection,
+                self.discovery.debugger,
+                self.session_id,
+                discovery=self.discovery,
+            )
+        return slub.inspect_slub_cache(
+            cache_address=cache_address,
+            btf_path=btf_path,
+            page_size=page_size,
+            cancellation_check=cancellation_check,
+        )
+
+    def decode_slub_freelist(
+        self,
+        *,
+        cache_address: str,
+        slab_address: str,
+        slab_mem_address: Optional[str] = None,
+        btf_path: Optional[str] = None,
+        page_size: int = DEFAULT_SLUB_PAGE_SIZE,
+        max_objects: Optional[int] = None,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Decode one kernel SLUB slab's obfuscated freelist chain."""
+        gate = self._gdb_gate("decode_slub_freelist")
+        if gate is not None:
+            return gate
+        slub = getattr(self, "slub", None)
+        if slub is None:
+            from .slub import KernelSlab  # noqa: PLC0415
+
+            slub = KernelSlab(
+                self.discovery.gdb,
+                self.discovery.inspection,
+                self.discovery.debugger,
+                self.session_id,
+                discovery=self.discovery,
+            )
+        return slub.decode_slub_freelist(
+            cache_address=cache_address,
+            slab_address=slab_address,
+            slab_mem_address=slab_mem_address,
+            btf_path=btf_path,
+            page_size=page_size,
+            max_objects=max_objects,
+            cancellation_check=cancellation_check,
+        )
+
     # ---- S6.4 heap corruption classifier ------------------------------
     def classify_heap_corruption(
         self,
@@ -5192,6 +5280,7 @@ __all__ = [
     "TCACHE_MAX_BINS",
     "BIN_INSPECTION_SCHEMA",
     "DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN",
+    "DEFAULT_SLUB_PAGE_SIZE",
     "HEAP_CORRUPTION_SCHEMA",
     "HEAP_TECHNIQUE_SCHEMA",
     "UAF_SCAN_SCHEMA",

@@ -66,7 +66,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 155
+    assert len(tools) == 157
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -81,6 +81,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "heap_technique_catalog",
     } <= tool_names
     assert "poison_tcache_link" in tool_names
+    assert {"inspect_slub_cache", "decode_slub_freelist"} <= tool_names
     assert {
         "capture_heap_snapshot",
         "list_heap_snapshots",
