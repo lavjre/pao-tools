@@ -35,6 +35,12 @@ from tests.test_glibc_regular_bins import (
     _place_free_chunk,
     _place_self_referential_bins,
 )
+from tests.test_glibc_tcache import (
+    TCACHE_ADDR,
+    TcacheAwareFakeDebugger,
+    make_tcache_bytes,
+    place_tcache_chain,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +383,52 @@ class TestClassifyExplicitArena:
         assert parsed["arena_address"] == ARENA2_ADDR
         assert parsed["is_main_arena"] is False
         assert parsed["verdict"] == "valid"
+
+
+# ---------------------------------------------------------------------------
+# classify_heap_corruption -- additive technique hints (S6.6)
+# ---------------------------------------------------------------------------
+TCACHE_MAX_BINS = 64
+
+
+def _tcache(counts=None, entries=None):
+    pad = lambda lst: (
+        None if lst is None else list(lst) + [0] * (TCACHE_MAX_BINS - len(lst))
+    )
+    return make_tcache_bytes(counts=pad(counts), entries=pad(entries))
+
+
+class TestClassifyTechniqueHints:
+    def test_clean_heap_has_empty_hints_and_valid_verdict(self):
+        corruption, gdb = build_corruption(debugger=TcacheAwareFakeDebugger())
+        _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        gdb.place(TCACHE_ADDR, make_tcache_bytes())
+        result = corruption.classify_heap_corruption()
+        parsed = result["parsed"]
+        # Verdicts are unchanged by the additive hints.
+        assert parsed["verdict"] == "valid"
+        assert parsed["findings"] == []
+        hints = parsed["technique_hints"]
+        assert isinstance(hints, list)
+        assert len(hints) > 0
+        assert all(entry["present"] is False for entry in hints)
+
+    def test_tcache_double_free_surfaces_hint_without_changing_verdict(self):
+        corruption, gdb = build_corruption(debugger=TcacheAwareFakeDebugger())
+        a = HEAP_BASE + 0x300
+        gdb.place(TCACHE_ADDR, _tcache(counts=[1, 1], entries=[a, a]))
+        place_tcache_chain(gdb, [a])
+        place_tcache_chain(gdb, [a])
+        _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        result = corruption.classify_heap_corruption()
+        parsed = result["parsed"]
+        hints = {h["technique"]: h for h in parsed["technique_hints"]}
+        assert hints["tcache_double_free"]["present"] is True
+        # The S6.4 duplicate_entry finding is what drives the verdict; the
+        # hints are purely additive.
+        assert parsed["verdict"] == "corrupted"
+        dups = [f for f in parsed["findings"] if f["category"] == "duplicate_entry"]
+        assert len(dups) >= 1
 
 
 # ---------------------------------------------------------------------------

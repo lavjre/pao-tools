@@ -1,4 +1,5 @@
-"""MCP tools for typed heap allocator discovery (Stage 6.1)."""
+"""MCP tools for typed heap allocator discovery (Stage 6.1) and
+heap exploitation-technique analysis (Stage 6.6)."""
 
 from __future__ import annotations
 
@@ -8,10 +9,12 @@ from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
 from paomcp.operations import current_operation_id
+from paomcp.tools.backends.heap_techniques import GlibcTechniqueAnalyzer
 from paomcp.tools.common import (
     catch_errors,
     get_services,
     resolve_debug_session,
+    run_blocking,
     run_session_action,
 )
 
@@ -688,6 +691,144 @@ def register(mcp: FastMCP) -> None:
             ),
         )
         result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def analyze_heap_technique(
+        session_id: str,
+        arena_address: Optional[str] = None,
+        techniques: Optional[List[str]] = None,
+        scan_mmap_mappings: bool = True,
+        mmap_max_mappings: int = 4,
+        mmap_max_bytes: int = 1 << 20,
+        max_overlap_chunks: int = 256,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Analyze the live glibc heap for House-of-* / exploit primitives.
+
+        Runs a registry of heuristic detectors (house of spirit / einherjar /
+        force / lore, tcache poisoning, tcache / fastbin double-free, house of
+        botcake, unsafe unlink, overlapping chunks, top-chunk exhaustion,
+        large-bin attack, mmap chunk scan) over one consistent snapshot of the
+        arena's fastbins, tcache and regular bins.  Every finding carries raw
+        evidence, a confidence label, the existing MCP tools that can confirm
+        it, and a one-line playbook; a heuristic is never promoted to a fact.
+
+        The aggregate ``verdict`` is ``clean`` (nothing observed),
+        ``suspicious`` (only low/medium findings), ``exploitable`` (any
+        critical/high finding), ``unsupported`` (non-glibc target), or
+        ``unresolvable`` (arena bin layout could not be resolved via debug
+        symbols).  The ``mmap_chunk_scan`` detector is a bounded sweep of
+        writable non-heap mappings (``mmap_max_mappings`` mappings, at most
+        ``mmap_max_bytes`` total) for ``IS_MMAPPED`` chunk headers.
+
+        Args:
+            session_id: Debugger session whose live inferior should be inspected.
+            arena_address: Optional hex/decimal arena address (typically from
+                ``list_arenas``).  Omit to analyze main_arena.
+            techniques: Optional subset of technique names to evaluate.  Omit
+                for the full detector registry.
+            scan_mmap_mappings: Run the bounded mmap-chunk scan.
+            mmap_max_mappings: Cap on writable mappings scanned for mmap chunks.
+            mmap_max_bytes: Cap on total bytes scanned for mmap chunks.
+            max_overlap_chunks: Cap on free chunks considered for pairwise
+                range-overlap detection.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.analyze_heap_technique(
+                arena_address=arena_address,
+                techniques=techniques,
+                scan_mmap_mappings=scan_mmap_mappings,
+                mmap_max_mappings=mmap_max_mappings,
+                mmap_max_bytes=mmap_max_bytes,
+                max_overlap_chunks=max_overlap_chunks,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def detect_uaf(
+        session_id: str,
+        max_bytes: int = 1 << 22,
+        max_mappings: int = 8,
+        max_chunks: int = 512,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Scan writable mappings for dangling references into freed chunks.
+
+        Collects the user ranges of every currently-freed chunk (fastbins +
+        tcache + regular bins), then scans writable mappings for live 8-byte
+        pointers whose value lands inside one of those ranges -- the signature
+        of a use-after-free.  The scan is bounded (``max_bytes`` total,
+        ``max_mappings`` mappings, ``max_chunks`` freed chunks) and excludes
+        the allocator's own bookkeeping (bin link slots, the arena struct, the
+        tcache struct) so its own metadata never reads as user data.
+
+        Verdicts: ``no_dangling_references``, ``dangling_references_found``,
+        ``unsupported`` (non-glibc), or ``unresolvable`` (arena bin layout
+        could not be resolved).  Each candidate carries the pointer's own
+        address, the pointer value, the freed chunk it points into, and the
+        offset of the target within that chunk's user area.
+
+        Args:
+            session_id: Debugger session whose live inferior should be inspected.
+            max_bytes: Cap on total bytes scanned across all mappings.
+            max_mappings: Cap on writable mappings scanned.
+            max_chunks: Cap on freed chunks considered as targets.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.detect_uaf(
+                max_bytes=max_bytes,
+                max_mappings=max_mappings,
+                max_chunks=max_chunks,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors(auto_artifact=False, track_operation=False)
+    async def heap_technique_catalog(
+        technique: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Return the static House-of-* technique catalog (no debugger needed).
+
+        Documents 26 heap techniques across the classical Malloc Maleficarum
+        era, the mid-era FSOP foundations, and the modern post-hook era, plus
+        8 detector-backed primitives.  Each entry records the technique's era,
+        family, primitive, the live-memory evidence to look for, the existing
+        MCP tools that can confirm it, prerequisites, and whether the analyzer
+        can statically detect it.
+
+        Args:
+            technique: Optional technique name to filter to a single entry.
+                Omit for the full catalog.
+        """
+        result = await run_blocking(
+            lambda: GlibcTechniqueAnalyzer.heap_technique_catalog(technique=technique)
+        )
         return result
 
 

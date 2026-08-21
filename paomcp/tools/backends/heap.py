@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from paomcp.tools.backends.backend import BackendSpec
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.foundation import (
     LiveInferiorGuard,
@@ -2827,6 +2828,13 @@ class GlibcBins:
             entry["size_field"] = size_field
             entry["size"] = size_field & ~SIZE_BITS_MASK
             entry["prev_inuse"] = bool(size_field & PREV_INUSE)
+            # prev_size is meaningful only when PREV_INUSE is clear (the
+            # preceding chunk is free); while a chunk is in use this slot
+            # aliases the predecessor's user data.  Stored raw; consumers
+            # decide based on the PREV_INUSE flag.
+            entry["prev_size"] = int.from_bytes(
+                buf[0:size_sz], byteorder  # type: ignore[arg-type]
+            )
             entry["fd"] = int.from_bytes(
                 buf[2 * size_sz : 3 * size_sz], byteorder  # type: ignore[arg-type]
             )
@@ -3520,6 +3528,33 @@ class GlibcHeapCorruption:
 
         verdict = self._aggregate_verdict(findings)
 
+        # Additive S6.6 technique hints over the already-collected inspector
+        # outputs.  Purely additive: never mutates findings, verdicts, or the
+        # check list.  Lazy import keeps the module-level import cycle broken
+        # (heap_techniques imports this module at its top).
+        from .heap_techniques import (
+            resolve_top_chunk,
+            technique_hints_for,
+        )  # noqa: PLC0415
+
+        top_chunk = resolve_top_chunk(
+            bins=self.bins,
+            arenas=self.arenas,
+            mappings=_mappings,
+            profile=profile,
+            cancellation_check=cancellation_check,
+        )
+        technique_hints = technique_hints_for(
+            fb_parsed=fb_parsed,
+            tc_parsed=tc_parsed,
+            bn_parsed=bn_parsed,
+            classification=classification,
+            mappings=_mappings,
+            profile=profile,
+            top_chunk=top_chunk,
+            read=self.bins._read_bytes,
+        )
+
         return build_backend_response(
             "classify_heap_corruption",
             parsed={
@@ -3531,6 +3566,7 @@ class GlibcHeapCorruption:
                 "allocator": allocator_out,
                 "target_profile": profile,
                 "findings": findings,
+                "technique_hints": technique_hints,
                 "chunks_inspected": chunks_inspected,
                 "bins_scanned": {
                     "fastbins": fastbins_scanned,
@@ -4642,7 +4678,10 @@ class HeapTools:
         session_id: str,
         *,
         binary_path_provider: Optional[Callable[[], Optional[str]]] = None,
+        backend: Optional[BackendSpec] = None,
     ) -> None:
+        self.backend = backend
+        self.gdb = gdb
         self.discovery = AllocatorDiscovery(
             gdb,
             inspection,
@@ -4691,6 +4730,43 @@ class HeapTools:
             arenas=self.arenas,
             bins=self.bins,
         )
+        # Lazy import to break the module-level cycle: heap_techniques imports
+        # this module at its top, so heap.py must never import heap_techniques
+        # at import time -- only here, when the facade is actually built.
+        from .heap_techniques import GlibcTechniqueAnalyzer  # noqa: PLC0415
+
+        self.techniques = GlibcTechniqueAnalyzer(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
+            arenas=self.arenas,
+            bins=self.bins,
+            glibc=self.glibc,
+            corruption=self.corruption,
+        )
+
+    @property
+    def _is_lldb(self) -> bool:
+        backend = getattr(self, "backend", None)
+        return backend is not None and getattr(backend, "protocol", None) == "lldb-cli"
+
+    def _gdb_gate(self, capability: str) -> Optional[Dict[str, Any]]:
+        """Return a typed verdict when a heap parse requires the gdb backend."""
+        if not self._is_lldb:
+            return None
+        backend_name = getattr(self.backend, "name", "lldb")
+        return {
+            "success": False,
+            "command": capability,
+            "state": self.gdb.get_state(),
+            "type": "GdbOnlyBackendError",
+            "error": (
+                f"'{capability}' requires the gdb/pwndbg backend; "
+                f"session uses {backend_name}"
+            ),
+        }
 
     # ---- S6.1 allocator discovery ------------------------------------
     def detect_allocator(
@@ -4698,6 +4774,9 @@ class HeapTools:
         *,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("detect_allocator")
+        if gate is not None:
+            return gate
         return self.discovery.detect_allocator(cancellation_check=cancellation_check)
 
     def get_allocator_capabilities(
@@ -4706,6 +4785,9 @@ class HeapTools:
         debugger_command_names: Optional[Sequence[str]] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("get_allocator_capabilities")
+        if gate is not None:
+            return gate
         return self.discovery.get_allocator_capabilities(
             debugger_command_names=debugger_command_names,
             cancellation_check=cancellation_check,
@@ -4720,6 +4802,9 @@ class HeapTools:
         include_next: bool = True,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("inspect_chunk")
+        if gate is not None:
+            return gate
         return self.glibc.inspect_chunk(
             address=address,
             address_kind=address_kind,
@@ -4734,6 +4819,9 @@ class HeapTools:
         address_kind: str = "user",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("validate_chunk")
+        if gate is not None:
+            return gate
         return self.glibc.validate_chunk(
             address=address,
             address_kind=address_kind,
@@ -4746,6 +4834,9 @@ class HeapTools:
         *,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("list_arenas")
+        if gate is not None:
+            return gate
         return self.arenas.list_arenas(cancellation_check=cancellation_check)
 
     def inspect_arena(
@@ -4754,6 +4845,9 @@ class HeapTools:
         arena_address: Optional[str] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("inspect_arena")
+        if gate is not None:
+            return gate
         return self.arenas.inspect_arena(
             arena_address=arena_address,
             cancellation_check=cancellation_check,
@@ -4767,6 +4861,9 @@ class HeapTools:
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_FASTBIN,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("inspect_fastbins")
+        if gate is not None:
+            return gate
         return self.bins.inspect_fastbins(
             arena_address=arena_address,
             max_chunks_per_bin=max_chunks_per_bin,
@@ -4780,6 +4877,9 @@ class HeapTools:
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("inspect_tcache")
+        if gate is not None:
+            return gate
         return self.bins.inspect_tcache(
             max_chunks_per_bin=max_chunks_per_bin,
             cancellation_check=cancellation_check,
@@ -4793,6 +4893,9 @@ class HeapTools:
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("inspect_bins")
+        if gate is not None:
+            return gate
         return self.bins.inspect_bins(
             arena_address=arena_address,
             max_chunks_per_bin=max_chunks_per_bin,
@@ -4806,6 +4909,9 @@ class HeapTools:
         arena_address: Optional[str] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("classify_heap_corruption")
+        if gate is not None:
+            return gate
         return self.corruption.classify_heap_corruption(
             arena_address=arena_address,
             cancellation_check=cancellation_check,
@@ -4818,11 +4924,79 @@ class HeapTools:
         address_kind: str = "user",
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("validate_free")
+        if gate is not None:
+            return gate
         return self.corruption.validate_free(
             address=address,
             address_kind=address_kind,
             cancellation_check=cancellation_check,
         )
+
+    # ---- S6.6 heap technique analysis --------------------------------
+    def analyze_heap_technique(
+        self,
+        *,
+        arena_address: Optional[str] = None,
+        techniques: Optional[Sequence[str]] = None,
+        scan_mmap_mappings: bool = True,
+        mmap_max_mappings: int = 4,
+        mmap_max_bytes: int = 1 << 20,
+        max_overlap_chunks: int = 256,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run House-of-* / exploit-primitive detectors over the live heap.
+
+        Delegates to :class:`GlibcTechniqueAnalyzer`; every finding is a
+        heuristic tagged with raw evidence, confidence, confirmation tools and
+        a playbook.  This method requires the gdb/pwndbg backend (rich heap
+        parsing).
+        """
+        gate = self._gdb_gate("analyze_heap_technique")
+        if gate is not None:
+            return gate
+        return self.techniques.analyze_heap_technique(
+            arena_address=arena_address,
+            techniques=techniques,
+            scan_mmap_mappings=scan_mmap_mappings,
+            mmap_max_mappings=mmap_max_mappings,
+            mmap_max_bytes=mmap_max_bytes,
+            max_overlap_chunks=max_overlap_chunks,
+            cancellation_check=cancellation_check,
+        )
+
+    def detect_uaf(
+        self,
+        *,
+        max_bytes: int = 1 << 22,
+        max_mappings: int = 8,
+        max_chunks: int = 512,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Scan writable mappings for pointers into currently-freed chunks.
+
+        The dangling-reference signature of a use-after-free.  Bounded
+        (``max_bytes`` / ``max_mappings`` / ``max_chunks``) and excludes the
+        allocator's own bookkeeping (bin link slots, arena struct, tcache
+        struct).  Requires the gdb/pwndbg backend.
+        """
+        gate = self._gdb_gate("detect_uaf")
+        if gate is not None:
+            return gate
+        return self.techniques.detect_uaf(
+            max_bytes=max_bytes,
+            max_mappings=max_mappings,
+            max_chunks=max_chunks,
+            cancellation_check=cancellation_check,
+        )
+
+    def heap_technique_catalog(
+        self,
+        *,
+        technique: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return the static House-of-* technique catalog (no debugger needed)."""
+        return self.techniques.heap_technique_catalog(technique=technique)
 
     # ---- S6.5 heap snapshot history ----------------------------------
     def capture_heap_snapshot(
@@ -4832,6 +5006,9 @@ class HeapTools:
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        gate = self._gdb_gate("capture_heap_snapshot")
+        if gate is not None:
+            return gate
         return self.history.capture_heap_snapshot(
             name=name,
             max_chunks_per_bin=max_chunks_per_bin,
@@ -4880,6 +5057,9 @@ __all__ = [
     "BIN_INSPECTION_SCHEMA",
     "DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN",
     "HEAP_CORRUPTION_SCHEMA",
+    "HEAP_TECHNIQUE_SCHEMA",
+    "UAF_SCAN_SCHEMA",
+    "HEAP_TECHNIQUE_CATALOG_SCHEMA",
     "FREE_VALIDATION_SCHEMA",
     "HEAP_SNAPSHOT_SCHEMA",
     "HEAP_SNAPSHOT_LIST_SCHEMA",
@@ -4900,3 +5080,28 @@ __all__ = [
     "BINMAPSIZE",
     "MAX_ARENAS_TRAVERSAL",
 ]
+
+
+# PEP 562 lazy re-export.  The S6.6 schema constants live in heap_techniques,
+# which imports this module at its top; a module-level ``from
+# .heap_techniques import ...`` here would create an import cycle.  Keeping the
+# names in __all__ and resolving them on attribute access preserves the
+# ``from paomcp.tools.backends.heap import HEAP_TECHNIQUE_SCHEMA`` spelling.
+def __getattr__(name: str) -> Any:
+    if name in (
+        "HEAP_TECHNIQUE_SCHEMA",
+        "UAF_SCAN_SCHEMA",
+        "HEAP_TECHNIQUE_CATALOG_SCHEMA",
+    ):
+        from .heap_techniques import (  # noqa: PLC0415
+            HEAP_TECHNIQUE_CATALOG_SCHEMA,
+            HEAP_TECHNIQUE_SCHEMA,
+            UAF_SCAN_SCHEMA,
+        )
+
+        return {
+            "HEAP_TECHNIQUE_SCHEMA": HEAP_TECHNIQUE_SCHEMA,
+            "UAF_SCAN_SCHEMA": UAF_SCAN_SCHEMA,
+            "HEAP_TECHNIQUE_CATALOG_SCHEMA": HEAP_TECHNIQUE_CATALOG_SCHEMA,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
