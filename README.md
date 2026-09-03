@@ -324,9 +324,14 @@ at startup; default `full` keeps everything):
 | `pwn` | 169 | Debugger, crash triage, heap, ROP, targets, exploit running. No IDA/Mach-O/kernel. |
 | `rev` | 126 | Static analysis, Ghidra + IDA, dynamic reading. No heap/ROP/crash/attack. |
 | `bounty` | 192 | Research, triage, fuzzing, reporting. No write primitives or drivers. |
+| `chrome` | 154 | Browser/JIT: debugger, crash, JIT regions, decompilers. No heap/ROP/attack. |
+| `kernel` | 165 | Oops triage, SLUB, QEMU targets. No userland heap/drivers. |
+| `firmware` | 84 | Static-only reversing. No live target at all. |
+| `ctf` | 169 | Alias of `pwn` with the time-boxed CTF workflow skill. |
 
 Each profile ships a workflow skill under `skills/` (`pwn-exploit-dev`,
-`reverse-engineering`, `bounty-hunting`, plus the existing
+`reverse-engineering`, `bounty-hunting`, `chrome-exploitation`,
+`kernel-exploitation`, `firmware-reversing`, `ctf-pwn`, plus the existing
 `heap-exploitation-triage`): ordered tool workflows with rules, so
 findings build on each other instead of guessing.
 

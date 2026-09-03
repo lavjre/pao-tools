@@ -1,4 +1,4 @@
-"""Tests for Stage 7.2 libc identification and one-gadget lookup."""
+"""Tests for libc identification and one-gadget lookup."""
 
 from __future__ import annotations
 

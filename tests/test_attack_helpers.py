@@ -1,4 +1,4 @@
-"""Tests for Stage 6.9 attack helpers: poison_tcache_link.
+"""Tests for attack helpers: poison_tcache_link.
 
 The helper is the first *write-capable* glibc component, so the fake stack
 gains a write path: ``AttackFakeDebugger.write_memory`` mutates the fake

@@ -1,4 +1,4 @@
-"""Tests for Stage 7.4 typed chain validation and export."""
+"""Tests for typed chain validation and export."""
 
 from __future__ import annotations
 

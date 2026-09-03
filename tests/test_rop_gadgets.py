@@ -1,4 +1,4 @@
-"""Tests for Stage 7.1 typed ROP gadget indexing."""
+"""Tests for typed ROP gadget indexing."""
 
 from __future__ import annotations
 

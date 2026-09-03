@@ -1,4 +1,4 @@
-"""MCP tools for typed research workspace (Stage 9)."""
+"""MCP tools for typed research workspace."""
 
 from __future__ import annotations
 
@@ -176,7 +176,7 @@ def register(mcp: FastMCP) -> None:
         """Move a hypothesis to a new state (supported / rejected / ...).
 
         ``rationale`` is optional but recommended: it captures the
-        reasoning behind the state change so the final S9.5 report
+        reasoning behind the state change so the final report
         can distinguish fact / heuristic / hypothesis honestly.
         """
         services = get_services(ctx)

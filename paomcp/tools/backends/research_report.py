@@ -1,4 +1,4 @@
-"""Typed research-report generator (Stage 9.5).
+"""Typed research-report generator.
 
 Given a :class:`ResearchSession`, this module renders a final report in
 three shapes:

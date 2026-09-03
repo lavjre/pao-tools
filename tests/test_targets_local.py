@@ -1,4 +1,4 @@
-"""Tests for Stage 8.1 typed target-provider foundation."""
+"""Tests for typed target-provider foundation."""
 
 from __future__ import annotations
 

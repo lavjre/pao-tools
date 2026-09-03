@@ -1,4 +1,4 @@
-"""MCP tools for typed target-provider lifecycle (Stage 8)."""
+"""MCP tools for typed target-provider lifecycle."""
 
 from __future__ import annotations
 
@@ -256,7 +256,7 @@ def register(mcp: FastMCP) -> None:
         ``destination_dir`` when the remote file exists.  The response
         distinguishes ``fetched`` from ``missing`` paths so a caller
         knows which candidates the target actually has.  Pair with
-        ``identify_libc`` (S7.2) to score leaks against the pulled
+        ``identify_libc`` to score leaks against the pulled
         libc.
         """
         services = get_services(ctx)

@@ -1,4 +1,4 @@
-"""Typed musl mallocng inspection (Phase 3).
+"""Typed musl mallocng inspection.
 
 musl >= 1.2 uses the mallocng allocator: 16-byte (``UNIT``) slots inside
 4 KiB groups, each group described by a ``struct meta`` living in a

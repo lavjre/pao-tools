@@ -1,4 +1,4 @@
-"""Tests for Stage 9.2 named research snapshots and typed diff."""
+"""Tests for named research snapshots and typed diff."""
 
 from __future__ import annotations
 

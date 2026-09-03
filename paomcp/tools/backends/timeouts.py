@@ -1,4 +1,4 @@
-"""Shared timeout / signal clamps (vong 2 god-module split, step 1).
+"""Shared timeout / signal clamps for backend subprocess and tool timeouts.
 
 Extracted from SubprocessTools so PythonTools, IDA bridge, and future
 backends share one definition of "never wait forever". Subproc re-exports

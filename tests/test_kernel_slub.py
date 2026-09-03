@@ -1,4 +1,4 @@
-"""Tests for the KernelSlab component + HeapTools facade (Stage 6.10).
+"""Tests for the KernelSlab component + HeapTools facade.
 
 These build a synthetic BTF blob (real header/record format via the parser
 test builders), place a fake ``struct kmem_cache`` + ``struct slab`` in the

@@ -1,4 +1,4 @@
-"""Tests for Stage 8.5 QemuSystemProvider."""
+"""Tests for QemuSystemProvider."""
 
 from __future__ import annotations
 

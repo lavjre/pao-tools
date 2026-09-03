@@ -243,7 +243,18 @@ class PaoPipe:
 
     def get_exit_code(self) -> Optional[int]:
         with self._lock:
-            return self._exit_code
+            if self._exit_code is not None:
+                return self._exit_code
+            # The waiter thread records the code asynchronously; if the
+            # child was reaped directly (e.g. an external wait()), fall
+            # back to the polled returncode instead of reporting None.
+            proc = self.proc
+            if proc is None:
+                return None
+            try:
+                return proc.poll()
+            except Exception:
+                return None
 
     def get_pid(self) -> Optional[int]:
         try:

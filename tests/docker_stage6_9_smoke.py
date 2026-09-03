@@ -1,4 +1,4 @@
-"""Live Stage 6-9 smoke test for the project's pinned Docker runtime."""
+"""Live heap/ROP/targets/research smoke test for the project's pinned Docker runtime."""
 
 from __future__ import annotations
 
@@ -104,7 +104,9 @@ async def _exercise_mcp(
         published = {tool.name for tool in await client.list_tools()}
         missing = sorted(REQUIRED_TOOLS - published)
         if missing:
-            raise RuntimeError(f"S6-S9 MCP tools are not published: {missing}")
+            raise RuntimeError(
+                f"heap/ROP/targets/research MCP tools are not published: {missing}"
+            )
         summary["registered_tools"] = len(REQUIRED_TOOLS)
 
         async def call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -203,7 +205,7 @@ async def _exercise_mcp(
             "add_hypothesis",
             {
                 "session_id": research_id,
-                "statement": "The S6-S9 Docker runtime is internally consistent",
+                "statement": "The heap/ROP/targets/research Docker runtime is internally consistent",
             },
         )
         hypothesis_id = hypothesis["hypothesis"]["hypothesis_id"]
@@ -211,7 +213,7 @@ async def _exercise_mcp(
             "add_research_note",
             {
                 "session_id": research_id,
-                "body": "Live Docker smoke completed representative S6-S8 operations.",
+                "body": "Live Docker smoke completed representative heap/ROP/targets operations.",
                 "tags": ["smoke"],
                 "hypothesis_id": hypothesis_id,
             },

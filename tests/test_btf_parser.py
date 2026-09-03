@@ -1,4 +1,4 @@
-"""Tests for the pure BTF parser (Stage 6.10).
+"""Tests for the pure BTF parser.
 
 The parser consumes raw kernel BTF blobs (``/sys/kernel/btf/vmlinux``) and
 extracts struct/union layouts.  These tests build small synthetic blobs with

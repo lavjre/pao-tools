@@ -59,7 +59,7 @@ if TYPE_CHECKING:  # pragma: no cover -- type-only, avoids a runtime cycle
 
 @runtime_checkable
 class AllocatorAnalyzer(Protocol):
-    """The per-family heap-analysis surface (Phase 0 seam).
+    """The per-family heap-analysis surface (family-dispatch seam).
 
     Every method mirrors the corresponding :class:`HeapTools` facade method
     and returns the standard ``build_backend_response`` envelope.  A family

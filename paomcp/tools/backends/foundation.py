@@ -1,7 +1,7 @@
 """Reusable primitives shared across typed backend research stages.
 
-This module holds the safety and shape invariants that Stage 5 (crash triage)
-established and that later stages (S6 heap analysis, S7 ROP/libc, S8 target
+This module holds the safety and shape invariants that crash triage
+established and that later areas (heap analysis, ROP, target
 providers) must reuse rather than re-implement.  Keeping a single copy of each
 invariant prevents the codebase from forking into several slightly different
 definitions of "a valid response", "a live inferior", or "parse this integer".
@@ -128,7 +128,7 @@ class LiveInferiorError(RuntimeError):
 class LiveInferiorGuard:
     """Enforce that an operation targets the exact current stopped live inferior.
 
-    Stage 5 learned that a crash id must never be honored once the process has
+    Crash triage taught us that a crash id must never be honored once the process has
     resumed, exited, or been replaced.  Heap and ROP snapshots need the same
     rule, so the check lives here.  The guard is intentionally tiny and pure:
     it takes a stop ``record`` (already copied out of the controller) and the

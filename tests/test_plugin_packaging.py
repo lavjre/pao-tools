@@ -37,7 +37,7 @@ def test_plugin_manifest_required_fields():
         assert key in manifest, f"plugin.json missing {key!r}"
 
     assert manifest["name"] == "pao-tools"
-    assert manifest["version"] == "0.3.0"
+    assert manifest["version"] == "0.4.0"
     assert manifest["repository"] == "https://github.com/lavjre/pao-tools"
     assert (
         isinstance(manifest["description"], str) and len(manifest["description"]) > 40
@@ -101,7 +101,15 @@ def test_plugin_and_skill_files_present():
 
 
 def test_profile_skills_ship_with_workflows():
-    for skill in ("pwn-exploit-dev", "reverse-engineering", "bounty-hunting"):
+    for skill in (
+        "pwn-exploit-dev",
+        "reverse-engineering",
+        "bounty-hunting",
+        "chrome-exploitation",
+        "kernel-exploitation",
+        "firmware-reversing",
+        "ctf-pwn",
+    ):
         path = REPO_ROOT / "skills" / skill / "SKILL.md"
         assert path.is_file(), f"skills/{skill}/SKILL.md must ship"
         text = path.read_text(encoding="utf-8")

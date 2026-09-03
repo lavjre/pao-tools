@@ -51,13 +51,14 @@ async def test_full_profile_has_all_tools():
 async def test_profiles_shrink_list_tools():
     full = await _tool_names()
     counts = {}
-    for profile in ("pwn", "rev", "bounty"):
+    for profile in ("pwn", "rev", "bounty", "chrome", "kernel", "firmware", "ctf"):
         names = await _tool_names(profile)
         counts[profile] = len(names)
         assert names < full, profile
         assert len(names) > 50, profile
     # rev is the leanest mission surface, bounty the broadest non-full one.
     assert counts["rev"] < counts["pwn"] < counts["bounty"]
+    assert counts["firmware"] < counts["rev"]
 
 
 @pytest.mark.asyncio
@@ -72,6 +73,27 @@ async def test_profiles_keep_mission_tools():
     bounty = await _tool_names("bounty")
     assert {"generate_bounty_report", "run_fuzz_batch", "analyze_kernel_oops"} <= bounty
     assert "poison_tcache_link" not in bounty
+    chrome = await _tool_names("chrome")
+    assert {"scan_jit_regions", "check_region_watches", "ida_disasm"} <= chrome
+    assert "inspect_tcache" not in chrome
+    assert "build_rop_chain" not in chrome
+    kernel = await _tool_names("kernel")
+    assert {"analyze_kernel_oops", "inspect_slub_cache", "create_target"} <= kernel
+    assert "inspect_tcache" not in kernel
+    assert "poison_tcache_link" not in kernel
+    firmware = await _tool_names("firmware")
+    assert {"decompile_binary", "ida_disasm", "analyze_elf"} <= firmware
+    assert "create_debug_session" not in firmware
+    assert "run_until_crash" not in firmware
+    ctf = await _tool_names("ctf")
+    assert ctf == pwn
+
+
+@pytest.mark.asyncio
+async def test_ctf_is_a_pwn_alias():
+    from paomcp.tools.profiles import CTF_MODULES, PWN_MODULES
+
+    assert CTF_MODULES == PWN_MODULES
 
 
 @pytest.mark.asyncio

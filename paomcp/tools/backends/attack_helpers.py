@@ -1,6 +1,6 @@
 """Attack-helper framework -- execute exploitation primitives against a live target.
 
-The stage S6.5+ heap surface *detects* vulnerabilities (House-of-* flags,
+The heap snapshot surface and later *detects* vulnerabilities (House-of-* flags,
 overlap/UAF scans, corruption verdicts).  Attack helpers go one step further:
 given a confirmed primitive and a target address, they compute the exact
 bytes that materialize it and -- only on explicit opt-in -- write them into
@@ -62,7 +62,7 @@ ATTACK_TCACHE_POISON_SCHEMA = "pao.attack.tcache-poison.v1"
 class GlibcAttackHelper:
     """Execute glibc heap primitives against a live target (write-capable).
 
-    The first write-capable glibc component: unlike the S6.2-S6.6 parsers it
+    The first write-capable glibc component: unlike the chunk-to-technique parsers it
     can mutate the target, but only through the guarded writer
     (``DebuggerOperations.write_memory``), only on explicit ``dry_run=false``,
     and only after a named snapshot is captured.

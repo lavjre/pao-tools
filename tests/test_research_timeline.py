@@ -1,4 +1,4 @@
-"""Tests for Stage 9.3 research session timeline."""
+"""Tests for research session timeline."""
 
 from __future__ import annotations
 

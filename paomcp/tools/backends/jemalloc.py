@@ -688,7 +688,7 @@ class JemallocAnalyzer:
             component_status=component_status,
             reason=(
                 "jemalloc tcache (TLS LIFO stack) inspection is not "
-                "implemented in Phase 1; scope is extent/rtree core only"
+                "implemented; scope is extent/rtree core only"
             ),
         )
 
@@ -708,7 +708,7 @@ class JemallocAnalyzer:
             classification=classification,
             profile=profile,
             component_status=component_status,
-            reason="jemalloc bin inspection is not implemented in Phase 1",
+            reason="jemalloc bin inspection is not implemented (extent/rtree core only)",
         )
 
     def classify_heap_corruption(

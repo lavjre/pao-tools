@@ -1,4 +1,4 @@
-"""Tests for Stage 8.2 gdbserver + tcp_remote providers."""
+"""Tests for gdbserver + tcp_remote providers."""
 
 from __future__ import annotations
 

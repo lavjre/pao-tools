@@ -1,4 +1,4 @@
-"""MCP tools for JIT / memory-region tracking (Stage 6.12).
+"""MCP tools for JIT / memory-region tracking.
 
 Two read-only tools over the live inferior's memory mappings: scan for
 anonymous executable regions (V8/Chrome JIT-heap candidates) and classify

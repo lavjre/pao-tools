@@ -1,4 +1,4 @@
-"""Typed Linux kernel oops/panic triage from log text (Phase 3).
+"""Typed Linux kernel oops/panic triage from log text.
 
 Mirrors the userland crash pipeline's contract (classify -> fingerprint ->
 dedup) but over kernel log text instead of a live inferior: no debugger is

@@ -1,4 +1,4 @@
-"""SQLite-backed persistence for research cases (Phase 2).
+"""SQLite-backed persistence for research cases.
 
 ``ResearchRegistry`` is in-memory by design (bounded, lock-protected);
 :class:`CaseStore` gives it durability across restarts: every mutation

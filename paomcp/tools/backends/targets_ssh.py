@@ -64,7 +64,7 @@ class SshProvider:
     attach.  What ``SshProvider`` uniquely offers is typed file
     transfer (upload / download) and the ``fetch_runtime_libraries``
     convenience that pulls the target's libc / dynamic loader so an
-    offline S7 identify_libc has something to score against.
+    offline identify_libc has something to score against.
 
     The paramiko client is injected via ``client_factory`` so tests
     can swap in a fake without needing a real SSH server on the box.

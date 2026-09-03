@@ -1,20 +1,19 @@
-"""Typed research workspace (Stage 9).
+"""Typed research workspace.
 
-Stage 9 turns a scattered pile of tool results, crash snapshots, heap
+This workspace turns a scattered pile of tool results, crash snapshots, heap
 diffs and manual notes into a single research session a caller can
 serialize, share, and reopen later without losing provenance.
 
-S9.1 ships the foundation: a session dataclass with typed notes, a
+The workspace foundation ships: a session dataclass with typed notes, a
 hypothesis state machine, and an evidence graph that links notes to
 existing artifact / crash / heap / snapshot / tool-result ids.  The
 registry is session-scoped and bounded so a runaway workflow cannot
-allocate unbounded state, exactly matching the pattern S6.5
-(HeapHistory) and S8.1 (TargetRegistry) already use.
+allocate unbounded state, exactly matching the pattern heap snapshots
+(HeapHistory) and the target registry (TargetRegistry) already use.
 
-Later S9 slices attach snapshots (S9.2), a timeline (S9.3),
-export/import (S9.4) and the final report (S9.5) to the same
+Snapshots, a timeline, bundle export/import and the final report attach to the same
 :class:`ResearchSession` object rather than growing sibling
-dataclasses -- so ``export_research_session`` in S9.4 can serialize
+dataclasses -- so ``export_research_session`` can serialize
 everything under one roof.
 """
 
@@ -101,7 +100,7 @@ SNAPSHOT_SLOTS: Tuple[str, ...] = (
     "registers",  # {name: hex_or_int_value}
     "memory",  # [{address, bytes_hex, length}]
     "mappings",  # [{start, end, permissions, file}]
-    "heap_snapshot",  # {snapshot_id, ...}  (typically a S6.5 heap snapshot id)
+    "heap_snapshot",  # {snapshot_id, ...}  (typically a heap snapshot id)
     "backtrace",  # [{level, pc, function, ...}]
     "notes",  # freeform markdown
     "metadata",  # freeform dict for target identity / ASLR base / etc.

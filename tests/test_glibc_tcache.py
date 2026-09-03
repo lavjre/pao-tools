@@ -1,4 +1,4 @@
-"""Tests for Stage 6.3c typed glibc tcache traversal."""
+"""Tests for typed glibc tcache traversal."""
 
 from typing import Any, Dict, List, Optional
 

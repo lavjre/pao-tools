@@ -1,6 +1,6 @@
-"""Shared ROP schemas and calling-convention constants (vong 3 split).
+"""Shared ROP schemas and calling-convention constants.
 
-Single source of truth for every S7 stage; gadget/libc/chain modules
+Single source of truth for ROP schemas; gadget/libc/chain modules
 import from here instead of forking their own copies.
 """
 

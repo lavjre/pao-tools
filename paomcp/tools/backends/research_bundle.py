@@ -1,4 +1,4 @@
-"""Typed research bundle export / import / verify (Stage 9.4).
+"""Typed research bundle export / import / verify.
 
 A research bundle is a single ``.zip`` file that lets a caller close a
 research session and reopen it later (or share it) without losing
@@ -28,7 +28,7 @@ evidence entry and copies the underlying blob out of
 :class:`ArtifactStore` into the bundle.  Crash / heap / tool_result /
 external / note references stay as opaque strings in the manifest --
 they name state that lives in stores the recipient may or may not
-have; the bundle records the reference so the eventual S9.5 report
+have; the bundle records the reference so the eventual final report
 can still cite them, but does not duplicate their bytes here.
 
 ``verify_research_bundle`` checks:

@@ -1,4 +1,4 @@
-"""Heap snapshot history and diff, S6.5 (split from heap.py)."""
+"""Heap snapshot history and diff (split from heap.py)."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
-# Stage 6.5 -- heap snapshot history and diff
+# heap snapshot history and diff
 # ----------------------------------------------------------------------
 HEAP_SNAPSHOT_SCHEMA = "pao.heap-snapshot.v1"
 HEAP_SNAPSHOT_LIST_SCHEMA = "pao.heap-snapshot-list.v1"
@@ -79,7 +79,7 @@ class _HeapSnapshotEntry:
 class HeapHistory:
     """Bounded, named-snapshot registry for the current session's heap state.
 
-    Captures a typed heap snapshot by driving the sibling S6.1 / S6.3
+    Captures a typed heap snapshot by driving the sibling discovery / arena
     inspectors (allocator discovery, arena / bin / tcache walkers) into a
     single reproducible payload.  Snapshots are stored session-locally
     under the same bounded-history budget the crash triage uses (16

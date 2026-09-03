@@ -1,6 +1,6 @@
 """Kernel SLUB slab analyzer -- BTF field offsets + obfuscated freelist decode.
 
-Phase 2 of the kernel roadmap.  SLUB (the default Linux slab allocator)
+SLUB (the default Linux slab allocator)
 hardens its freelist with ``CONFIG_SLAB_FREELIST_HARDENED``: every stored
 freepointer is XORed with a per-cache random value and the address it is
 stored at,

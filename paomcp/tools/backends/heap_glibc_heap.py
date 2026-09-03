@@ -1,4 +1,4 @@
-"""glibc malloc_chunk parsing, S6.2 (split from heap_glibc)."""
+"""glibc malloc_chunk parsing (split from heap_glibc)."""
 
 from __future__ import annotations
 
@@ -52,14 +52,14 @@ from paomcp.tools.backends.heap_snapshots import (
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 
 # ----------------------------------------------------------------------
-# Stage 6.2 -- glibc malloc_chunk parsing
+# glibc malloc_chunk parsing
 # ----------------------------------------------------------------------
 
 # glibc malloc_chunk flag bits (low three bits of the ``size`` field).
 
 
 # ----------------------------------------------------------------------
-# Stage 6.2 -- glibc malloc_chunk parsing
+# glibc malloc_chunk parsing
 # ----------------------------------------------------------------------
 
 # glibc malloc_chunk flag bits (low three bits of the ``size`` field).

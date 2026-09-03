@@ -1,4 +1,4 @@
-"""Tests for the pure SLUB freelist decode helpers (Stage 6.10).
+"""Tests for the pure SLUB freelist decode helpers.
 
 The helpers are memory-agnostic: a ``reader`` callable supplies raw encoded
 freepointers, which lets every walk/termination/detection path be exercised

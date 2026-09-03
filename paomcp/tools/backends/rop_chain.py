@@ -1,4 +1,4 @@
-"""ROP chain construction, validation and export, S7.3-7.4 (split from rop.py)."""
+"""ROP chain construction, validation and export (split from rop.py)."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Stage 7.3 -- typed ROP chain construction and sigreturn frame builder
+# typed ROP chain construction and sigreturn frame builder
 # ---------------------------------------------------------------------------
 class ChainBuilderError(RuntimeError):
     """Raised when a chain build request is malformed or a gadget is missing."""
@@ -72,7 +72,7 @@ class ChainBuilder:
     hands to the kernel to force arbitrary register state before a
     single ``ret``.  We wrap :class:`pwnlib.rop.srop.SigreturnFrame` so
     the layout stays authoritative but expose it under the typed backend
-    envelope every other S6/S7 tool uses.
+    envelope every other heap/ROP tool uses.
     """
 
     def __init__(self, gadgets: Optional[GadgetIndex] = None) -> None:
@@ -758,10 +758,10 @@ class ChainValidator:
     Validation is deliberately static: we check every gadget address
     lands in an executable mapping, verify no encoded pointer contains
     a forbidden byte, and surface a register-clobber summary drawn from
-    the S7.3 :meth:`ChainBuilder.explain_chain_constraints` analyzer.
+    the chain-constraint :meth:`ChainBuilder.explain_chain_constraints` analyzer.
     Dynamic sandbox validation (execute the chain against a real
     debugger inferior) requires a live target and is documented as a
-    future S7 extension rather than faked here.
+    future chain-validation extension rather than faked here.
 
     Export supports three formats:
 
@@ -1052,7 +1052,7 @@ class ChainValidator:
 
 
 class RopTools:
-    """Facade grouping every S7 typed backend under one session attribute."""
+    """Facade grouping every ROP typed backend under one session attribute."""
 
     def __init__(
         self,
@@ -1068,7 +1068,7 @@ class RopTools:
             validator if validator is not None else ChainValidator(self.chains)
         )
 
-    # ---- S7.1 gadget indexing ----------------------------------------
+    # ---- gadget indexing ----------------------------------------
     def find_gadgets(self, **kwargs: Any) -> Dict[str, Any]:
         return self.gadgets.find_gadgets(**kwargs)
 
@@ -1078,14 +1078,14 @@ class RopTools:
     def inspect_gadget(self, **kwargs: Any) -> Dict[str, Any]:
         return self.gadgets.inspect_gadget(**kwargs)
 
-    # ---- S7.2 libc identification ------------------------------------
+    # ---- libc identification ------------------------------------
     def identify_libc(self, **kwargs: Any) -> Dict[str, Any]:
         return self.libc.identify_libc(**kwargs)
 
     def find_one_gadgets(self, **kwargs: Any) -> Dict[str, Any]:
         return self.libc.find_one_gadgets(**kwargs)
 
-    # ---- S7.3 chain construction -------------------------------------
+    # ---- chain construction -------------------------------------
     def build_rop_chain(self, **kwargs: Any) -> Dict[str, Any]:
         return self.chains.build_rop_chain(**kwargs)
 
@@ -1095,7 +1095,7 @@ class RopTools:
     def explain_chain_constraints(self, **kwargs: Any) -> Dict[str, Any]:
         return self.chains.explain_chain_constraints(**kwargs)
 
-    # ---- S7.4 chain validation + export ------------------------------
+    # ---- chain validation + export ------------------------------
     def validate_rop_chain(self, **kwargs: Any) -> Dict[str, Any]:
         return self.validator.validate_rop_chain(**kwargs)
 

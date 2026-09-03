@@ -1,4 +1,4 @@
-"""glibc arena discovery, S6.3 (split from heap_glibc)."""
+"""glibc arena discovery (split from heap_glibc)."""
 
 from __future__ import annotations
 
@@ -53,14 +53,14 @@ from paomcp.tools.backends.heap_snapshots import (
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 
 # ----------------------------------------------------------------------
-# Stage 6.2 -- glibc malloc_chunk parsing
+# glibc malloc_chunk parsing
 # ----------------------------------------------------------------------
 
 # glibc malloc_chunk flag bits (low three bits of the ``size`` field).
 
 
 # ----------------------------------------------------------------------
-# Stage 6.3 -- glibc arenas and malloc_state parsing
+# glibc arenas and malloc_state parsing
 # ----------------------------------------------------------------------
 
 # Compile-time glibc constants (stable since glibc 2.14).  The parser reads
@@ -83,7 +83,7 @@ MAX_ARENAS_TRAVERSAL = 256
 ARENA_LIST_SCHEMA = "pao.glibc-arena-list.v1"
 ARENA_INSPECTION_SCHEMA = "pao.glibc-arena.v1"
 
-# ``(name, kind, count)`` for each malloc_state field parsed by S6.3.
+# ``(name, kind, count)`` for each malloc_state field parsed by the arena parser.
 # ``kind`` is one of ``int32`` (4-byte int), ``int32_array`` (``count`` * 4
 # bytes), ``ptr`` (single pointer of the target's pointer width), ``ptr_array``
 # (``count`` pointers) or ``size_t`` (a single INTERNAL_SIZE_T, which glibc
@@ -155,7 +155,7 @@ class ArenaLayoutResolver:
     ``glibc-debuginfo`` on Fedora); with a stripped libc the resolver
     reports each unresolved field explicitly rather than guessing.  A
     version-keyed offset table for stripped libcs is out of scope for
-    S6.3 and would live in a later stage.
+    arena discovery and would live in a later component.
     """
 
     FIELD_NAMES: Tuple[str, ...] = tuple(name for name, _, _ in _MALLOC_STATE_FIELDS)

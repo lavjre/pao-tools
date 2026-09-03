@@ -1,4 +1,4 @@
-"""Tests for the Phase 1 jemalloc analyzer (extent/rtree core only).
+"""Tests for the jemalloc analyzer (extent/rtree core only).
 
 The analyzer runs pwndbg's ``jemalloc`` command surface, so these tests use a
 fake gdb whose ``execute_command`` returns canned console records -- exactly
@@ -313,7 +313,7 @@ class TestInspectArena:
 
 
 # ---------------------------------------------------------------------------
-# Unsupported Phase 1 surface.
+# Unsupported surface (extent/rtree core only).
 # ---------------------------------------------------------------------------
 class TestUnsupportedSurface:
     @pytest.mark.parametrize(

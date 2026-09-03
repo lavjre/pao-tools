@@ -1,4 +1,4 @@
-"""Tests for Stage 6.6 glibc heap-technique analysis (GlibcTechniqueAnalyzer)."""
+"""Tests for glibc heap-technique analysis (GlibcTechniqueAnalyzer)."""
 
 from typing import Any, Dict, List, Optional
 

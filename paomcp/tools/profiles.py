@@ -1,4 +1,4 @@
-"""Task profiles: curated module subsets behind ``PAO_PROFILE`` (Phase 4).
+"""Task profiles: curated module subsets behind ``PAO_PROFILE``.
 
 Listing 199 tools costs ~26k tokens before any work happens. Profiles let
 an operator pay only for the mission at hand: each profile names the tool
@@ -70,11 +70,93 @@ BOUNTY_MODULES: FrozenSet[str] = ALL_MODULES - {"attack", "paocli"}
 """Vuln research + triage + reporting: everything except write primitives
 and interactive exploit drivers."""
 
+CHROME_MODULES: FrozenSet[str] = frozenset(
+    {
+        "artifacts",
+        "compatibility",
+        "crash",
+        "debug",
+        "debugger_memory",
+        "decompiler",
+        "elf_runtime",
+        "fuzz",
+        "ida",
+        "inspect",
+        "operations",
+        "platform",
+        "processes",
+        "python_env",
+        "regions",
+        "repos",
+        "research",
+        "static_analysis",
+        "targets",
+    }
+)
+"""Browser/JIT exploitation: debugger, crash, JIT regions, decompilers. No
+glibc heap, ROP chains, write primitives, or kernel/Mach-O surface."""
+
+KERNEL_MODULES: FrozenSet[str] = frozenset(
+    {
+        "artifacts",
+        "compatibility",
+        "crash",
+        "debug",
+        "debugger_memory",
+        "decompiler",
+        "elf_runtime",
+        "ida",
+        "inspect",
+        "kernel_slub",
+        "operations",
+        "platform",
+        "processes",
+        "python_env",
+        "regions",
+        "repos",
+        "research",
+        "rop",
+        "static_analysis",
+        "targets",
+    }
+)
+"""Kernel exploitation: oops triage, SLUB, QEMU/gdbserver targets. No
+userland heap, write primitives, drivers, Mach-O, or (yet) syzkaller fuzz."""
+
+FIRMWARE_MODULES: FrozenSet[str] = frozenset(
+    {
+        "artifacts",
+        "compatibility",
+        "decompiler",
+        "elf_runtime",
+        "ida",
+        "inspect",
+        "operations",
+        "platform",
+        "processes",
+        "python_env",
+        "repos",
+        "research",
+        "static_analysis",
+    }
+)
+"""Firmware reverse engineering: static analysis only, no live inferior.
+No debugger, heap, ROP, crash, or target lifecycle. (Filesystem
+extraction like binwalk/unblob is not yet a tool; track there.)"""
+
+CTF_MODULES: FrozenSet[str] = PWN_MODULES
+"""CTF is pwn under time pressure: same surface, plus the ctf skill
+workflow (recon, triage, exploit, flag). Alias kept for discoverability."""
+
 PROFILES: Dict[str, Optional[FrozenSet[str]]] = {
     "full": None,
     "pwn": PWN_MODULES,
     "rev": REV_MODULES,
     "bounty": BOUNTY_MODULES,
+    "chrome": CHROME_MODULES,
+    "kernel": KERNEL_MODULES,
+    "firmware": FIRMWARE_MODULES,
+    "ctf": CTF_MODULES,
 }
 
 PROFILE_DESCRIPTIONS: Dict[str, str] = {
@@ -82,6 +164,10 @@ PROFILE_DESCRIPTIONS: Dict[str, str] = {
     "pwn": "Debugger, crash triage, heap, ROP, targets, and exploit running.",
     "rev": "Static analysis, decompilers (Ghidra + IDA), and dynamic reading.",
     "bounty": "Research, triage, fuzzing, and reporting across target kinds.",
+    "chrome": "Browser/JIT exploitation without the userland heap/ROP surface.",
+    "kernel": "Kernel oops triage, SLUB, and VM targets without userland heap.",
+    "firmware": "Static-only firmware reversing without any live target.",
+    "ctf": "Alias of pwn, paired with the ctf time-boxed workflow skill.",
 }
 
 DEFAULT_PROFILE = "full"
@@ -107,6 +193,10 @@ __all__ = [
     "PWN_MODULES",
     "REV_MODULES",
     "BOUNTY_MODULES",
+    "CHROME_MODULES",
+    "KERNEL_MODULES",
+    "FIRMWARE_MODULES",
+    "CTF_MODULES",
     "PROFILES",
     "PROFILE_DESCRIPTIONS",
     "DEFAULT_PROFILE",

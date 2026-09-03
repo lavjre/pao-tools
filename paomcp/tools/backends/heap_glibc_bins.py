@@ -1,4 +1,4 @@
-"""glibc bin/tcache walking, S6.4 (split from heap_glibc)."""
+"""glibc bin/tcache walking (split from heap_glibc)."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ from paomcp.tools.backends.heap_snapshots import (
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 
 # ----------------------------------------------------------------------
-# Stage 6.2 -- glibc malloc_chunk parsing
+# glibc malloc_chunk parsing
 # ----------------------------------------------------------------------
 
 # glibc malloc_chunk flag bits (low three bits of the ``size`` field).
@@ -82,7 +82,7 @@ from paomcp.tools.backends.heap_glibc_arenas import (
 )
 
 # ----------------------------------------------------------------------
-# Stage 6.3b -- glibc fastbin traversal
+# glibc fastbin traversal
 # ----------------------------------------------------------------------
 
 FASTBIN_INSPECTION_SCHEMA = "pao.glibc-fastbins.v1"
@@ -107,7 +107,7 @@ TCACHE_INSPECTION_SCHEMA = "pao.glibc-tcache.v1"
 # above the real limit.
 
 
-# Stage 6.3d -- regular bins (unsorted / small / large).  Bin index 1 is
+# regular bins (unsorted / small / large).  Bin index 1 is
 # the unsorted bin, 2..63 are the small bins (one fixed size class each),
 # 64..127 are the large bins (each covers a size range with a secondary
 # fd_nextsize/bk_nextsize list, not walked here -- deferred).  The value
@@ -121,7 +121,7 @@ BIN_INSPECTION_SCHEMA = "pao.glibc-bins.v1"
 # chain that never returns to its bin head.
 
 
-# Stage 6.10 -- kernel SLUB.  Default system page size for slab geometry
+# kernel SLUB.  Default system page size for slab geometry
 # (slab_bytes = PAGE_SIZE << order).  Holds for x86_64/arm64 kernels and is
 # the value a bare gdbstub guest rarely overrides; callers can pass their own
 # when the kernel uses a different base page.
@@ -577,7 +577,7 @@ class GlibcBins:
         )
 
     # ------------------------------------------------------------------
-    # Stage 6.3c -- glibc tcache traversal
+    # glibc tcache traversal
     # ------------------------------------------------------------------
     @staticmethod
     def tcache_size_for_index(index: int, pointer_bits: int) -> int:
@@ -958,7 +958,7 @@ class GlibcBins:
         )
 
     # ------------------------------------------------------------------
-    # Stage 6.3d -- regular bins (unsorted / small / large)
+    # regular bins (unsorted / small / large)
     # ------------------------------------------------------------------
     @staticmethod
     def bin_category(index: int) -> str:

@@ -1,4 +1,4 @@
-"""Tests for Stage 7.3 typed ROP chain construction and SROP frame builder."""
+"""Tests for typed ROP chain construction and SROP frame builder."""
 
 from __future__ import annotations
 

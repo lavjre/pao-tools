@@ -1,4 +1,4 @@
-"""Tests for the pure Mach-O parser (Stage 6.11).
+"""Tests for the pure Mach-O parser.
 
 These build synthetic Mach-O images with the exact on-disk header/load-command
 format and assert the parser walks them -- the same approach ``test_btf_parser``

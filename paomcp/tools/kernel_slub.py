@@ -1,4 +1,4 @@
-"""MCP tools for the kernel SLUB slab analyzer (Stage 6.10).
+"""MCP tools for the kernel SLUB slab analyzer.
 
 Resolves ``struct kmem_cache`` / ``struct slab`` field offsets from BTF and
 decodes the (optionally obfuscated) SLUB freelist.  Both tools are read-only:

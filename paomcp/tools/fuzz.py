@@ -1,4 +1,4 @@
-"""MCP tools for bounded file-input fuzz batches (Phase 2)."""
+"""MCP tools for bounded file-input fuzz batches."""
 
 import os
 from typing import Any, Dict, List, Optional

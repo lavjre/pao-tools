@@ -1,5 +1,4 @@
-"""MCP tools for typed heap allocator discovery (Stage 6.1) and
-heap exploitation-technique analysis (Stage 6.6)."""
+"""MCP tools for typed heap allocator discovery and technique analysis."""
 
 from __future__ import annotations
 

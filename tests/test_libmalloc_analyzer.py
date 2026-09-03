@@ -1,4 +1,4 @@
-"""Tests for the libmalloc analyzer (malloc_zone introspection, Stage 6.11).
+"""Tests for the libmalloc analyzer (malloc_zone introspection).
 
 These build a synthetic ``malloc_zone_t`` + ``malloc_introspection_t`` pair in
 the fake gdb's memory, seed the ``ArenaFakeDebugger`` with the inferior-call

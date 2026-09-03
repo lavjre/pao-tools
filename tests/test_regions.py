@@ -1,4 +1,4 @@
-"""Tests for the JIT / memory-region tracker (Stage 6.12).
+"""Tests for the JIT / memory-region tracker.
 
 These build synthetic vmmap fixtures into the fake inspection's
 ``memory_maps()`` and drive the tracker both directly (``JitRegionTracker``)

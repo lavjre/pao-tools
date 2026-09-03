@@ -1,4 +1,4 @@
-"""Allocator discovery, S6.1 (split from heap.py)."""
+"""Allocator discovery (split from heap.py)."""
 
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ ALLOCATOR_RUNTIME_COMMANDS: Dict[str, Tuple[str, ...]] = {
     "unknown": (),
 }
 
-# The S6.2-S6.5 typed parsers operate on glibc heap structures directly
+# The chunk-to-snapshot typed parsers operate on glibc heap structures directly
 # through GDB memory/expression APIs.  Runtime pwndbg commands remain useful
 # evidence, but their absence does not make the shipped typed API disappear.
 TYPED_INSPECTION_FAMILIES = frozenset({"glibc", "libmalloc"})

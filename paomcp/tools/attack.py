@@ -1,4 +1,4 @@
-"""MCP tools for the attack-helper framework (Stage 6.9).
+"""MCP tools for the attack-helper framework.
 
 Attack helpers execute exploitation primitives against the live target.  The
 first one, ``poison_tcache_link``, computes the PROTECT_PTR-encoded ``fd``

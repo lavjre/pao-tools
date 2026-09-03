@@ -1,4 +1,4 @@
-"""Typed ROP gadget indexing, S7.1 (split from rop.py)."""
+"""Typed ROP gadget indexing (split from rop.py)."""
 
 from __future__ import annotations
 

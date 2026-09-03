@@ -1,4 +1,4 @@
-"""Shared target descriptor model (vong 5 split; providers live in targets_*)."""
+"""Shared target descriptor model (providers live in targets_*)."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ DEFAULT_LIBC_FETCH_PATHS: Tuple[str, ...] = (
 
 
 class TargetKind(str, Enum):
-    """Every provider surface we intend to ship in Stage 8."""
+    """Every provider surface we intend to ship in targets."""
 
     LOCAL_PROCESS = "local_process"
     ATTACH_PID = "attach_pid"

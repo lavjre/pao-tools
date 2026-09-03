@@ -1,6 +1,6 @@
-"""Tests for Stage 6.6 allocator detection extensions (mallocng, scudo, plugin contract).
+"""Tests for allocator detection extensions (mallocng, scudo, plugin contract).
 
-The prior stages ship a full glibc parser stack; S6.6 extends the
+The glibc parser stack is complete; technique analysis extends the
 :class:`AllocatorDiscovery` classifier to distinguish musl mallocng from
 oldmalloc, recognizes Scudo, and locks in the plugin contract every
 glibc-specific inspector already follows -- return an ``unsupported``
@@ -202,7 +202,7 @@ class TestUnknownClassification:
 
 # ---------------------------------------------------------------------------
 # Plugin contract: every glibc-only inspector must return an honest
-# ``unsupported`` response when the allocator is not glibc.  S6.5 captures
+# ``unsupported`` response when the allocator is not glibc.  Snapshots capture
 # the same contract by storing an ``unsupported`` snapshot rather than
 # guessing an empty ledger.  This locks that behavior in for scudo.
 # ---------------------------------------------------------------------------

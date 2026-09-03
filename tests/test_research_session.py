@@ -1,4 +1,4 @@
-"""Tests for Stage 9.1 typed research workspace foundation."""
+"""Tests for typed research workspace foundation."""
 
 from __future__ import annotations
 

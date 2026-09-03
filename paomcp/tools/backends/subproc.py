@@ -34,7 +34,7 @@ DEFAULT_MAX_PROCESS_OUTPUT_BYTES = int(
 )
 OUTPUT_READ_CHUNK_BYTES = 64 * 1024
 OUTPUT_READER_JOIN_SECONDS = 5.0
-# Shared clamps live in timeouts.py (vong 2 split); re-exported here so
+# Shared clamps live in timeouts.py; re-exported here so
 # existing `from subproc import clamp_timeout` imports keep working.
 from paomcp.tools.backends.timeouts import (
     ALLOWED_KILL_SIGNALS,

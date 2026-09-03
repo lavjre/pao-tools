@@ -1,7 +1,7 @@
-"""Typed heap allocator discovery (Stage 6.1).
+"""Typed heap allocator discovery.
 
-Stage 6 gives an agent a typed understanding of the target's heap without
-forcing it to parse pwndbg's ANSI terminal output.  S6.1 is the foundation of
+Heap analysis gives an agent a typed understanding of the target's heap without
+forcing it to parse pwndbg's ANSI terminal output.  Allocator discovery is the foundation of
 that work: before any chunk, bin, or tcache can be parsed, the platform must
 answer three questions honestly and conservatively:
 
@@ -14,7 +14,7 @@ answer three questions honestly and conservatively:
 
 Every conclusion carries the raw evidence it was derived from, and a heuristic
 is never promoted to a fact.  Detection needs a *running* inferior because a
-heap only exists at runtime, so the live-inferior invariant from Stage 5 is
+heap only exists at runtime, so the live-inferior invariant from crash triage is
 reused here rather than re-implemented.
 
 The heavy lifting lives in :meth:`AllocatorDiscovery.classify`, a pure function
@@ -73,11 +73,11 @@ from paomcp.tools.backends.heap_snapshots import (
 )
 
 # glibc adopted tcache/fastbin pointer "safe-linking" in 2.32.  Detection of the
-# libc version therefore decides whether a later S6.4 parser must decode masked
-# forward pointers.  Below this version the fd pointers are stored raw.
+# libc version therefore decides whether the corruption classifier must decode
+# masked forward pointers.  Below this version the fd pointers are stored raw.
 
 
-# S6.2-S6.4 glibc parsers live in heap_glibc (vong 4 split).
+# Chunk-to-bin glibc parsers live in heap_glibc.
 from paomcp.tools.backends.heap_glibc import (
     ARENA_INSPECTION_SCHEMA,
     ARENA_LIST_SCHEMA,
@@ -111,7 +111,7 @@ from paomcp.tools.backends.heap_glibc import (
 class HeapTools:
     """Facade that groups every heap-inspection component under one object.
 
-    Later stages (S6.3 arenas/bins, S6.6 musl/jemalloc parsers) attach here so
+    Later components (arena/bin parsers, musl/jemalloc analyzers) attach here so
     the tool layer keeps a single ``session.tools.heap`` entry point regardless
     of the detected allocator family.  Delegation is intentionally boring:
     each public method routes to the appropriate sub-component untouched.
@@ -379,7 +379,7 @@ class HeapTools:
             ),
         }
 
-    # ---- S6.1 allocator discovery ------------------------------------
+    # ---- allocator discovery ------------------------------------
     def detect_allocator(
         self,
         *,
@@ -404,7 +404,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.2 glibc chunks -------------------------------------------
+    # ---- glibc chunks -------------------------------------------
     def inspect_chunk(
         self,
         *,
@@ -439,7 +439,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.3 glibc arenas -------------------------------------------
+    # ---- glibc arenas -------------------------------------------
     def list_arenas(
         self,
         *,
@@ -464,7 +464,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.3b glibc fastbin traversal --------------------------------
+    # ---- glibc fastbin traversal --------------------------------
     def inspect_fastbins(
         self,
         *,
@@ -481,7 +481,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.3c glibc tcache traversal ---------------------------------
+    # ---- glibc tcache traversal ---------------------------------
     def inspect_tcache(
         self,
         *,
@@ -496,7 +496,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.3d glibc regular bins (unsorted/small/large) --------------
+    # ---- glibc regular bins (unsorted/small/large) --------------
     def inspect_bins(
         self,
         *,
@@ -513,7 +513,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.9 attack helpers ------------------------------------------
+    # ---- attack helpers ------------------------------------------
     def poison_tcache_link(
         self,
         *,
@@ -556,7 +556,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.10 kernel SLUB (dedicated self-gated surface) --------------
+    # ---- kernel SLUB (dedicated self-gated surface) --------------
     def inspect_slub_cache(
         self,
         *,
@@ -662,7 +662,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.11 libmalloc zone surface --------------------------------
+    # ---- libmalloc zone surface --------------------------------
     def inspect_libmalloc_zones(
         self,
         *,
@@ -708,7 +708,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.12 JIT memory-region tracking (allocator-independent) ----
+    # ---- JIT memory-region tracking (allocator-independent) ----
     def scan_jit_regions(
         self,
         *,
@@ -776,7 +776,7 @@ class HeapTools:
             return gate
         return self._regions_tracker().disarm_region_watch(watch_id=watch_id)
 
-    # ---- S6.4 heap corruption classifier ------------------------------
+    # ---- heap corruption classifier ------------------------------
     def classify_heap_corruption(
         self,
         *,
@@ -807,7 +807,7 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
-    # ---- S6.6 heap technique analysis --------------------------------
+    # ---- heap technique analysis --------------------------------
     def analyze_heap_technique(
         self,
         *,
@@ -872,7 +872,7 @@ class HeapTools:
         """Return the static House-of-* technique catalog (no debugger needed)."""
         return self.techniques.heap_technique_catalog(technique=technique)
 
-    # ---- S6.5 heap snapshot history ----------------------------------
+    # ---- heap snapshot history ----------------------------------
     def capture_heap_snapshot(
         self,
         *,
@@ -964,12 +964,12 @@ __all__ = [
 ]
 
 
-# PEP 562 lazy re-export.  The S6.6 schema constants live in heap_techniques,
+# PEP 562 lazy re-export.  The technique schema constants live in heap_techniques,
 # which imports this module at its top; a module-level ``from
 # .heap_techniques import ...`` here would create an import cycle.  Keeping the
 # names in __all__ and resolving them on attribute access preserves the
 # ``from paomcp.tools.backends.heap import HEAP_TECHNIQUE_SCHEMA`` spelling.
-# The S6.11 libmalloc schemas follow the same rule (libmalloc.py imports this
+# The libmalloc schemas follow the same rule (libmalloc.py imports this
 # module at its top).
 def __getattr__(name: str) -> Any:
     if name in (

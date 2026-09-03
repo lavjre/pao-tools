@@ -1,4 +1,4 @@
-"""Tests for Stage 6.2 typed glibc heap chunk parsing."""
+"""Tests for typed glibc heap chunk parsing."""
 
 from typing import Any, Dict, List, Optional
 
@@ -554,7 +554,7 @@ class TestValidateChunk:
 
 
 # ---------------------------------------------------------------------------
-# HeapTools facade wires S6.1 + S6.2 under one entry point.
+# HeapTools facade wires discovery + chunk parsing under one entry point.
 # ---------------------------------------------------------------------------
 class TestHeapToolsFacade:
     def _make_facade(self) -> tuple:

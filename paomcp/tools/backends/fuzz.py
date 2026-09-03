@@ -1,4 +1,4 @@
-"""Bounded file-input fuzz batches over a live debug session (Phase 2).
+"""Bounded file-input fuzz batches over a live debug session.
 
 This is a *campaign helper*, not a coverage-guided fuzzer: it generates
 deterministic inputs (cyclic patterns, byte fills, seeded bitflips),

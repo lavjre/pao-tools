@@ -1,4 +1,4 @@
-"""Shared heap schemas and budgets (vong 3 split).
+"""Shared heap schemas and budgets.
 
 Single source of truth for allocator detection, traversal caps and
 snapshot budgets; discovery/snapshot/heap modules import from here.

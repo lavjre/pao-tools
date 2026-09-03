@@ -1,4 +1,4 @@
-"""Tests for Stage 6.4 typed glibc heap corruption classifier."""
+"""Tests for typed glibc heap corruption classifier."""
 
 from typing import Any, Dict, List, Optional
 
@@ -386,7 +386,7 @@ class TestClassifyExplicitArena:
 
 
 # ---------------------------------------------------------------------------
-# classify_heap_corruption -- additive technique hints (S6.6)
+# classify_heap_corruption -- additive technique hints (technique analysis)
 # ---------------------------------------------------------------------------
 TCACHE_MAX_BINS = 64
 
@@ -424,7 +424,7 @@ class TestClassifyTechniqueHints:
         parsed = result["parsed"]
         hints = {h["technique"]: h for h in parsed["technique_hints"]}
         assert hints["tcache_double_free"]["present"] is True
-        # The S6.4 duplicate_entry finding is what drives the verdict; the
+        # The corruption-classifier duplicate_entry finding is what drives the verdict; the
         # hints are purely additive.
         assert parsed["verdict"] == "corrupted"
         dups = [f for f in parsed["findings"] if f["category"] == "duplicate_entry"]

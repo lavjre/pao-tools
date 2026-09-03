@@ -1,4 +1,4 @@
-"""Shared crash constants (vong 4 split).
+"""Shared crash constants.
 
 Single source of truth for versions, schemas, budgets and caps;
 crash/cyclic/compare/core modules import from here.

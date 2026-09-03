@@ -1,4 +1,4 @@
-"""Tests for Stage 8.3 SshProvider + file sync + fetch_runtime_libraries."""
+"""Tests for SshProvider + file sync + fetch_runtime_libraries."""
 
 from __future__ import annotations
 

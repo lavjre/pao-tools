@@ -1,6 +1,6 @@
 """JIT / memory-region tracker -- allocator-independent vmmap classification.
 
-Stage 6.12 (Phase 4 of the roadmap): the Chrome piece.  V8's JIT heap is
+JIT memory-region tracking: the Chrome piece.  V8's JIT heap is
 anonymous + executable -- RWX during lazy compilation, W^X-flipped to plain
 executable after code generation -- so "JIT memory surface" is findable purely
 from the process's memory mappings, with no allocator parser and no V8

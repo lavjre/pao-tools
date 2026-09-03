@@ -1,4 +1,4 @@
-"""Libc identification and one-gadget lookup, S7.2 (split from rop.py)."""
+"""Libc identification and one-gadget lookup (split from rop.py)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Stage 7.2 -- libc identification and one-gadget lookup
+# libc identification and one-gadget lookup
 # ---------------------------------------------------------------------------
 SymbolExtractor = Callable[[str], Dict[str, int]]
 OneGadgetRunner = Callable[[str, float], Tuple[int, str, str]]

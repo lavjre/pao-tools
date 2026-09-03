@@ -67,14 +67,14 @@ from paomcp.tools.backends.heap_snapshots import (
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 
 # ----------------------------------------------------------------------
-# Stage 6.2 -- glibc malloc_chunk parsing
+# glibc malloc_chunk parsing
 # ----------------------------------------------------------------------
 
 # glibc malloc_chunk flag bits (low three bits of the ``size`` field).
 
 
 # ----------------------------------------------------------------------
-# Stage 6.4 -- glibc heap corruption classifier
+# glibc heap corruption classifier
 # ----------------------------------------------------------------------
 HEAP_CORRUPTION_SCHEMA = "pao.glibc-heap-corruption.v1"
 FREE_VALIDATION_SCHEMA = "pao.glibc-free-validation.v1"
@@ -472,7 +472,7 @@ class GlibcHeapCorruption:
 
         verdict = self._aggregate_verdict(findings)
 
-        # Additive S6.6 technique hints over the already-collected inspector
+        # Additive technique-analysis hints over the already-collected inspector
         # outputs.  Purely additive: never mutates findings, verdicts, or the
         # check list.  Lazy import keeps the module-level import cycle broken
         # (heap_techniques imports this module at its top).
@@ -651,7 +651,7 @@ class GlibcHeapCorruption:
     ) -> Dict[str, Any]:
         """Return a safe-to-free verdict for a glibc chunk.
 
-        Runs the S6.2 chunk parse + containment checks and cross-references the
+        Runs the chunk parse + containment checks and cross-references the
         chunk against the current thread's tcache and main_arena's fastbins to
         catch a double-free before ``free()`` fires.  A chunk already present
         in tcache or fastbins is a double-free candidate; a chunk that fails

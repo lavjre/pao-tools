@@ -1,4 +1,4 @@
-"""Tests for Phase 0: the AllocatorAnalyzer seam + family dispatch.
+"""Tests for the AllocatorAnalyzer seam + family dispatch.
 
 Covers the pure dispatch (``analyzer_for_family``), the Protocol surface, the
 facade's per-call resolution (``HeapTools._analyzer``), the TTL family cache,

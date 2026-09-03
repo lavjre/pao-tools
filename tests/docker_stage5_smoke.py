@@ -1,4 +1,4 @@
-"""Manual Stage 5 crash/core smoke for the project's pinned Docker runtime."""
+"""Manual crash/core smoke for the project's pinned Docker runtime."""
 
 import asyncio
 import base64
@@ -47,7 +47,7 @@ async def _exercise_stage5_via_mcp(
     session_id: str,
     cap: int,
 ) -> Dict[str, Dict[str, Any]]:
-    """Exercise every public S5 API through the MCP router and envelope."""
+    """Exercise every public crash-triage API through the MCP router and envelope."""
     mcp = create_mcp(services)
     async with Client(mcp) as client:
         published = {tool.name for tool in await client.list_tools()}
@@ -63,7 +63,7 @@ async def _exercise_stage5_via_mcp(
         }
         missing = sorted(required - published)
         if missing:
-            raise RuntimeError(f"S5 MCP tools are not published: {missing}")
+            raise RuntimeError(f"crash-triage MCP tools are not published: {missing}")
 
         async def call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             result = await client.call_tool(name, arguments)

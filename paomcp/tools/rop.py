@@ -1,4 +1,4 @@
-"""MCP tools for typed ROP gadget indexing and libc identification (Stage 7)."""
+"""MCP tools for typed ROP gadget indexing and libc identification."""
 
 from __future__ import annotations
 

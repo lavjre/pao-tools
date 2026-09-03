@@ -115,7 +115,7 @@ class TargetRegistry:
     # Registration
     # ------------------------------------------------------------------
     def register_provider(self, provider: TargetProvider) -> None:
-        """Attach a new provider implementation (S8.2+ extension point)."""
+        """Attach a new provider implementation (provider extension point)."""
         self._providers[provider.kind] = provider
 
     def has_provider(self, kind: TargetKind) -> bool:

@@ -1,4 +1,4 @@
-"""Tests for Stage 8.4 DockerProvider + QemuUserProvider."""
+"""Tests for DockerProvider + QemuUserProvider."""
 
 from __future__ import annotations
 

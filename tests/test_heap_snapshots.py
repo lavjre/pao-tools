@@ -1,4 +1,4 @@
-"""Tests for Stage 6.5 typed heap snapshot history and diff."""
+"""Tests for typed heap snapshot history and diff."""
 
 from typing import Any, Dict, List, Optional
 

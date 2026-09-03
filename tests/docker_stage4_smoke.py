@@ -1,4 +1,4 @@
-"""Manual Stage 4 smoke test for the project's pinned Docker runtime."""
+"""Manual Docker runtime smoke test for the project's pinned Docker runtime."""
 
 import json
 

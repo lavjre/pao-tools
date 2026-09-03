@@ -1,4 +1,4 @@
-"""Resident-GDB chain confirmation (dynamic counterpart to S7.3).
+"""Resident-GDB chain confirmation (dynamic counterpart to chain construction).
 
 ``validate_rop_chain`` is purely static.  ``confirm_chain`` is the dynamic
 half: it dry-runs a chain inside the *live* debugger session by writing the

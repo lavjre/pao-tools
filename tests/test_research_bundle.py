@@ -1,4 +1,4 @@
-"""Tests for Stage 9.4 research bundle export / import / verify."""
+"""Tests for research bundle export / import / verify."""
 
 from __future__ import annotations
 

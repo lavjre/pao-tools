@@ -1,4 +1,4 @@
-"""Tests for Stage 6.3d typed glibc regular-bin traversal."""
+"""Tests for typed glibc regular-bin traversal."""
 
 from typing import Any, Dict, List, Optional
 

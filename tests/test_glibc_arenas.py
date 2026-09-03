@@ -1,4 +1,4 @@
-"""Tests for Stage 6.3 typed glibc arena discovery and malloc_state parsing."""
+"""Tests for typed glibc arena discovery and malloc_state parsing."""
 
 from typing import Any, Dict, List, Optional
 

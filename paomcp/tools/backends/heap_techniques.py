@@ -1,4 +1,4 @@
-"""Heap exploitation technique analyzer (Stage 6.6).
+"""Heap exploitation technique analyzer.
 
 Three related surfaces, all heuristic and evidence-tagged:
 

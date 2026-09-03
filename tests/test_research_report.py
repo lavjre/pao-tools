@@ -1,4 +1,4 @@
-"""Tests for Stage 9.5 typed research-report generator."""
+"""Tests for typed research-report generator."""
 
 from __future__ import annotations
 

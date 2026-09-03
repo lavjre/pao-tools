@@ -1,4 +1,4 @@
-"""Contract tests for the bounded and session-safe S1 foundation."""
+"""Contract tests for the bounded and session-safe foundation."""
 
 from __future__ import annotations
 
@@ -924,7 +924,7 @@ def test_artifact_store_enforces_session_ownership_and_verifies_integrity(
 
     assert store.assert_owner(artifact.artifact_id, "alpha") == artifact
     assert store.get_for_session(artifact.artifact_id, "alpha") == artifact
-    read = store.read_for_session(artifact.artifact_id, "alpha")
+    read = store.read_for_session(artifact.artifact_id, "alpha", format="base64")
     assert base64.b64decode(read["content_base64"]) == b"session-owned evidence"
     assert store.verify(artifact.artifact_id, session_id="alpha")["valid"] is True
 
@@ -971,16 +971,18 @@ def test_artifact_reads_are_bounded_and_lossless_by_pagination(tmp_path) -> None
     )
     artifact = store.save_bytes(b"abcdefghij", tool="test")
 
-    first = store.read(artifact.artifact_id)
+    first = store.read(artifact.artifact_id, format="base64")
     second = store.read(
         artifact.artifact_id,
         offset=first["next_offset"],
         length=4,
+        format="base64",
     )
     third = store.read(
         artifact.artifact_id,
         offset=second["next_offset"],
         length=4,
+        format="base64",
     )
 
     assert [first["length"], second["length"], third["length"]] == [4, 4, 2]
@@ -1021,7 +1023,7 @@ def test_artifact_save_file_copies_only_the_initial_size_snapshot(
     artifact = store.save_file(source_path, tool="get_process")
 
     assert artifact.size_bytes == 3
-    result = store.read(artifact.artifact_id, length=3)
+    result = store.read(artifact.artifact_id, length=3, format="base64")
     assert base64.b64decode(result["content_base64"]) == b"abc"
 
 

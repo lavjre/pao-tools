@@ -1,4 +1,4 @@
-"""Tests for Stage 6.1 typed heap allocator discovery."""
+"""Tests for typed heap allocator discovery."""
 
 from typing import Any, Dict, List, Optional
 
