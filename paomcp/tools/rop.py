@@ -25,42 +25,22 @@ def register(mcp: FastMCP) -> None:
         arch: Optional[str] = None,
         image_base: Optional[int] = None,
         bad_bytes: Optional[List[Any]] = None,
-        max_results: int = 500,
+        max_results: int = 100,
         max_instructions: int = 8,
         include_analysis: bool = True,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Enumerate ROP gadgets from a binary with typed side-effect analysis.
-
-        Static analysis via ropper: loads ``binary_path``, walks every
-        candidate gadget, filters by an optional case-insensitive
-        instruction-text regex, drops anything whose absolute address
-        (encoded little-endian for the target pointer width) contains a
-        listed bad byte, deduplicates identical (bytes, instructions)
-        sightings, and returns per-gadget side effects: registers read /
-        written / clobbered, stack delta (bytes), and per-instruction
-        notes flagging unknown mnemonics.
+        """List ROP gadgets with side effects (regs read/written, stack delta).
 
         Args:
-            binary_path: Absolute or workspace-relative path to the
-                target binary.
-            filter_pattern: Optional case-insensitive regex applied to
-                the ``mnemonic op1, op2 ; ...`` text.  Omit for no
-                filtering.
-            arch: Optional architecture override (``x86_64``, ``i386``,
-                ``aarch64``, ``arm``, etc.).  Auto-detected from the
-                binary when omitted.
-            image_base: Optional rebase address; when set every gadget
-                is reported at ``image_base + offset``.
-            bad_bytes: Optional list of byte values (ints 0-255 or
-                ``"0x0a"`` strings) that any gadget address must not
-                contain when encoded little-endian.
-            max_results: Cap on returned gadgets (bounded at 20000).
-            max_instructions: Drop gadgets longer than this before
-                analysis, keeping the response cheap on large binaries.
-            include_analysis: When false, drop the heavy
-                ``instructions_analyzed`` payload from each gadget for
-                small-response searches.
+            binary_path: Target binary under /workspace.
+            filter_pattern: Optional regex on gadget text.
+            arch: Override (x86_64/i386/aarch64); auto-detected if omitted.
+            image_base: Optional rebase; gadgets reported at base+offset.
+            bad_bytes: Drop addresses containing these bytes (0-255/0x..).
+            max_results: Cap (max 20000, default 500).
+            max_instructions: Drop longer gadgets to keep it cheap.
+            include_analysis: False drops per-instruction detail for speed.
         """
         services = get_services(ctx)
         return services.rop_tools.find_gadgets(
@@ -154,25 +134,11 @@ def register(mcp: FastMCP) -> None:
         candidate_libcs: List[str],
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Score leaked ``{symbol: address}`` pairs against candidate libc files.
-
-        Each candidate is checked with the invariant that every
-        ``leak_address - libc_symbol_offset`` must yield the same base.
-        A candidate is ``consistent`` when at least two leaks agree on
-        a base; ``insufficient`` when only one leak matched;
-        ``inconsistent`` when the bases disagree; ``unreadable`` when
-        the candidate could not be parsed at all.  The top-level
-        verdict aggregates those into ``confirmed`` (single candidate,
-        >= 3 matched leaks), ``likely`` (single candidate, 2 matched),
-        ``ambiguous`` (multiple candidates consistent), ``insufficient``
-        (need more leaks) or ``rejected`` (no candidate matches).
+        """Score {symbol: addr} leaks vs candidate libcs; verdict confirmed/likely/ambiguous.
 
         Args:
-            leaks: Mapping of libc symbol name (``"puts"``, ``"read"``,
-                ...) to the leaked absolute runtime address.
-            candidate_libcs: Ordered list of candidate ``libc.so`` file
-                paths to score.  A common corpus is every version in
-                ``libc-database`` extracted locally.
+            leaks: Symbol name to leaked runtime address.
+            candidate_libcs: libc.so paths to score.
         """
         services = get_services(ctx)
         return services.rop_tools.identify_libc(
@@ -223,48 +189,19 @@ def register(mcp: FastMCP) -> None:
         syscall_number: Optional[int] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Assemble a typed ROP chain for a real exploit shape.
-
-        Supported ``kind`` values (x86_64 today):
-
-        * ``ret2libc``    -- loads rdi, rsi, rdx via ``pop <reg> ; ret``
-          gadgets and transfers control to ``target_address`` (compute
-          this via ``identify_libc`` + a libc symbol offset first).  Stack
-          alignment is computed from the argument count: the chain enters
-          via ``ret`` with rsp at 8 (mod 16) on the first slot and pops
-          ``2*len(args) + 1`` slots (always odd), so ``align_stack=True``
-          appends a bare ``ret`` to make the total pop count even and land
-          rsp on the 16-byte SysV phase required by ``movaps`` users.
-          Set ``align_stack=False`` only when the overflow delivers the
-          chain on an already-aligned phase.
-        * ``ret2syscall`` -- loads rax with ``syscall_number`` then
-          sets rdi, rsi, rdx, r10, r8, r9 (Linux SYSCALL calling
-          convention; SYSCALL clobbers rcx and r11) before executing a
-          ``syscall ; ret`` gadget.
-
-        The returned chain carries the typed entry list, the packed
-        little-endian ``raw_bytes`` a caller can splice directly into
-        an overflow payload, and a ``missing_gadgets`` list plus
-        ``verdict = "missing_gadgets"`` when a required gadget was not
-        available.
+        """Build ret2libc/ret2syscall chain; returns entries + raw_bytes.
 
         Args:
-            binary_path: Binary to search for chain gadgets.  Usually
-                the target executable itself.
-            kind: ``"ret2libc"`` or ``"ret2syscall"``.
-            arch: Target architecture (only ``"x86_64"`` is supported
-                today; other arches return ``verdict="unsupported_arch"``).
-            image_base: Optional rebase for the gadget search.
-            bad_bytes: Optional forbidden bytes for gadget addresses.
-            target_address: ret2libc: absolute address to call.
-            target_symbol: ret2libc: cosmetic label used in the entry
-                purposes and ``target.symbol`` field.
-            args: Positional arguments (int list) loaded into
-                rdi/rsi/rdx/... in order.
-            align_stack: ret2libc: append a bare ``ret`` gadget before
-                the final call when the chain's pop count is odd (the
-                normal case) so the target sees a 16-byte-aligned rsp.
-            syscall_number: ret2syscall: syscall number for rax.
+            binary_path: Binary to search.
+            kind: "ret2libc" or "ret2syscall" (x86_64).
+            arch: Only x86_64 supported today.
+            image_base: Optional rebase.
+            bad_bytes: Forbidden address bytes.
+            target_address: ret2libc call target (use identify_libc first).
+            target_symbol: Cosmetic label for target.
+            args: Loaded into rdi/rsi/rdx in order.
+            align_stack: Append ret for 16B alignment (default True).
+            syscall_number: ret2syscall number for rax.
         """
         services = get_services(ctx)
         return services.rop_tools.build_rop_chain(
@@ -348,36 +285,13 @@ def register(mcp: FastMCP) -> None:
         arch: str = "x86_64",
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Static pass / fail / unknown verdict for a ROP chain.
-
-        Runs three checks and surfaces per-slot evidence for each:
-
-        * ``exec_mapping``     -- every gadget / target address lies
-          in an executable mapping.  Skipped with ``verdict="unknown"``
-          when ``executable_mappings`` is omitted (rather than silently
-          claiming pass).
-        * ``bad_bytes``        -- every encoded pointer (gadget,
-          target, immediate) is free of every forbidden byte value.
-        * ``register_clobber`` -- borrows the S7.3 constraint analyzer;
-          surfaces risky overwrites as a warn-level signal but does
-          not fail the chain by itself (a chain may deliberately
-          reload a register).
-
-        Overall ``verdict``: ``fail`` if any check failed, ``unknown``
-        if any check was skipped, otherwise ``pass``.  Dynamic
-        sandbox validation against a running debugger inferior is
-        deliberately deferred to a future extension rather than
-        faked here.
+        """Static pass/fail/unknown for a chain (exec map, bad bytes, clobber).
 
         Args:
-            chain: Chain entries (as returned by ``build_rop_chain``).
-            executable_mappings: Optional vmmap-style list of
-                ``{start, end, permissions, file}`` mappings from the
-                target process; without them the exec-mapping check
-                returns ``unknown``.
-            bad_bytes: Optional forbidden byte values (int 0-255 or
-                ``"0x0a"`` strings).
-            arch: Target architecture.
+            chain: Entries from build_rop_chain.
+            executable_mappings: vmmap list; omitted => verdict unknown.
+            bad_bytes: Forbidden byte values.
+            arch: Target arch.
         """
         services = get_services(ctx)
         return services.rop_tools.validate_rop_chain(
@@ -399,43 +313,16 @@ def register(mcp: FastMCP) -> None:
         restore: bool = True,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Dry-run a ROP chain inside the resident debugger session.
-
-        The dynamic counterpart to ``validate_rop_chain``: writes the chain
-        values onto a scratch stack region in the *live* inferior, points
-        ``$pc``/``$sp`` at them, single-steps until the chain reaches
-        ``target_address`` (default: the last chain value), crashes, or
-        exhausts ``max_steps`` -- then restores ``$pc``/``$sp`` so the
-        session is left untouched.  Verdicts:
-
-        * ``reached_target``  -- control transferred to the target;
-          ``stack_aligned`` reports SysV alignment (``rsp % 16 == 0``).
-        * ``crashed``         -- signal received mid-chain (``crash``
-          carries ``{signal, step}``).
-        * ``steps_exhausted`` -- budget ran out (loop gadget, or a chain
-          longer than the budget; raise ``max_steps``).
-        * ``step_failed`` / ``write_failed`` / ``setup_failed`` /
-          ``invalid_setup`` -- harness-level failures.
-
-        Each step records ``{step, rip, rsp, reason}`` in ``trace``.  The
-        session must already have a loaded, stopped inferior (e.g. after
-        ``run`` to a breakpoint).
+        """Dry-run chain in live inferior; verdict reached_target/crashed/exhausted.
 
         Args:
-            chain: Ordered list of chain values (addresses/immediates) as
-                they sit on the stack, exactly like an overflow payload.
-                ``chain[0]`` is the first gadget to execute.
-            session_id: Debugger session holding the stopped inferior.
-                Defaults to the active session.
-            stack_address: Scratch region to write the chain into.  Omit
-                to write at the inferior's current ``$sp`` (a stopped
-                inferior's stack top is caller-owned scratch).
-            target_address: Success address.  Defaults to the last chain
-                value (the target call / one-gadget).
-            max_steps: Single-step budget (bounded at 512).
-            arch: Target architecture (``x86_64`` or ``i386``).
-            restore: When true (default), restore ``$pc``/``$sp`` after
-                the run so the session is undisturbed.
+            chain: Stack-ordered values, chain[0] runs first.
+            session_id: Session with stopped inferior.
+            stack_address: Scratch; omitted => current $sp.
+            target_address: Success addr; default last chain value.
+            max_steps: Budget, max 512.
+            arch: x86_64/i386.
+            restore: Restore $pc/$sp after (default True).
         """
         services = get_services(ctx)
         session = resolve_debug_session(

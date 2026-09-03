@@ -11,6 +11,7 @@ from paomcp.state import DebugSession, DebugSessionRegistry
 from paomcp.tools.backends import (
     GhidraDecompiler,
     GitTools,
+    IdaProMCP,
     PythonTools,
     ResearchBundle,
     ResearchRegistry,
@@ -33,6 +34,7 @@ class AppServices:
     git_tools: GitTools
     python_tools: PythonTools
     decompiler: GhidraDecompiler
+    ida: IdaProMCP
     artifact_store: ArtifactStore
     operation_registry: OperationRegistry
     debugger_compatibility: Dict[str, Any]
@@ -120,6 +122,11 @@ def create_services(
         operation_registry=operation_registry,
     )
     logger.info("Local Ghidra decompiler ready=%s", decompiler.status()["ready"])
+    ida = IdaProMCP()
+    try:
+        logger.info("IDA Pro MCP ready=%s", ida.status()["ready"])
+    except Exception as exc:
+        logger.warning("IDA status probe failed (degraded, not fatal): %s", exc)
 
     services = AppServices(
         runtime_paths=runtime_paths,
@@ -139,6 +146,7 @@ def create_services(
         git_tools=GitTools(workspace_dir=runtime_paths.workspace_root),
         python_tools=PythonTools(workspace_dir=runtime_paths.python_dir),
         decompiler=decompiler,
+        ida=ida,
         artifact_store=artifact_store,
         operation_registry=operation_registry,
         debugger_compatibility=debugger_compatibility,

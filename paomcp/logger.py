@@ -4,7 +4,7 @@ import logging
 logger = logging.getLogger("")
 handler: logging.Handler
 
-prod_env = os.getenv("PROD", False)
+prod_env = os.getenv("PROD", "").lower() in ("1", "true", "yes", "on")
 
 if prod_env:
     handler = logging.StreamHandler()

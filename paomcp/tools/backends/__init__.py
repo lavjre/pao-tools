@@ -9,6 +9,7 @@ from .backend import (
     resolve_backend,
 )
 from .decompiler import GhidraDecompiler
+from .ida import IdaProMCP
 from .crash import CrashTriage
 from .git import GitTools
 from .attack_helpers import ATTACK_TCACHE_POISON_SCHEMA, GlibcAttackHelper
@@ -113,6 +114,7 @@ __all__ = [
     "GitTools",
     "PythonTools",
     "GhidraDecompiler",
+    "IdaProMCP",
     "GadgetIndex",
     "GadgetIndexError",
     "LibcIdentifier",

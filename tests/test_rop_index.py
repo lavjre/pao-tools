@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 import pytest
 
-import paomcp.tools.backends.rop as rop_module
+import paomcp.tools.backends.rop_gadgets as rop_gadgets_module
 from paomcp.tools.backends.rop import GadgetIndex
 
 
@@ -176,8 +176,8 @@ class TestMnemonicIndex:
 class TestParallelAnalysis:
     def test_parallel_matches_sequential_output(self, monkeypatch) -> None:
         # Force the parallel threshold down so the pool actually spawns.
-        monkeypatch.setattr(rop_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
-        monkeypatch.setattr(rop_module, "_PARALLEL_ANALYSIS_DISABLED", False)
+        monkeypatch.setattr(rop_gadgets_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
+        monkeypatch.setattr(rop_gadgets_module, "_PARALLEL_ANALYSIS_DISABLED", False)
         records = [_record(0x400000 + i * 0x10, ["pop rdi", "ret"]) for i in range(50)]
         records.append(_record(0x404000, ["syscall", "ret"]))
 
@@ -189,7 +189,7 @@ class TestParallelAnalysis:
             parallel_result = parallel_idx.find_gadgets(
                 binary_path=parallel_bin, arch="x86_64", max_instructions=3
             )
-            monkeypatch.setattr(rop_module, "_PARALLEL_ANALYSIS_DISABLED", True)
+            monkeypatch.setattr(rop_gadgets_module, "_PARALLEL_ANALYSIS_DISABLED", True)
             sequential_result = sequential_idx.find_gadgets(
                 binary_path=sequential_bin, arch="x86_64", max_instructions=3
             )
@@ -206,8 +206,8 @@ class TestParallelAnalysis:
     def test_disabled_env_skips_pool(self, monkeypatch) -> None:
         # With PAO_DISABLE_PARALLEL_GADGETS semantics enabled, no pool is
         # ever created; the query still works.
-        monkeypatch.setattr(rop_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
-        monkeypatch.setattr(rop_module, "_PARALLEL_ANALYSIS_DISABLED", True)
+        monkeypatch.setattr(rop_gadgets_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
+        monkeypatch.setattr(rop_gadgets_module, "_PARALLEL_ANALYSIS_DISABLED", True)
         records = [_record(0x400100, ["pop rdi", "ret"])]
         idx = GadgetIndex(loader=_fake_loader(records))
         binary = _tempbin()
@@ -220,14 +220,16 @@ class TestParallelAnalysis:
     def test_pool_failure_falls_back_to_sequential(self, monkeypatch) -> None:
         # A broken multiprocessing path must degrade to the sequential pass
         # and still return identical, correct results.
-        monkeypatch.setattr(rop_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
-        monkeypatch.setattr(rop_module, "_PARALLEL_ANALYSIS_DISABLED", False)
+        monkeypatch.setattr(rop_gadgets_module, "PARALLEL_ANALYSIS_THRESHOLD", 1)
+        monkeypatch.setattr(rop_gadgets_module, "_PARALLEL_ANALYSIS_DISABLED", False)
         records = [_record(0x400100, ["pop rdi", "ret"])]
 
         def broken_pool(*args, **kwargs):
             raise RuntimeError("sandbox forbids multiprocessing")
 
-        monkeypatch.setattr(rop_module.multiprocessing, "get_context", broken_pool)
+        monkeypatch.setattr(
+            rop_gadgets_module.multiprocessing, "get_context", broken_pool
+        )
         idx = GadgetIndex(loader=_fake_loader(records))
         binary = _tempbin()
         try:

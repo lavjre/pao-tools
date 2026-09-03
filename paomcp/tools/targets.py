@@ -37,40 +37,15 @@ def register(mcp: FastMCP) -> None:
         backend: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Create a typed target descriptor for a future attach / connect.
+        """Create target (local_process/attach_pid/gdbserver/tcp_remote/ssh/docker/qemu).
 
-        ``kind`` is one of: ``local_process``, ``attach_pid``,
-        ``gdbserver``, ``tcp_remote``, ``ssh``, ``docker``, ``qemu_user``,
-        ``qemu_system``.  All eight providers are registered; actual
-        availability depends on their runtime executable, daemon, credentials,
-        image, kernel, rootfs, or remote endpoint.
-
-        ``config`` is a per-kind dict.  Common keys:
-
-        * ``local_process``: ``binary_path`` (required), ``argv``, ``env``,
-          ``working_dir``, ``stdin_bytes``.
-        * ``attach_pid``: ``pid`` (required, positive int).
-        * ``gdbserver`` / ``tcp_remote``: host and port plus the provider's
-          process or connection settings.
-        * ``ssh``: ``host``, ``ssh_user``, key/password authentication and
-          optional ``ssh_known_hosts_path``. Unknown host keys are rejected.
-        * ``docker``: container/image and command settings.
-        * ``qemu_user`` / ``qemu_system``: emulator plus binary, rootfs,
-          kernel, machine and GDB-listen settings as applicable.
-
-        Optional metadata (informational, never overrides typed
-        detection): ``arch``, ``platform``, ``notes``, ``name``.  Every
-        target is bound to the resolved ``session_id`` (falls back to
-        the default debug session when omitted) and counts against the
-        per-session target cap.
-
-        Creating a target does not start it -- call ``start_target``
-        before ``attach_debugger``.
+        Config keys per kind: local_process{binary_path,argv,env,working_dir},
+        attach_pid{pid}, gdbserver/tcp{host,port}, ssh{host,user,key},
+        docker{image,cmd}, qemu{binary,rootfs,kernel}. Does not start it;
+        call start_target then attach_debugger.
 
         Args:
-            backend: Debugger backend request for the owning session:
-                "gdb", "lldb", or "auto". Stored on the target descriptor
-                and applied when the target's session is (re)created.
+            backend: gdb/lldb/auto for the owning session.
         """
         services = get_services(ctx)
         resolved_session = _resolve_session_id(services, session_id)

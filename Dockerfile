@@ -3,6 +3,10 @@ FROM ubuntu:24.04 AS base
 
 ARG TARGETARCH
 ARG PWNDBG_VERSION=2026.02.18
+ARG PWNDBG_SHA256_X86_64="eeb93972d7910bf8233abf296b00577efb7137d94655502985566a328e5cecce"
+ARG PWNDBG_SHA256_ARM64="8d74a4be037281aaa37b51a046a625d3055a87ebb2397553292bcae321be169f"
+ARG PWNINIT_VERSION=3.3.1
+ARG PWNINIT_SHA256="1b72653be59f8f13ea934d1153e8d845eac0dbac62a8c4d9dc4a25577f009362"
 ARG ONE_GADGET_VERSION=1.10.0
 ARG GHIDRA_VERSION=12.1.2
 ARG GHIDRA_RELEASE_DATE=20260605
@@ -39,6 +43,15 @@ RUN set -eux; \
       --retry 5 --retry-delay 2 --retry-all-errors \
       "https://github.com/pwndbg/pwndbg/releases/download/${PWNDBG_VERSION}/${PWNDBG_ASSET}" \
       -o /tmp/pwndbg.tar.xz; \
+    case "${PWNDBG_ARCH}" in \
+      x86_64) PWNDBG_SHA256="${PWNDBG_SHA256_X86_64}" ;; \
+      arm64) PWNDBG_SHA256="${PWNDBG_SHA256_ARM64}" ;; \
+    esac; \
+    if [ -n "${PWNDBG_SHA256}" ]; then \
+      echo "${PWNDBG_SHA256}  /tmp/pwndbg.tar.xz" | sha256sum -c -; \
+    else \
+      echo "WARNING: no hash pin for pwndbg ${PWNDBG_ARCH}; refusing unverified binary" >&2; exit 1; \
+    fi; \
     mkdir -p /opt/pwndbg; \
     tar -xJf /tmp/pwndbg.tar.xz -C /opt/pwndbg --strip-components=2; \
     test -x /opt/pwndbg/bin/pwndbg; \
@@ -94,8 +107,18 @@ RUN useradd -m -s /bin/bash pao && \
     chown -R pao:pao /var/lib/pao && \
     chown -R pao:pao /opt/pao-python
 
-RUN wget https://github.com/io12/pwninit/releases/download/3.3.1/pwninit -O /usr/local/bin/pwninit && \
-    chmod +x /usr/local/bin/pwninit
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL \
+      --retry 5 --retry-delay 2 --retry-all-errors \
+      "https://github.com/io12/pwninit/releases/download/${PWNINIT_VERSION}/pwninit" \
+      -o /usr/local/bin/pwninit; \
+    if [ -n "${PWNINIT_SHA256}" ]; then \
+      echo "${PWNINIT_SHA256}  /usr/local/bin/pwninit" | sha256sum -c -; \
+    else \
+      echo "WARNING: no hash pin for pwninit; refusing unverified binary" >&2; exit 1; \
+    fi; \
+    chmod +x /usr/local/bin/pwninit; \
+    pwninit --version
 
 RUN gem install --no-document one_gadget -v "${ONE_GADGET_VERSION}" && \
     test "$(ruby -e 'puts Gem::Specification.find_by_name("one_gadget").version')" = "${ONE_GADGET_VERSION}" && \

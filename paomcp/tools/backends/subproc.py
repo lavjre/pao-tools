@@ -34,6 +34,14 @@ DEFAULT_MAX_PROCESS_OUTPUT_BYTES = int(
 )
 OUTPUT_READ_CHUNK_BYTES = 64 * 1024
 OUTPUT_READER_JOIN_SECONDS = 5.0
+# Shared clamps live in timeouts.py (vong 2 split); re-exported here so
+# existing `from subproc import clamp_timeout` imports keep working.
+from paomcp.tools.backends.timeouts import (
+    ALLOWED_KILL_SIGNALS,
+    DEFAULT_COMMAND_TIMEOUT,
+    MAX_COMMAND_TIMEOUT,
+    clamp_timeout,
+)
 
 
 class ProcessLimitError(RuntimeError):
@@ -627,6 +635,7 @@ class SubprocessTools:
         Returns:
             Dictionary with execution results
         """
+        timeout = clamp_timeout(timeout)
         logger.info(f"Running command: {command}")
         operation_id = current_operation_id()
         if self.operation_registry is not None and operation_id is not None:
@@ -1067,6 +1076,14 @@ class SubprocessTools:
         Returns:
             Dictionary with kill result
         """
+        if signal not in ALLOWED_KILL_SIGNALS:
+            return {
+                "success": False,
+                "pid": pid,
+                "session_id": session_id,
+                "error": f"Signal {signal} not allowed; use one of {sorted(ALLOWED_KILL_SIGNALS)}",
+                "type": "ValueError",
+            }
         try:
             with self._lock:
                 entry = self.background_processes.get(pid)

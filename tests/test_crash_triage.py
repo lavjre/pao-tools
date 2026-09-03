@@ -6,6 +6,7 @@ import time
 import pytest
 
 import paomcp.tools.backends.crash as crash_backend
+import paomcp.tools.backends.crash_core as crash_core_module
 from paomcp.artifacts import ArtifactMetadata, WriterNotQuiescentError
 from paomcp.tools.backends.crash import (
     MAX_CONFIGURED_CORE_DUMP_BYTES,
@@ -1004,7 +1005,7 @@ def test_validate_elf_core_rejects_empty_load_segment(tmp_path):
 
 def test_validate_elf_core_bounds_note_entry_work(tmp_path, monkeypatch):
     triage, gdb = adapter(stop_record())
-    monkeypatch.setattr(crash_backend, "MAX_ELF_CORE_NOTE_ENTRIES", 4)
+    monkeypatch.setattr(crash_core_module, "MAX_ELF_CORE_NOTE_ENTRIES", 4)
     prefix = bytearray(minimal_elf64_core())[: 64 + 56 * 2]
     note = (
         (1).to_bytes(4, "little")

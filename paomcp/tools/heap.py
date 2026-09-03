@@ -119,34 +119,13 @@ def register(mcp: FastMCP) -> None:
         include_next: bool = True,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Inspect the allocation an ``address`` belongs to, per allocator
-        family.
-
-        The tool is family-routed (see ``detect_allocator``).  On a glibc
-        target it reads the ``2 * pointer_size`` chunk header from the live
-        inferior, decodes ``prev_size``/``size``/flags (``PREV_INUSE``,
-        ``IS_MMAPPED``, ``NON_MAIN_ARENA``) with per-field raw hex evidence,
-        and returns the chunk vs user address, the physical next/previous
-        chunk addresses, and structural checks (alignment, minimum chunk
-        size, mapping containment).  On a jemalloc target it resolves the
-        address to its rtree extent; on libmalloc it classifies pointer
-        ownership via ``malloc_size``.  Other allocators (musl / scudo /
-        unknown) yield ``verdict = "unsupported"``.
-
-        When ``include_next`` is true (glibc targets) the physically next
-        chunk's header is also read so the allocation status of this chunk
-        can be inferred from that chunk's ``PREV_INUSE`` bit; ``IS_MMAPPED``
-        chunks report ``allocated`` by construction because they stand
-        outside heap arenas.
+        """Inspect allocation for addr (glibc/jemalloc/libmalloc routed).
 
         Args:
-            session_id: Debugger session whose live inferior should be inspected.
-            address: Chunk or user pointer as a hex/decimal string.
-            address_kind: ``"user"`` (default -- ``address`` is a pointer
-                returned by ``malloc``) or ``"chunk"`` (``address`` is the
-                chunk header address).
-            include_next: Read the physically next chunk to infer allocation
-                status.  Set to ``false`` to skip the extra read.
+            session_id: Session to inspect.
+            address: Hex/dec chunk or user pointer.
+            address_kind: "user" (malloc ptr) or "chunk" (header addr).
+            include_next: Read next chunk for alloc status (glibc).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -373,30 +352,12 @@ def register(mcp: FastMCP) -> None:
         max_chunks_per_bin: int = 128,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Walk the 10 glibc fastbin chains rooted in an arena's ``fastbinsY``.
-
-        Reads the ten fastbin heads out of the arena's ``fastbinsY`` array
-        and walks each singly-linked chain via the free-chunk ``fd``
-        pointer.  When the target's glibc has safe-linking enabled
-        (>= 2.32) the ``fd`` field is decoded with
-        ``PROTECT_PTR = fd XOR (fd_field_addr >> 12)`` so the reported
-        chain addresses are usable directly; the raw encoded value is
-        preserved alongside the decoded one for evidence.
-
-        Each chain is bounded (default 128 chunks per bin) with cycle
-        detection so a corrupted allocator can never hang the tool.
-
-        This surface is glibc-specific; the family-routed dispatch returns
-        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
-        allocators.
+        """Walk 10 glibc fastbins with safe-linking decode (glibc only).
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            arena_address: Optional hex/decimal arena address (typically
-                obtained from ``list_arenas``).  Omit to walk main_arena's
-                fastbins.
-            max_chunks_per_bin: Per-fastbin traversal cap (default 128).
+            session_id: Session to inspect.
+            arena_address: Arena addr; omitted => main_arena.
+            max_chunks_per_bin: Cap per bin (default 128).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -423,31 +384,11 @@ def register(mcp: FastMCP) -> None:
         max_chunks_per_bin: int = 64,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Walk the per-thread glibc tcache bins and their singly-linked chains.
-
-        Reads the thread-local ``tcache`` pointer, resolves the layout of
-        ``struct tcache_perthread_struct`` (counts/entries offsets plus
-        the counts element size which changed from ``uint8_t`` to
-        ``uint16_t`` between glibc 2.29 and 2.30), then reads all 64
-        counts and entries in a single struct-sized gulp.  Each nonzero
-        entries[i] chain is walked via ``tcache_entry.next``; when
-        safe-linking is active (glibc >= 2.32) ``next`` is decoded via
-        ``PROTECT_PTR``.  Cycle detection + per-bin cap (default 64)
-        prevent a corrupted heap from hanging the tool.
-
-        A NULL ``tcache`` thread-local yields
-        ``verdict = "uninitialized"`` (legitimate empty state, not an
-        error).  Missing debug symbols yield
-        ``verdict = "unresolvable"``.
-
-        This surface is glibc-specific; the family-routed dispatch returns
-        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
-        allocators.
+        """Walk per-thread tcache bins (glibc only).
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            max_chunks_per_bin: Per-tcache-bin traversal cap.
+            session_id: Session to inspect.
+            max_chunks_per_bin: Cap per bin (default 64).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -474,31 +415,12 @@ def register(mcp: FastMCP) -> None:
         max_chunks_per_bin: int = 1024,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Walk all 127 regular glibc bins (unsorted / small / large).
-
-        Reads the arena's ``bins[]`` array (254 pointer slots) in a
-        single gulp for a consistent snapshot, then per bin computes the
-        ``bin_at(m, i)`` synthetic mchunkptr, detects the empty case
-        (fd == bin_head_addr), and walks the doubly-linked chain via
-        ``fd`` until it circles back to the bin head, hits a NULL fd,
-        loops, or reaches the traversal cap.
-
-        Bin categories: index 1 is unsorted, 2..63 are small (one size
-        class per bin), 64..127 are large (each covers a size range).
-        Per chunk the response includes chunk_address, size_field, size,
-        prev_inuse, fd, bk, and in_mapping.  Large bin secondary
-        size-sorted lists (fd_nextsize / bk_nextsize) are deferred.
-
-        This surface is glibc-specific; the family-routed dispatch returns
-        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
-        allocators.
+        """Walk 127 regular bins: unsorted/small/large (glibc only).
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            arena_address: Optional hex/decimal arena address (from
-                ``list_arenas``).  Omit to inspect main_arena.
-            max_chunks_per_bin: Per-bin traversal cap (default 1024).
+            session_id: Session to inspect.
+            arena_address: Arena addr; omitted => main_arena.
+            max_chunks_per_bin: Cap per bin (default 1024).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -572,30 +494,11 @@ def register(mcp: FastMCP) -> None:
         arena_address: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Classify corruption across an arena's fastbins, tcache and regular bins.
-
-        Runs the typed bin inspectors (fastbins / tcache / regular bins) and
-        synthesizes their per-chain signals into a bounded, evidence-tagged
-        list of corruption findings.  Emits a conservative arena-level
-        verdict: ``valid`` (no findings), ``suspicious`` (only unreadable
-        findings), ``corrupted`` (any structural violation), ``unsupported``
-        (non-glibc), or ``unresolvable`` (bin layout could not be resolved).
-
-        Categories covered: ``cycle``, ``duplicate_entry`` (a chunk appearing
-        in multiple bins -- a strong double-free signal), ``fd_bk_inconsistency``
-        (broken doubly-linked pair in a regular bin), ``alignment``,
-        ``pointer_out_of_mapping``, ``unreadable_chunk`` and
-        ``unreadable_bin``.  The tcache is thread-local so its findings
-        always reflect the current thread regardless of ``arena_address``.
-        This surface is glibc-specific; the family-routed dispatch returns
-        ``verdict = "unsupported"`` on jemalloc / libmalloc / unknown
-        allocators.
+        """Classify bin corruption; verdict valid/suspicious/corrupted.
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            arena_address: Optional hex/decimal arena address (typically
-                from ``list_arenas``).  Omit to classify main_arena.
+            session_id: Session to inspect.
+            arena_address: Arena addr; omitted => main_arena.
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -622,29 +525,12 @@ def register(mcp: FastMCP) -> None:
         address_kind: str = "user",
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Return a safe-to-free verdict for a glibc chunk.
-
-        Runs the S6.2 chunk parse + containment checks and cross-references
-        the chunk against the current thread's tcache and main_arena's
-        fastbins to catch a double-free before ``free()`` fires.
-
-        Verdict vocabulary: ``unsupported`` (non-glibc; this surface is
-        glibc-specific and the family-routed dispatch returns ``unsupported``
-        on jemalloc / libmalloc / unknown allocators), ``unreadable``
-        (header could not be read), ``double_free`` (chunk already present
-        in tcache or fastbins), ``corrupted`` (alignment / mapping / min-size
-        check failed), ``suspicious`` (payload extends past mapping end), or
-        ``safe`` (every check passed).  Per-check results and the list of
-        failed check names are returned so a heuristic is never promoted to
-        a fact.
+        """Safe-to-free verdict: safe/double_free/corrupted/suspicious (glibc).
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            address: Chunk or user pointer as a hex/decimal string.
-            address_kind: ``"user"`` (default -- ``address`` is a pointer
-                returned by ``malloc``) or ``"chunk"`` (``address`` is the
-                chunk header address).
+            session_id: Session to inspect.
+            address: Hex/dec chunk or user pointer.
+            address_kind: "user" (malloc ptr) or "chunk" (header addr).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -672,30 +558,12 @@ def register(mcp: FastMCP) -> None:
         max_chunks_per_bin: int = 512,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Capture a typed heap snapshot for this session.
-
-        Drives the sibling allocator / arena / bin / tcache inspectors
-        into a single reproducible payload: allocator identity + target
-        profile, per-arena summaries (top, last_remainder, system_mem,
-        next), tcache summary, and a flat chunk ledger (address, size,
-        arena_address, location kind + index) covering every fastbin,
-        regular bin and tcache slot walked.
-
-        Snapshots are stored session-locally under a bounded budget (16
-        entries and 64 MiB total, oldest-first eviction).  Re-capturing
-        under an existing ``name`` evicts the previous entry so the name
-        always points at the latest capture.  The capture is family-routed:
-        a jemalloc / libmalloc / other allocator yields a stored
-        ``unsupported`` snapshot with an empty ledger.
+        """Capture heap snapshot (16 entries/64MiB budget, oldest evicted).
 
         Args:
-            session_id: Debugger session whose live inferior should be
-                inspected.
-            name: Optional human-readable name for later
-                ``get_heap_snapshot`` / ``diff_heap_snapshots`` lookups.
-                Omit for anonymous (id-only) captures.
-            max_chunks_per_bin: Per-bin traversal cap applied to fastbins,
-                tcache and regular bins.  Defaults to 512.
+            session_id: Session to inspect.
+            name: Name for later diff/lookup; omitted => id-only.
+            max_chunks_per_bin: Cap per bin (default 512).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -854,37 +722,16 @@ def register(mcp: FastMCP) -> None:
         max_overlap_chunks: int = 256,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Analyze the live glibc heap for House-of-* / exploit primitives.
-
-        Runs a registry of heuristic detectors (house of spirit / einherjar /
-        force / lore, tcache poisoning, tcache / fastbin double-free, house of
-        botcake, unsafe unlink, overlapping chunks, top-chunk exhaustion,
-        large-bin attack, mmap chunk scan) over one consistent snapshot of the
-        arena's fastbins, tcache and regular bins.  Every finding carries raw
-        evidence, a confidence label, the existing MCP tools that can confirm
-        it, and a one-line playbook; a heuristic is never promoted to a fact.
-
-        The aggregate ``verdict`` is ``clean`` (nothing observed),
-        ``suspicious`` (only low/medium findings), ``exploitable`` (any
-        critical/high finding), ``unsupported`` (non-glibc target -- this
-        surface is glibc-specific and the family-routed dispatch returns
-        ``unsupported`` on jemalloc / libmalloc / unknown allocators), or
-        ``unresolvable`` (arena bin layout could not be resolved via debug
-        symbols).  The ``mmap_chunk_scan`` detector is a bounded sweep of
-        writable non-heap mappings (``mmap_max_mappings`` mappings, at most
-        ``mmap_max_bytes`` total) for ``IS_MMAPPED`` chunk headers.
+        """Check live glibc heap for exploit primitives; verdict clean/suspicious/exploitable.
 
         Args:
-            session_id: Debugger session whose live inferior should be inspected.
-            arena_address: Optional hex/decimal arena address (typically from
-                ``list_arenas``).  Omit to analyze main_arena.
-            techniques: Optional subset of technique names to evaluate.  Omit
-                for the full detector registry.
-            scan_mmap_mappings: Run the bounded mmap-chunk scan.
-            mmap_max_mappings: Cap on writable mappings scanned for mmap chunks.
-            mmap_max_bytes: Cap on total bytes scanned for mmap chunks.
-            max_overlap_chunks: Cap on free chunks considered for pairwise
-                range-overlap detection.
+            session_id: Session to inspect.
+            arena_address: Arena addr; omitted => main_arena.
+            techniques: Subset to run; omitted => all detectors.
+            scan_mmap_mappings: Run bounded mmap scan.
+            mmap_max_mappings: Mapping cap.
+            mmap_max_bytes: Byte cap.
+            max_overlap_chunks: Overlap check cap.
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -917,27 +764,13 @@ def register(mcp: FastMCP) -> None:
         max_chunks: int = 512,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Scan writable mappings for dangling references into freed chunks.
-
-        Collects the user ranges of every currently-freed chunk (fastbins +
-        tcache + regular bins), then scans writable mappings for live 8-byte
-        pointers whose value lands inside one of those ranges -- the signature
-        of a use-after-free.  The scan is bounded (``max_bytes`` total,
-        ``max_mappings`` mappings, ``max_chunks`` freed chunks) and excludes
-        the allocator's own bookkeeping (bin link slots, the arena struct, the
-        tcache struct) so its own metadata never reads as user data.
-
-        Verdicts: ``no_dangling_references``, ``dangling_references_found``,
-        ``unsupported`` (non-glibc), or ``unresolvable`` (arena bin layout
-        could not be resolved).  Each candidate carries the pointer's own
-        address, the pointer value, the freed chunk it points into, and the
-        offset of the target within that chunk's user area.
+        """Scan for dangling pointers into freed chunks (UAF, bounded).
 
         Args:
-            session_id: Debugger session whose live inferior should be inspected.
-            max_bytes: Cap on total bytes scanned across all mappings.
-            max_mappings: Cap on writable mappings scanned.
-            max_chunks: Cap on freed chunks considered as targets.
+            session_id: Session to inspect.
+            max_bytes: Byte cap across mappings.
+            max_mappings: Mapping cap.
+            max_chunks: Freed-chunk cap.
         """
         services = get_services(ctx)
         session = resolve_debug_session(

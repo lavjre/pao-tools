@@ -8,10 +8,9 @@ from paomcp.lifespan import create_lifespan
 from paomcp.services import AppServices
 from paomcp.tools import register_all_tools
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
+# Logging is centralized in paomcp.logger; do not call basicConfig here so
+# embedding apps and tests keep control of their handlers.
+logger = logging.getLogger(__name__)
 
 
 def create_mcp(services: Optional[AppServices] = None) -> FastMCP:

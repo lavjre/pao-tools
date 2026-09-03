@@ -30,6 +30,30 @@ class GitTools:
         os.makedirs(self.workspace_dir, exist_ok=True)
         logger.info(f"Git workspace initialized at: {self.workspace_dir}")
 
+    ALLOWED_SCHEMES = (
+        "https://",
+        "http://",
+        "git@github.com:",
+        "git@gitlab.com:",
+        "ssh://git@",
+    )
+
+    def _validate_repo_url(self, repo_url: str) -> Optional[Dict[str, Any]]:
+        lowered = repo_url.strip().lower()
+        if lowered.startswith(("ext::", "fd::", "file://", "ftp://", "ftps://")):
+            return {
+                "success": False,
+                "error": f"Blocked unsafe git URL scheme in '{repo_url}'; use https:// or explicit ssh",
+                "type": "ValueError",
+            }
+        if not lowered.startswith(self.ALLOWED_SCHEMES):
+            return {
+                "success": False,
+                "error": f"repo_url must start with one of {self.ALLOWED_SCHEMES}; got '{repo_url}'",
+                "type": "ValueError",
+            }
+        return None
+
     def fetch_repo(
         self,
         repo_url: str,
@@ -48,6 +72,9 @@ class GitTools:
         :param overwrite: Whether to replace an existing target directory
         :returns: Dictionary with fetch results including path and status
         """
+        rejected = self._validate_repo_url(repo_url)
+        if rejected is not None:
+            return rejected
         try:
             # Extract repo name if target_dir not specified
             if not target_dir:
@@ -130,9 +157,10 @@ class GitTools:
                         text=True,
                     )
 
-                # First, fetch the specific ref if needed
+                # First, fetch the specific ref if needed. The explicit --
+                # separator blocks leading-dash option injection via version.
                 fetch_result = subprocess.run(
-                    ["git", "fetch", "origin", version],
+                    ["git", "fetch", "origin", "--", version],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
@@ -140,7 +168,7 @@ class GitTools:
 
                 # Try to checkout the version
                 checkout_result = subprocess.run(
-                    ["git", "checkout", version],
+                    ["git", "checkout", "--", version],
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
@@ -149,7 +177,7 @@ class GitTools:
                 if checkout_result.returncode != 0:
                     # Try as a remote branch
                     checkout_result = subprocess.run(
-                        ["git", "checkout", "-b", version, f"origin/{version}"],
+                        ["git", "checkout", "-b", version, "--", f"origin/{version}"],
                         cwd=repo_path,
                         capture_output=True,
                         text=True,

@@ -106,7 +106,7 @@ tool answers in the same envelope.
 
 ## Response API
 
-The current server contract exposes 163 MCP tools. Every tool returns the same
+The current server contract exposes 188 MCP tools. Every tool returns the same
 `api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
@@ -136,8 +136,10 @@ bytes. Artifacts are retrieved losslessly with `read_artifact` byte ranges.
 }
 ```
 
-When `data` exceeds `PAO_INLINE_RESPONSE_BYTES` (1 MiB by default), it becomes
-an artifact descriptor:
+When `data` exceeds `PAO_INLINE_RESPONSE_BYTES` (32 KiB by default), it becomes
+an artifact descriptor. Inline copies stay token-lean: verbose
+`raw_responses` are summarized and very long lists are capped with exact
+totals, while the full payload remains lossless in the artifact:
 
 ```json
 {
@@ -219,7 +221,7 @@ claude plugin marketplace add git@github.com:lavjre/pao-tools.git
 claude plugin install pao-tools@pao-tools
 ```
 
-After install, the `pao-tools` MCP server appears as a stdio server and its 163
+After install, the `pao-tools` MCP server appears as a stdio server and its 188
 tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
 available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
 (`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
@@ -285,6 +287,27 @@ the server queries the pwndbg instance inside its own runtime and records a non-
 compatibility report. Use `get_debugger_capabilities`, `list_pwndbg_commands`, and
 `get_pwndbg_command_help` instead of assuming commands found in another environment
 are installed in pao-tools.
+
+## IDA Pro MCP bridge
+
+`pao-tools` speaks to an already running
+[mrexodia/ida-pro-mcp](https://github.com/mrexodia/ida-pro-mcp) server instead of
+reimplementing IDA analysis. Configure endpoints (defaults target a local IDA):
+
+```bash
+PAO_IDA_MCP_URL=http://127.0.0.1:13337/mcp    # GUI / legacy SSE
+PAO_IDALIB_MCP_URL=http://127.0.0.1:8745/mcp  # headless idalib supervisor
+```
+
+Flow: `ida_idb_open(path)` returns a session id, pass it as `database` to
+`ida_decompile` / `ida_disasm` / `ida_list_funcs` / `ida_xrefs_to` /
+`ida_py_eval` / `ida_rename`, then `ida_idb_close`. Debugger tools
+(`ida_dbg_start` / `continue` / `run_to` / `step` / `bps` / `add_bp` /
+`regs` / `stacktrace` / `read` / `write`) need the IDA side started with
+`?ext=dbg` and auto-append it. When IDA is not running,
+`get_ida_status` reports `ready: false` and every bridge tool degrades to a
+typed verdict instead of failing startup. Bridge defaults are token-lean
+(limit 100, max 1000) and large payloads spill to artifacts like the rest.
 
 ## Scope and limits
 

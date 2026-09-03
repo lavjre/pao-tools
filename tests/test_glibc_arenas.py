@@ -583,7 +583,9 @@ class TestListArenas:
     def test_traversal_cap_marks_truncated(self, monkeypatch):
         # Shrink the traversal cap so the test stays fast, then build an
         # arena chain that never returns to main.
-        monkeypatch.setattr("paomcp.tools.backends.heap.MAX_ARENAS_TRAVERSAL", 4)
+        monkeypatch.setattr(
+            "paomcp.tools.backends.heap_glibc_arenas.MAX_ARENAS_TRAVERSAL", 4
+        )
         arenas, gdb = build_arenas()
         next_offset = STANDARD_OFFSETS_X86_64["next"]
         # main -> 0x111 -> 0x222 -> 0x333 -> 0x444 -> 0x555 (never returns)

@@ -48,6 +48,26 @@ def test_stage6_9_smoke_and_one_gadget_are_pinned_in_the_docker_image():
     assert "one_gadget --version" in dockerfile
 
 
+def test_pwndbg_and_pwninit_downloads_are_pinned_and_verified():
+    dockerfile = _read("Dockerfile")
+
+    assert "ARG PWNDBG_VERSION=2026.02.18" in dockerfile
+    assert (
+        'ARG PWNDBG_SHA256_X86_64="eeb93972d7910bf8233abf296b00577efb7137d94655502985566a328e5cecce"'
+        in dockerfile
+    )
+    assert (
+        'ARG PWNDBG_SHA256_ARM64="8d74a4be037281aaa37b51a046a625d3055a87ebb2397553292bcae321be169f"'
+        in dockerfile
+    )
+    assert "${PWNDBG_SHA256}  /tmp/pwndbg.tar.xz" in dockerfile
+    assert "ARG PWNINIT_VERSION=3.3.1" in dockerfile
+    assert 'ARG PWNINIT_SHA256="' in dockerfile
+    assert "releases/download/${PWNINIT_VERSION}/pwninit" in dockerfile
+    assert "${PWNINIT_SHA256}  /usr/local/bin/pwninit" in dockerfile
+    assert "pwninit --version" in dockerfile
+
+
 def test_helper_venv_is_baked_outside_the_runtime_volume():
     dockerfile = _read("Dockerfile")
     service = _read("paomcp.service")

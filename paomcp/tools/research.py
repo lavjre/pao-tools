@@ -247,36 +247,17 @@ def register(mcp: FastMCP) -> None:
         metadata: Optional[Mapping[str, Any]] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Record one event on a research session's append-only timeline.
-
-        Notes / snapshots / hypothesis changes / evidence links append
-        their own events automatically; this tool is for the events a
-        caller wants to record explicitly -- most commonly ``tool_call``
-        (a significant tool ran), ``debug_stop`` (target hit a stop of
-        interest), ``crash`` (linked separately from the crash record),
-        ``reproduction`` (managed to reproduce a bug), or ``other``.
-
-        The timeline is bounded to
-        DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION (2000).  On overflow
-        the oldest event is dropped and the new event's metadata
-        carries ``dropped_oldest_for_cap = True`` so the pruning is
-        never silent.
+        """Append event to research timeline (cap 2000, oldest dropped openly).
 
         Args:
-            session_id: Research session to append into.
-            kind: One of tool_call / debug_stop / crash / note /
-                snapshot / hypothesis_change / reproduction / artifact
-                / other.
-            summary: One-line human summary (required).
-            ref: Optional opaque reference (crash id, artifact id,
-                tool-call operation id, ...).
-            hypothesis_id: Optional hypothesis this event bears on;
-                must already exist in the session.
-            note_id: Optional note this event corresponds to; must
-                already exist in the session.
-            snapshot_id: Optional snapshot this event corresponds to;
-                must already exist in the session.
-            metadata: Optional arbitrary metadata dict.
+            session_id: Research session id.
+            kind: tool_call/debug_stop/crash/note/snapshot/reproduction/other.
+            summary: One-line summary.
+            ref: Opaque ref (crash/artifact/operation id).
+            hypothesis_id: Existing hypothesis id, if relevant.
+            note_id: Existing note id, if relevant.
+            snapshot_id: Existing snapshot id, if relevant.
+            metadata: Extra dict.
         """
         services = get_services(ctx)
         return services.research_registry.append_timeline_event_response(

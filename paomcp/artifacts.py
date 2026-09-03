@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypeVar
 from pydantic import BaseModel
 
 DEFAULT_INLINE_RESPONSE_BYTES = int(
-    os.environ.get("PAO_INLINE_RESPONSE_BYTES", str(1024 * 1024))
+    os.environ.get("PAO_INLINE_RESPONSE_BYTES", str(32 * 1024))
 )
 DEFAULT_ARTIFACT_CHUNK_BYTES = int(
     os.environ.get("PAO_ARTIFACT_CHUNK_BYTES", str(256 * 1024))
@@ -440,6 +440,30 @@ class ArtifactStore:
             return None
         return marker_path
 
+    def _protect_staging_name(self, staging_path: str, reserved_bytes: int) -> None:
+        """Reserve a staging name in memory while its generator runs unlocked.
+
+        Orphan reconciliation consults this set (see
+        :meth:`reconcile_orphans`), so a slow generator can safely run without
+        holding ``_write_lock``.  Unlike :meth:`_mark_staging_path_protected`
+        this writes no durable marker: a crashed process must leave a plain
+        orphan that grace-period reconciliation reaps, exactly as before.
+        """
+        staging_name = os.path.basename(staging_path)
+        with self._write_lock:
+            self._protected_staging_names.add(staging_name)
+            self._protected_staging_reservations[staging_name] = max(
+                reserved_bytes,
+                self._protected_staging_reservations.get(staging_name, 0),
+            )
+
+    def _unprotect_staging_path(self, staging_path: str) -> None:
+        """Release a :meth:`_protect_staging_name` reservation."""
+        staging_name = os.path.basename(staging_path)
+        with self._write_lock:
+            self._protected_staging_names.discard(staging_name)
+            self._protected_staging_reservations.pop(staging_name, None)
+
     def _quarantine_staging_path(self, staging_path: str, reserved_bytes: int) -> str:
         """Keep a possibly active staging inode reachable and protected.
 
@@ -611,8 +635,15 @@ class ArtifactStore:
         The trusted generator receives a private path on the artifact filesystem.
         ``reserve_bytes`` is used for policy preflight before generation, while
         ``max_size_bytes`` is a hard acceptance limit on the completed file.  The
-        write lock remains held through generation, hashing, and finalization so
-        cleanup cannot reclaim the active staging path.
+        write lock is held only for reservation, hashing, and finalization --
+        never while the generator itself runs -- so one slow core-dump or
+        Ghidra staging no longer starves every other save/cleanup.  During
+        generation the staging name carries an in-memory protection (worst-case
+        ``max_size_bytes`` reservation) so orphan reconciliation cannot reclaim
+        it; the reservation is released on success and on ordinary failure.
+        A crashed process leaves no durable marker on this path, so a leftover
+        staging file is still reaped after the orphan grace period, exactly as
+        before.
         """
         if reserve_bytes < 0:
             raise ValueError("reserve_bytes cannot be negative")
@@ -642,13 +673,15 @@ class ArtifactStore:
                     self.dir_quota_enforcer(self.root_dir, max_size_bytes)
                 if cancellation_check is not None:
                     cancellation_check()
+                self._protect_staging_name(staging_path, max_size_bytes)
 
-                try:
-                    generator_result = generator(staging_path)
-                except WriterNotQuiescentError:
-                    # Preserve/protect while still holding the same lock used by
-                    # reconciliation, closing the delete-before-quarantine race.
-                    preserve_staging = True
+            try:
+                generator_result = generator(staging_path)
+            except WriterNotQuiescentError:
+                # Preserve/protect while holding the same lock used by
+                # reconciliation, closing the delete-before-quarantine race.
+                preserve_staging = True
+                with self._write_lock:
                     try:
                         self._quarantine_staging_path(staging_path, max_size_bytes)
                     except OSError:
@@ -660,6 +693,10 @@ class ArtifactStore:
                             staging_path,
                         )
                     raise
+            # Finalize under the write lock again (the generator ran
+            # without it). The staging name stays protected until
+            # adoption succeeds, so reconciliation still skips it.
+            with self._write_lock:
                 if cancellation_check is not None:
                     cancellation_check()
 
@@ -793,16 +830,21 @@ class ArtifactStore:
                         except OSError:
                             pass
                         raise
+                self._unprotect_staging_path(staging_path)
                 return metadata, generator_result
         finally:
-            # The rename makes staging_path disappear on success.  Every other
-            # failure — generator errors, cancellation during hashing — lands
-            # here and unlinks the private staging file.
+            # The rename makes staging_path disappear on success (whose
+            # reservation was already released before the return).  Every
+            # other failure — generator errors, cancellation during hashing —
+            # lands here, unlinks the private staging file, and releases the
+            # reservation so quota accounting does not leak.  Quarantined
+            # paths keep their durable protection and are skipped here.
             if staging_path and not preserve_staging:
                 try:
                     self._remove_staging_path(staging_path)
                 except FileNotFoundError:
                     pass
+                self._unprotect_staging_path(staging_path)
 
     def get(self, artifact_id: str) -> ArtifactMetadata:
         """Load metadata for an existing artifact."""

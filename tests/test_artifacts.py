@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -537,7 +538,10 @@ def test_orphan_reconciliation_waits_for_active_generator(tmp_path):
         reconciliation_thread = threading.Thread(target=reconcile)
         reconciliation_thread.start()
         assert reconciliation_started.wait(timeout=1)
-        assert reconciliation_finished.wait(timeout=0.05) is False
+        # Vong 3 contract: reconciliation is no longer blocked by the write
+        # lock while a generator runs, but it must skip the protected
+        # staging path (grace_seconds=0 would otherwise reap it).
+        assert reconciliation_finished.wait(timeout=5) is True
         assert Path(staging_path).is_file()
         return "done"
 
@@ -553,6 +557,54 @@ def test_orphan_reconciliation_waits_for_active_generator(tmp_path):
     assert reconciliation_finished.is_set()
     assert result == "done"
     assert store.get(artifact.artifact_id) == artifact
+
+
+def test_concurrent_generated_saves_do_not_serialize_on_generator(tmp_path):
+    store = ArtifactStore(str(tmp_path), quota_bytes=0, min_free_bytes=0)
+    slow_started = threading.Event()
+    slow_release = threading.Event()
+
+    def slow_generator(staging_path):
+        Path(staging_path).write_bytes(b"slow")
+        slow_started.set()
+        assert slow_release.wait(timeout=10)
+        return "slow"
+
+    results = {}
+
+    def run_slow():
+        results["slow"] = store.save_generated_file(
+            slow_generator,
+            reserve_bytes=16,
+            max_size_bytes=64,
+            tool="slow",
+        )
+
+    slow_thread = threading.Thread(target=run_slow)
+    slow_thread.start()
+    assert slow_started.wait(timeout=5)
+
+    def fast_generator(staging_path):
+        Path(staging_path).write_bytes(b"fast")
+        return "fast"
+
+    started = time.monotonic()
+    artifact, result = store.save_generated_file(
+        fast_generator,
+        reserve_bytes=16,
+        max_size_bytes=64,
+        tool="fast",
+    )
+    elapsed = time.monotonic() - started
+    assert result == "fast"
+    # The fast save must not wait for the slow generator: the write lock is
+    # only held for reservation/finalization, never during generation.
+    assert elapsed < 5
+    assert store.get(artifact.artifact_id) == artifact
+
+    slow_release.set()
+    slow_thread.join(timeout=10)
+    assert results["slow"][1] == "slow"
 
 
 def test_generated_file_rechecks_quota_for_actual_size(tmp_path):

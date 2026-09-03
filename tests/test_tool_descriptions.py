@@ -71,10 +71,37 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 163
+    assert len(tools) == 188
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
+    assert {
+        "get_ida_status",
+        "ida_decompile",
+        "ida_disasm",
+        "ida_list_funcs",
+        "ida_lookup",
+        "ida_xrefs_to",
+        "ida_get_bytes",
+        "ida_get_string",
+        "ida_find_bytes",
+        "ida_py_eval",
+        "ida_rename",
+        "ida_set_comments",
+        "ida_idb_open",
+        "ida_idb_list",
+        "ida_idb_close",
+        "ida_dbg_start",
+        "ida_dbg_continue",
+        "ida_dbg_run_to",
+        "ida_dbg_step",
+        "ida_dbg_bps",
+        "ida_dbg_add_bp",
+        "ida_dbg_regs",
+        "ida_dbg_stacktrace",
+        "ida_dbg_read",
+        "ida_dbg_write",
+    } <= tool_names
     assert {"detect_allocator", "get_allocator_capabilities"} <= tool_names
     assert {"inspect_chunk", "validate_chunk"} <= tool_names
     assert {"list_arenas", "inspect_arena"} <= tool_names

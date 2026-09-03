@@ -94,7 +94,7 @@ class PythonTools:
         script_path: str,
         args: Optional[List[str]] = None,
         cwd: Optional[str] = None,
-        timeout: float = 300.0,
+        timeout: Optional[float] = 300.0,
     ) -> Dict[str, Any]:
         """
         Execute an existing Python script in the shared venv.
@@ -102,9 +102,12 @@ class PythonTools:
         :param script_path: Path to the Python script to execute
         :param args: Arguments to pass to the script
         :param cwd: Working directory for script execution
-        :param timeout: Execution timeout in seconds
+        :param timeout: Execution timeout in seconds (clamped to 30-600s)
         :returns: Execution results with stdout, stderr, and status
         """
+        from paomcp.tools.backends.timeouts import clamp_timeout
+
+        timeout = clamp_timeout(timeout, default=300.0)
         try:
             # Build command
             python_exe = os.path.join(self.venv_path, "bin", "python")
@@ -146,7 +149,7 @@ class PythonTools:
             }
 
     def execute_code(
-        self, code: str, cwd: Optional[str] = None, timeout: float = 300.0
+        self, code: str, cwd: Optional[str] = None, timeout: Optional[float] = 300.0
     ) -> Dict[str, Any]:
         """
         Execute ad-hoc Python code using a temporary runtime script.

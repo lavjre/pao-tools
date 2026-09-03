@@ -190,7 +190,17 @@ def resolve_workspace_cwd(
         cwd, workspace_root=workspace_root, require_exists=False, kind="cwd"
     )
     os.makedirs(resolved, exist_ok=True)
-    return resolved
+    # Re-check after makedirs: a symlinked parent (e.g. /workspace/link -> /etc)
+    # would otherwise let makedirs create directories outside the workspace.
+    workspace_real = os.path.realpath(workspace_root)
+    cwd_real = os.path.realpath(resolved)
+    try:
+        contained = os.path.commonpath([cwd_real, workspace_real]) == workspace_real
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(f"cwd resolves outside the configured workspace: '{cwd}'")
+    return cwd_real
 
 
 def resolve_workspace_file(

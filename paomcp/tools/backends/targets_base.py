@@ -1,0 +1,371 @@
+"""Shared target descriptor model (vong 5 split; providers live in targets_*)."""
+
+from __future__ import annotations
+
+import os
+import shlex
+import signal
+import subprocess
+import threading
+import time
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
+
+from paomcp.tools.backends.foundation import build_backend_response, parse_int
+from paomcp.tools.backends.gdb import GdbController
+
+PARSER_VERSION = "1"
+TARGET_CREATE_SCHEMA = "pao.target-create.v1"
+TARGET_LIST_SCHEMA = "pao.target-list.v1"
+TARGET_STATUS_SCHEMA = "pao.target-status.v1"
+TARGET_CAPABILITIES_SCHEMA = "pao.target-capabilities.v1"
+TARGET_START_SCHEMA = "pao.target-start.v1"
+TARGET_STOP_SCHEMA = "pao.target-stop.v1"
+TARGET_ATTACH_SCHEMA = "pao.target-attach.v1"
+TARGET_CONNECT_SCHEMA = "pao.target-connect.v1"
+TARGET_DISCONNECT_SCHEMA = "pao.target-disconnect.v1"
+TARGET_FILE_SYNC_SCHEMA = "pao.target-file-sync.v1"
+TARGET_FETCH_LIBS_SCHEMA = "pao.target-fetch-libs.v1"
+
+DEFAULT_MAX_TARGETS_PER_SESSION = 8
+DEFAULT_TARGET_START_TIMEOUT_SEC = 15.0
+DEFAULT_TARGET_STOP_TIMEOUT_SEC = 10.0
+DEFAULT_GDBSERVER_LISTEN_TIMEOUT_SEC = 10.0
+DEFAULT_TCP_PROBE_TIMEOUT_SEC = 3.0
+DEFAULT_SSH_CONNECT_TIMEOUT_SEC = 10.0
+DEFAULT_DOCKER_TIMEOUT_SEC = 30.0
+DEFAULT_QEMU_LISTEN_TIMEOUT_SEC = 10.0
+DEFAULT_LIBC_FETCH_PATHS: Tuple[str, ...] = (
+    "/lib/x86_64-linux-gnu/libc.so.6",
+    "/lib64/libc.so.6",
+    "/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
+    "/lib64/ld-linux-x86-64.so.2",
+    "/lib/ld-musl-x86_64.so.1",
+    "/lib/i386-linux-gnu/libc.so.6",
+    "/lib/ld-linux.so.2",
+)
+
+
+class TargetKind(str, Enum):
+    """Every provider surface we intend to ship in Stage 8."""
+
+    LOCAL_PROCESS = "local_process"
+    ATTACH_PID = "attach_pid"
+    GDBSERVER = "gdbserver"
+    TCP_REMOTE = "tcp_remote"
+    SSH = "ssh"
+    DOCKER = "docker"
+    QEMU_USER = "qemu_user"
+    QEMU_SYSTEM = "qemu_system"
+
+
+class TargetState(str, Enum):
+    """Lifecycle states any provider transitions through."""
+
+    CREATED = "created"  # spec accepted, not started
+    STARTING = "starting"  # start() in progress
+    RUNNING = "running"  # process alive, not yet attached
+    CONNECTED = "connected"  # remote transport open, not yet attached
+    ATTACHED = "attached"  # a debugger session is bound to this target
+    DETACHED = "detached"  # attach released; process may still be alive
+    STOPPED = "stopped"  # process gone (killed / exited)
+    DEAD = "dead"  # unrecoverable; fresh create required
+    ERROR = "error"  # last operation failed; see ``error`` field
+
+
+class TargetError(RuntimeError):
+    """Raised for spec / lifecycle / provider errors."""
+
+
+@dataclass
+class TargetSpec:
+    """User-supplied configuration for a target.
+
+    Every field is optional so a single dataclass can describe any of
+    the eight providers; :meth:`validate_for` decides at create time
+    which fields the chosen ``kind`` actually needs.
+    """
+
+    kind: TargetKind
+    name: Optional[str] = None
+    session_id: Optional[str] = None
+    # Local process / QEMU user
+    binary_path: Optional[str] = None
+    argv: List[str] = field(default_factory=list)
+    env: Dict[str, str] = field(default_factory=dict)
+    working_dir: Optional[str] = None
+    stdin_bytes: Optional[bytes] = None
+    # Attach PID
+    pid: Optional[int] = None
+    # gdbserver / TCP / SSH remote
+    host: Optional[str] = None
+    port: Optional[int] = None
+    # SSH
+    ssh_user: Optional[str] = None
+    ssh_key_path: Optional[str] = None
+    ssh_password: Optional[str] = None
+    ssh_known_hosts_path: Optional[str] = None
+    # Docker
+    docker_image: Optional[str] = None
+    docker_workdir: Optional[str] = None
+    docker_extra_args: List[str] = field(default_factory=list)
+    # QEMU user
+    qemu_binary: Optional[str] = None
+    qemu_ld_prefix: Optional[str] = None
+    qemu_extra_args: List[str] = field(default_factory=list)
+    # QEMU system
+    kernel_path: Optional[str] = None
+    initrd_path: Optional[str] = None
+    disk_path: Optional[str] = None
+    kernel_cmdline: Optional[str] = None
+    qemu_memory: Optional[str] = None
+    qemu_machine: Optional[str] = None
+    # Metadata (informational)
+    arch: Optional[str] = None
+    platform: Optional[str] = None
+    notes: Optional[str] = None
+    # Debugger backend request ("gdb" | "lldb" | "auto") for the owning session
+    backend: Optional[str] = None
+
+    @classmethod
+    def from_config(
+        cls,
+        kind: str,
+        config: Optional[Mapping[str, Any]] = None,
+        *,
+        session_id: Optional[str] = None,
+    ) -> "TargetSpec":
+        """Build a spec from a loosely-typed dict (as an MCP tool arg)."""
+        try:
+            resolved_kind = TargetKind(kind)
+        except ValueError as exc:
+            raise TargetError(
+                f"unknown target kind {kind!r}; expected one of "
+                f"{[k.value for k in TargetKind]}"
+            ) from exc
+        config = dict(config or {})
+        spec = cls(kind=resolved_kind, session_id=session_id)
+        for attr in (
+            "name",
+            "binary_path",
+            "working_dir",
+            "host",
+            "ssh_user",
+            "ssh_key_path",
+            "ssh_password",
+            "ssh_known_hosts_path",
+            "docker_image",
+            "docker_workdir",
+            "qemu_binary",
+            "qemu_ld_prefix",
+            "kernel_path",
+            "initrd_path",
+            "disk_path",
+            "kernel_cmdline",
+            "qemu_memory",
+            "qemu_machine",
+            "arch",
+            "platform",
+            "notes",
+            "backend",
+        ):
+            if attr in config and config[attr] is not None:
+                setattr(spec, attr, str(config[attr]))
+        for int_attr in ("pid", "port"):
+            if int_attr in config and config[int_attr] is not None:
+                parsed = parse_int(config[int_attr])
+                if parsed is None:
+                    raise TargetError(
+                        f"'{int_attr}' must be an integer, got {config[int_attr]!r}"
+                    )
+                setattr(spec, int_attr, parsed)
+        for list_attr in ("argv", "docker_extra_args", "qemu_extra_args"):
+            if list_attr in config and config[list_attr] is not None:
+                raw = config[list_attr]
+                if isinstance(raw, str):
+                    raw = shlex.split(raw)
+                spec_list: List[str] = [str(item) for item in raw]
+                setattr(spec, list_attr, spec_list)
+        if "env" in config and config["env"] is not None:
+            env_dict = config["env"]
+            if not isinstance(env_dict, Mapping):
+                raise TargetError("env must be a mapping of name->value strings")
+            spec.env = {str(k): str(v) for k, v in env_dict.items()}
+        if "stdin_bytes" in config and config["stdin_bytes"] is not None:
+            raw = config["stdin_bytes"]
+            if isinstance(raw, str):
+                spec.stdin_bytes = raw.encode("utf-8")
+            elif isinstance(raw, (bytes, bytearray)):
+                spec.stdin_bytes = bytes(raw)
+            else:
+                raise TargetError("stdin_bytes must be bytes or a str")
+        spec.validate_for(resolved_kind)
+        return spec
+
+    def validate_for(self, kind: TargetKind) -> None:
+        """Fail fast when the spec is missing fields the provider needs."""
+        if kind == TargetKind.LOCAL_PROCESS:
+            if not self.binary_path:
+                raise TargetError("local_process requires 'binary_path'")
+            if not os.path.isabs(self.binary_path):
+                # Accept relative but flag it -- silent cwd surprises
+                # are a recurring debug-session footgun.
+                pass
+        elif kind == TargetKind.ATTACH_PID:
+            if self.pid is None or self.pid <= 0:
+                raise TargetError("attach_pid requires a positive 'pid'")
+        elif kind == TargetKind.GDBSERVER:
+            if not self.binary_path and self.pid is None:
+                raise TargetError(
+                    "gdbserver requires 'binary_path' (to spawn) or 'pid' (to attach)"
+                )
+        elif kind == TargetKind.TCP_REMOTE:
+            if not self.host or self.port is None:
+                raise TargetError("tcp_remote requires 'host' and 'port'")
+        elif kind == TargetKind.SSH:
+            if not self.host:
+                raise TargetError("ssh requires 'host'")
+            if not self.ssh_user:
+                raise TargetError("ssh requires 'ssh_user'")
+            if not (self.ssh_key_path or self.ssh_password):
+                raise TargetError(
+                    "ssh requires either 'ssh_key_path' or 'ssh_password'"
+                )
+        elif kind == TargetKind.DOCKER:
+            if not self.docker_image:
+                raise TargetError("docker requires 'docker_image'")
+        elif kind == TargetKind.QEMU_USER:
+            if not self.binary_path:
+                raise TargetError("qemu_user requires 'binary_path'")
+            if not self.qemu_binary:
+                raise TargetError(
+                    "qemu_user requires 'qemu_binary' (e.g. 'qemu-x86_64')"
+                )
+        elif kind == TargetKind.QEMU_SYSTEM:
+            if not self.qemu_binary:
+                raise TargetError(
+                    "qemu_system requires 'qemu_binary' " "(e.g. 'qemu-system-x86_64')"
+                )
+            if not (self.kernel_path or self.disk_path):
+                raise TargetError(
+                    "qemu_system requires at least one of 'kernel_path' or "
+                    "'disk_path'"
+                )
+
+
+@dataclass
+class TargetHandle:
+    """Runtime state and metadata for one target."""
+
+    target_id: str
+    kind: TargetKind
+    spec: TargetSpec
+    state: TargetState = TargetState.CREATED
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    updated_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    started_at: Optional[str] = None
+    attached_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    pid: Optional[int] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    process: Optional[subprocess.Popen] = field(default=None, repr=False)
+    error: Optional[str] = None
+    error_type: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    _lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
+
+    def _touch(self) -> None:
+        self.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def _set_state(self, state: TargetState) -> None:
+        self.state = state
+        self._touch()
+
+    def _record_error(self, exc: BaseException) -> None:
+        # Remember where we were before the failure so get_status_response can
+        # restore the live state once a remote target recovers, instead of
+        # pinning a stale ERROR (and error string) forever.
+        self.metadata["pre_error_state"] = self.state.value
+        self.error = str(exc)
+        self.error_type = type(exc).__name__
+        self.state = TargetState.ERROR
+        self._touch()
+
+    def _clear_error(self) -> None:
+        self.error = None
+        self.error_type = None
+        self.metadata.pop("pre_error_state", None)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "target_id": self.target_id,
+            "kind": self.kind.value,
+            "session_id": self.spec.session_id,
+            "name": self.spec.name,
+            "state": self.state.value,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "started_at": self.started_at,
+            "attached_at": self.attached_at,
+            "stopped_at": self.stopped_at,
+            "pid": self.pid,
+            "host": self.host,
+            "port": self.port,
+            "arch": self.spec.arch,
+            "platform": self.spec.platform,
+            "notes": self.spec.notes,
+            "error": self.error,
+            "error_type": self.error_type,
+            "metadata": dict(self.metadata),
+        }
+
+
+class TargetProvider(Protocol):
+    """Interface every provider implements.
+
+    The methods intentionally take a :class:`TargetHandle` in *and*
+    mutate it in place -- they never return a new object -- so the
+    registry stays authoritative and callers never juggle stale copies.
+    """
+
+    kind: TargetKind
+
+    def start(self, handle: TargetHandle) -> None: ...
+
+    def stop(self, handle: TargetHandle, *, timeout_sec: float = ...) -> None: ...
+
+    def attach_debugger(
+        self, handle: TargetHandle, gdb: GdbController
+    ) -> Dict[str, Any]: ...
+
+    def get_capabilities(self, handle: TargetHandle) -> Dict[str, Any]: ...
+
+    def check_alive(self, handle: TargetHandle) -> Optional[bool]:
+        """Return a definitive liveness signal, or ``None`` when the provider
+        has no cheap probe (callers then leave the handle untouched).
+
+        ``get_status_response`` re-polls this so a transient failure cannot
+        pin a target in ERROR forever after the underlying process /
+        container / ssh transport has recovered.
+        """
+        return None

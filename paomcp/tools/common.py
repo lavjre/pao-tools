@@ -105,6 +105,84 @@ def _missing_artifact_ids(
     return sorted(missing)
 
 
+TOKEN_INLINE_RAW_BUDGET_BYTES = int(os.environ.get("PAO_TOKEN_RAW_BUDGET", "8192"))
+TOKEN_INLINE_LIST_KEEP = int(os.environ.get("PAO_TOKEN_LIST_KEEP", "50"))
+TOKEN_RAW_PREVIEW_ITEMS = 2
+
+
+def _summarize_raw_for_tokens(data: Any, warnings: list[str]) -> Any:
+    """Strip verbose raw evidence from inline payloads to save LLM tokens.
+
+    Full payloads that exceed the artifact threshold are still stored
+    losslessly (see below). This only trims the inline copy that stays in
+    context: ``raw_responses`` duplicates ``parsed`` and is the dominant
+    token burner. Small payloads pass through untouched so unit tests and
+    tiny queries keep exact shape.
+    """
+    if not isinstance(data, dict):
+        return data
+    raw = data.get("raw_responses")
+    if raw is None:
+        return data
+    try:
+        raw_size = len(
+            json.dumps(raw, separators=(",", ":"), default=str).encode("utf-8")
+        )
+    except Exception:
+        return data
+    if raw_size <= TOKEN_INLINE_RAW_BUDGET_BYTES:
+        return data
+    omitted: int
+    preview: Any
+    if isinstance(raw, list):
+        omitted = max(0, len(raw) - TOKEN_RAW_PREVIEW_ITEMS)
+        preview = raw[:TOKEN_RAW_PREVIEW_ITEMS]
+    elif isinstance(raw, dict):
+        keys = list(raw.keys())
+        omitted = max(0, len(keys) - TOKEN_RAW_PREVIEW_ITEMS)
+        preview = {k: raw[k] for k in keys[:TOKEN_RAW_PREVIEW_ITEMS]}
+    else:
+        text = str(raw)
+        omitted = max(0, len(text) - TOKEN_INLINE_RAW_BUDGET_BYTES)
+        preview = text[:TOKEN_INLINE_RAW_BUDGET_BYTES]
+    data = dict(data)
+    data["raw_responses"] = {
+        "truncated_for_tokens": True,
+        "total_bytes": raw_size,
+        "omitted_entries": omitted,
+        "preview": preview,
+        "note": "Full output spilled to artifact when over inline limit; parsed field is authoritative",
+    }
+    warnings.append(
+        "raw_responses summarized for token efficiency; parsed field retained in full"
+    )
+    return data
+
+
+def _truncate_long_lists(data: Any, warnings: list[str]) -> Any:
+    """Cap very long inline lists (gadgets/strings/mappings) with explicit counts."""
+    if not isinstance(data, dict):
+        return data
+    mutated = False
+    trimmed = dict(data)
+    for key, value in list(trimmed.items()):
+        if isinstance(value, list) and len(value) > TOKEN_INLINE_LIST_KEEP * 4:
+            # Keep head for context, report exact totals. Full list still goes
+            # to artifact when the payload exceeds the inline threshold.
+            trimmed[key] = value[:TOKEN_INLINE_LIST_KEEP]
+            trimmed[f"{key}_truncated"] = {
+                "returned": TOKEN_INLINE_LIST_KEEP,
+                "total": len(value),
+                "note": f"Showing first {TOKEN_INLINE_LIST_KEEP}; full list in artifact if spilled, else re-query with limit",
+            }
+            mutated = True
+    if mutated:
+        warnings.append(
+            f"Long lists capped at {TOKEN_INLINE_LIST_KEEP} inline entries with totals; full data in artifact when spilled"
+        )
+    return trimmed
+
+
 def build_tool_response(
     tool: str,
     result: Any,
@@ -119,8 +197,10 @@ def build_tool_response(
 ) -> Dict[str, Any]:
     """Normalize a tool result into the versioned public response envelope.
 
-    Payloads are preserved in full. This function does not truncate stdout,
-    debugger responses, decompiled code, events, or any other tool data.
+    Large payloads spill losslessly to artifacts instead of being silently
+    truncated. Inline copies are token-trimmed (raw_responses summarized,
+    very long lists capped) with explicit counts so the LLM never pays
+    full raw bytes just to read a summary.
     """
     if isinstance(result, ToolResponse):
         response = result
@@ -186,14 +266,39 @@ def build_tool_response(
     )
 
     if auto_artifact and artifact_store is not None and response.data is not None:
-        serialized_data = artifact_store.serialize_json(response.data)
-        if artifact_store.should_store(serialized_data):
+        serialized_full = artifact_store.serialize_json(response.data)
+        if artifact_store.should_store(serialized_full):
             artifact = artifact_store.save_json_bytes(
-                serialized_data,
+                serialized_full,
                 tool=tool,
                 session_id=session_id,
             )
             response.data = artifact.to_dict()
+            # Attach a token-lean summary alongside the artifact descriptor
+            # when the backend provided parsed evidence.
+            if isinstance(result, dict) and isinstance(result.get("parsed"), dict):
+                parsed = result["parsed"]
+                summary_keys = [
+                    k
+                    for k in ("total", "count", "verdict", "state", "success")
+                    if k in parsed
+                ]
+                if summary_keys:
+                    response.warnings.append(
+                        "Full payload in artifact; parsed summary keys: "
+                        + ",".join(summary_keys)
+                    )
+        else:
+            # Stays inline: trim token-heavy raw evidence, keep parsed exact.
+            trimmed = _summarize_raw_for_tokens(response.data, response.warnings)
+            trimmed = _truncate_long_lists(trimmed, response.warnings)
+            response.data = trimmed
+    else:
+        # No artifact store (tests / degraded startup): still trim inline.
+        if response.data is not None:
+            trimmed = _summarize_raw_for_tokens(response.data, response.warnings)
+            trimmed = _truncate_long_lists(trimmed, response.warnings)
+            response.data = trimmed
     return response.as_dict()
 
 

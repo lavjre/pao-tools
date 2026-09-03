@@ -14,6 +14,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         debugger_memory,
         elf_runtime,
         heap,
+        ida,
         inspect,
         kernel_slub,
         macho,
@@ -39,6 +40,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     debugger_memory.register(mcp)
     elf_runtime.register(mcp)
     heap.register(mcp)
+    ida.register(mcp)
     inspect.register(mcp)
     kernel_slub.register(mcp)
     macho.register(mcp)

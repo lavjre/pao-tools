@@ -30,38 +30,17 @@ def register(mcp: FastMCP) -> None:
         binary_path: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
-        """Run a paocli exploit script for a specific debug session.
+        """Run paocli exploit script; persistent pipe per session.
 
-        Behavior:
-        - Writes the provided script content to a per-session runtime directory
-        - Launches: uv run <session-script> debug <resolved binary> <argument>
-        - Maintains one PaoPipe per debug session
-        - Detects a single-line marker printed by paocli after attach:
-          "PAOCLI_ATTACH_RESULT:{...json...}" and exposes it as attachment.result
-        - Waits up to wait_timeout seconds for attach/output/exit before returning
-        - Stores inline script content in session runtime state; only create persistent
-          /workspace scripts when the user explicitly requests it
+        Exposes paocli_attach_result marker as attachment.result. Only create
+        persistent /workspace scripts when the user explicitly requests it.
 
         Args:
-            file: Full contents of a paocli-style Python script.
-            argument: Additional paocli arguments after "debug <binary>".
-            wait_timeout: Max time (seconds) to wait for initial attach/output/exit signal.
-            binary_path: Optional target binary path (resolved under /workspace). Use a
-                container-visible path under /workspace; relative paths resolve under
-                /workspace.
+            file: Script contents.
+            argument: Args after "debug <binary>".
+            wait_timeout: Max wait secs for attach/output.
+            binary_path: Target under /workspace.
             session_id: Debug session id.
-
-        Returns:
-            {
-              "io": {
-                "pipeinput": bool,    # whether stdin is available
-                "pipeoutput": bool,   # whether output collection succeeded for this call
-                "current_output": str # any currently buffered output consumed by this call
-              },
-              "attachment": {
-                "result": dict | None # parsed attach result from the marker if present
-              }
-            }
         """
         services = get_services(ctx)
         session = resolve_debug_session(

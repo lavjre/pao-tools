@@ -634,9 +634,12 @@ class GdbController:
 
     def set_file(self, filepath: str) -> Dict[str, Any]:
         """Load an executable file for debugging using MI command"""
-        result = self.execute_mi_command(f"-file-exec-and-symbols {filepath}")
+        result = self.execute_mi_command(
+            f"-file-exec-and-symbols {self.quote_mi_argument(filepath)}"
+        )
         # Change working directory for relative paths during debugging
-        self.execute_mi_command(f"-environment-cd {os.path.dirname(filepath)}")
+        dirname = os.path.dirname(filepath) or "."
+        self.execute_mi_command(f"-environment-cd {self.quote_mi_argument(dirname)}")
         if result["success"]:
             self._clear_stop_records()
             self._state = "stopped"
@@ -646,6 +649,26 @@ class GdbController:
 
     def attach(self, pid: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """Attach to an existing process using MI command (-target-attach)"""
+        if pid <= 1:
+            failure: Dict[str, Any] = {
+                "success": False,
+                "command": f"-target-attach {pid}",
+                "state": self._state,
+                "pid": self._inferior_pid,
+                "error": f"Refusing to attach to PID {pid}: PID 0/1 would destabilize the container host",
+                "type": "ValueError",
+            }
+            return failure, []
+        if pid == os.getpid():
+            failure = {
+                "success": False,
+                "command": f"-target-attach {pid}",
+                "state": self._state,
+                "pid": self._inferior_pid,
+                "error": "Refusing to attach to our own debugger supervisor process",
+                "type": "ValueError",
+            }
+            return failure, []
         result = self.execute_mi_command(f"-target-attach {pid}")
         if result["success"]:
             self._inferior_pid = pid
