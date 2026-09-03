@@ -107,3 +107,35 @@ def test_session_is_shared_and_close_resets():
     assert ida._session_client() is not first
     ida.close()
     ida.close()
+
+
+def test_publish_crash_builds_set_cmt_snippet(monkeypatch):
+    ida = IdaProMCP()
+    seen = {}
+
+    def fake_eval(code, database=None):
+        seen["code"] = code
+        seen["database"] = database
+        return {"success": True, "parsed": {"result": "ok"}}
+
+    monkeypatch.setattr(ida, "py_eval", fake_eval)
+    result = ida.publish_crash(
+        "0x401000", "SIGSEGV", database="db", classification="bad_ptr", note='a"b\nc'
+    )
+    assert result["success"] is True
+    assert "idc.set_cmt(0x401000" in seen["code"]
+    assert "SIGSEGV" in seen["code"]
+    assert seen["database"] == "db"
+    assert result["parsed"]["published"]["address"] == 0x401000
+
+
+def test_publish_rejects_bad_address_and_empty():
+    ida = IdaProMCP()
+    bad = ida.publish_crash("nope", "SIGSEGV")
+    assert bad["success"] is False
+    import pytest
+
+    with pytest.raises(ValueError, match="signal"):
+        ida.publish_crash(0x1000, "  ")
+    with pytest.raises(ValueError, match="text"):
+        ida.publish_note(0x1000, "  ")

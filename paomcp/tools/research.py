@@ -438,6 +438,38 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def generate_bounty_report(
+        session_id: str,
+        title: str,
+        severity: str,
+        affected_target: str,
+        remediation: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Render a triager-ready bounty finding from a research session.
+
+        Root cause cites only supported hypotheses; PoC steps come from
+        the reproduction guide plus linked crash evidence; gaps stay
+        explicit. Severity is critical/high/medium/low/info.
+
+        Args:
+            session_id: Research session to report on.
+            title: Finding title.
+            severity: critical, high, medium, low, or info.
+            affected_target: Binary/endpoint/version hit by the finding.
+            remediation: Suggested fix; omitted => marked as not proposed.
+        """
+        services = get_services(ctx)
+        return services.research_report.generate_bounty_report_response(
+            session_id=session_id,
+            title=title,
+            severity=severity,
+            affected_target=affected_target,
+            remediation=remediation,
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def verify_research_bundle(
         source_path: str,
         ctx: Context = CurrentContext(),

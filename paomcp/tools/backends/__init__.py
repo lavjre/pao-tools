@@ -53,8 +53,10 @@ from .research import (
     ResearchSnapshot,
     TimelineEvent,
 )
+from .fuzz import FUZZ_BATCH_SCHEMA, FUZZ_INPUTS_SCHEMA, FuzzBatch, generate_inputs
 from .research_bundle import BundleError, ResearchBundle
 from .research_report import ReportError, ResearchReport
+from .research_store import CaseStore
 from .rop import (
     ChainBuilder,
     ChainBuilderError,
@@ -158,4 +160,9 @@ __all__ = [
     "ResearchBundle",
     "ReportError",
     "ResearchReport",
+    "CaseStore",
+    "FuzzBatch",
+    "generate_inputs",
+    "FUZZ_BATCH_SCHEMA",
+    "FUZZ_INPUTS_SCHEMA",
 ]

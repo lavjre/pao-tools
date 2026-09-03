@@ -274,3 +274,64 @@ class TestResponseWrapper:
         assert response["command"] == "generate_final_report"
         assert response["parsed"]["schema"] == RESEARCH_REPORT_SCHEMA
         assert "markdown" in response["parsed"]["rendered"]
+
+
+class TestBountyReport:
+    def _report(self, registry, sid, **overrides):
+        kwargs = {
+            "session_id": sid,
+            "title": "Stack overflow in vuln",
+            "severity": "high",
+            "affected_target": "./vuln 1.0",
+        }
+        kwargs.update(overrides)
+        return ResearchReport(registry).generate_bounty_report(**kwargs)
+
+    def test_markdown_sections_and_root_cause(self) -> None:
+        registry = ResearchRegistry()
+        sid = _seed(registry)
+        parsed = self._report(registry, sid)
+        assert parsed["schema"] == "pao.bounty-report.v1"
+        assert parsed["severity"] == "high"
+        assert parsed["crash_count"] == 1
+        assert len(parsed["root_cause_hypotheses"]) == 1
+        assert "stack overflow" in parsed["root_cause_hypotheses"][0]["statement"]
+        markdown = parsed["markdown"]
+        for section in (
+            "# Stack overflow in vuln",
+            "## Summary",
+            "## Proof of Concept",
+            "## Root Cause",
+            "## Impact",
+            "## Remediation",
+            "## Open Hypotheses & Gaps",
+        ):
+            assert section in markdown
+        # Proposed hypotheses are never promoted to root cause.
+        assert "ret2libc chain" not in parsed["root_cause_hypotheses"][0]["statement"]
+        assert "ret2libc chain" in markdown
+
+    def test_rejects_bad_inputs(self) -> None:
+        from paomcp.tools.backends.research_report import ReportError
+
+        registry = ResearchRegistry()
+        sid = _seed(registry)
+        with pytest.raises(ReportError, match="severity"):
+            self._report(registry, sid, severity="catastrophic")
+        with pytest.raises(ReportError, match="title"):
+            self._report(registry, sid, title="  ")
+        with pytest.raises(ReportError, match="affected_target"):
+            self._report(registry, sid, affected_target="")
+
+    def test_bounty_response_envelope(self) -> None:
+        registry = ResearchRegistry()
+        sid = _seed(registry)
+        rpt = ResearchReport(registry)
+        response = rpt.generate_bounty_report_response(
+            session_id=sid,
+            title="t",
+            severity="low",
+            affected_target="x",
+        )
+        assert response["success"] is True
+        assert response["command"] == "generate_bounty_report"

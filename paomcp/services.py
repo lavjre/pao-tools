@@ -20,6 +20,7 @@ from paomcp.tools.backends import (
     SubprocessTools,
     TargetRegistry,
 )
+from paomcp.tools.backends.research_store import CaseStore
 from paomcp.utils.paths import DEFAULT_WORKSPACE, RuntimePaths, build_runtime_paths
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class AppServices:
     research_registry: ResearchRegistry
     research_bundle: ResearchBundle
     research_report: ResearchReport
+    case_store: Optional[CaseStore] = None
     paopipe_sessions: Dict[str, PaoPipe] = field(default_factory=dict)
     paopipe_lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -128,6 +130,15 @@ def create_services(
     except Exception as exc:
         logger.warning("IDA status probe failed (degraded, not fatal): %s", exc)
 
+    try:
+        case_store: Optional[CaseStore] = CaseStore(
+            os.path.join(runtime_paths.runtime_root, "cases.db")
+        )
+    except Exception as exc:
+        logger.exception("Case store unavailable; research runs memory-only")
+        logger.warning("Continuing without research case persistence: %s", exc)
+        case_store = None
+
     services = AppServices(
         runtime_paths=runtime_paths,
         session_registry=session_registry,
@@ -152,13 +163,22 @@ def create_services(
         debugger_compatibility=debugger_compatibility,
         rop_tools=RopTools(),
         target_registry=TargetRegistry(),
-        research_registry=(research_registry := ResearchRegistry()),
+        research_registry=(research_registry := ResearchRegistry(store=case_store)),
+        case_store=case_store,
         research_bundle=ResearchBundle(
             research_registry, artifact_store=artifact_store
         ),
         research_report=ResearchReport(research_registry),
     )
     artifact_store.start_cleanup_worker()
+    try:
+        rehydrated = research_registry.load_existing()
+    except Exception as exc:
+        logger.exception("Research case rehydrate failed")
+        logger.warning("Continuing with empty research registry: %s", exc)
+        rehydrated = 0
+    if rehydrated:
+        logger.info("Rehydrated %d research case(s) from the case store", rehydrated)
     return services
 
 
@@ -169,6 +189,13 @@ def close_services(services: AppServices) -> None:
         services.ida.close()
     except Exception:
         logger.exception("Failed to close the IDA bridge session during shutdown")
+
+    case_store = getattr(services, "case_store", None)
+    if case_store is not None:
+        try:
+            case_store.close()
+        except Exception:
+            logger.exception("Failed to close the case store during shutdown")
 
     with services.paopipe_lock:
         for pipe in services.paopipe_sessions.values():

@@ -20,13 +20,28 @@ everything under one roof.
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from paomcp.tools.backends.foundation import build_backend_response
+
+if TYPE_CHECKING:  # the store is duck-typed; import only for annotations
+    from paomcp.tools.backends.research_store import CaseStore
+
+logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "1"
 RESEARCH_SESSION_SCHEMA = "pao.research-session.v1"
@@ -120,6 +135,17 @@ class ResearchNote:
             "created_at": self.created_at,
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResearchNote":
+        """Rehydrate a note persisted by :class:`CaseStore`."""
+        return cls(
+            note_id=str(data["note_id"]),
+            body=str(data.get("body", "")),
+            tags=[str(t) for t in data.get("tags") or []],
+            hypothesis_id=data.get("hypothesis_id"),
+            created_at=str(data.get("created_at") or _now_iso()),
+        )
+
 
 @dataclass
 class ResearchEvidence:
@@ -146,6 +172,21 @@ class ResearchEvidence:
             "metadata": dict(self.metadata),
         }
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResearchEvidence":
+        """Rehydrate evidence persisted by :class:`CaseStore`."""
+        metadata = data.get("metadata")
+        return cls(
+            evidence_id=str(data["evidence_id"]),
+            kind=str(data.get("kind", "")),
+            ref=str(data.get("ref", "")),
+            description=data.get("description"),
+            hypothesis_id=data.get("hypothesis_id"),
+            note_id=data.get("note_id"),
+            created_at=str(data.get("created_at") or _now_iso()),
+            metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+        )
+
 
 @dataclass
 class ResearchHypothesis:
@@ -167,6 +208,18 @@ class ResearchHypothesis:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResearchHypothesis":
+        """Rehydrate a hypothesis persisted by :class:`CaseStore`."""
+        return cls(
+            hypothesis_id=str(data["hypothesis_id"]),
+            statement=str(data.get("statement", "")),
+            state=str(data.get("state", "proposed")),
+            rationale=data.get("rationale"),
+            created_at=str(data.get("created_at") or _now_iso()),
+            updated_at=str(data.get("updated_at") or _now_iso()),
+        )
 
 
 @dataclass
@@ -195,6 +248,22 @@ class TimelineEvent:
             "snapshot_id": self.snapshot_id,
             "metadata": dict(self.metadata),
         }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "TimelineEvent":
+        """Rehydrate a timeline event persisted by :class:`CaseStore`."""
+        metadata = data.get("metadata")
+        return cls(
+            event_id=str(data["event_id"]),
+            kind=str(data.get("kind", "")),
+            summary=str(data.get("summary", "")),
+            created_at=str(data.get("created_at") or _now_iso()),
+            ref=data.get("ref"),
+            hypothesis_id=data.get("hypothesis_id"),
+            note_id=data.get("note_id"),
+            snapshot_id=data.get("snapshot_id"),
+            metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+        )
 
 
 @dataclass
@@ -227,6 +296,18 @@ class ResearchSnapshot:
         if include_slots:
             payload["slots"] = dict(self.slots)
         return payload
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ResearchSnapshot":
+        """Rehydrate a snapshot persisted by :class:`CaseStore`."""
+        slots = data.get("slots")
+        return cls(
+            snapshot_id=str(data["snapshot_id"]),
+            name=str(data.get("name", "")),
+            slots=dict(slots) if isinstance(slots, Mapping) else {},
+            description=data.get("description"),
+            created_at=str(data.get("created_at") or _now_iso()),
+        )
 
 
 @dataclass
@@ -276,6 +357,45 @@ class ResearchSession:
             ]
         return payload
 
+    @classmethod
+    def from_full_dict(
+        cls,
+        data: Mapping[str, Any],
+        *,
+        snapshots: Mapping[str, Mapping[str, Any]],
+        timeline: List[Mapping[str, Any]],
+    ) -> "ResearchSession":
+        """Rehydrate a session with children persisted by :class:`CaseStore`."""
+        metadata = data.get("metadata")
+        session = cls(
+            session_id=str(data["session_id"]),
+            name=str(data.get("name", "")),
+            owning_debug_session=data.get("owning_debug_session"),
+            description=data.get("description"),
+            created_at=str(data.get("created_at") or _now_iso()),
+            updated_at=str(data.get("updated_at") or _now_iso()),
+            metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+        )
+        for item in data.get("notes") or []:
+            if isinstance(item, Mapping):
+                note = ResearchNote.from_dict(item)
+                session.notes[note.note_id] = note
+        for item in data.get("evidence") or []:
+            if isinstance(item, Mapping):
+                evidence = ResearchEvidence.from_dict(item)
+                session.evidence[evidence.evidence_id] = evidence
+        for item in data.get("hypotheses") or []:
+            if isinstance(item, Mapping):
+                hypothesis = ResearchHypothesis.from_dict(item)
+                session.hypotheses[hypothesis.hypothesis_id] = hypothesis
+        for snapshot_id, payload in snapshots.items():
+            if isinstance(payload, Mapping):
+                session.snapshots[snapshot_id] = ResearchSnapshot.from_dict(payload)
+        for item in timeline:
+            if isinstance(item, Mapping):
+                session.timeline.append(TimelineEvent.from_dict(item))
+        return session
+
 
 class ResearchRegistry:
     """Thread-safe, bounded registry of research sessions."""
@@ -289,6 +409,7 @@ class ResearchRegistry:
         max_hypotheses_per_session: int = DEFAULT_MAX_HYPOTHESES_PER_SESSION,
         max_snapshots_per_session: int = DEFAULT_MAX_SNAPSHOTS_PER_SESSION,
         max_timeline_events_per_session: int = DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION,
+        store: Optional["CaseStore"] = None,
     ) -> None:
         for name, value in (
             ("max_sessions", max_sessions),
@@ -308,6 +429,55 @@ class ResearchRegistry:
         self._max_timeline = max_timeline_events_per_session
         self._sessions: Dict[str, ResearchSession] = {}
         self._lock = threading.RLock()
+        self._store: Optional["CaseStore"] = store
+
+    def _persist(self, session: ResearchSession) -> None:
+        """Write one session to the case store (best-effort, never raises)."""
+        store = self._store
+        if store is None:
+            return
+        try:
+            store.save_session(session)
+        except Exception:  # noqa: BLE001 - durability must not break research
+            logger.exception(
+                "Case store persist failed for research session '%s'",
+                session.session_id,
+            )
+
+    def load_existing(self) -> int:
+        """Rehydrate persisted sessions into this registry; returns count."""
+        store = self._store
+        if store is None:
+            return 0
+        try:
+            stored = store.load_all()
+        except Exception:  # noqa: BLE001 - degraded startup, not fatal
+            logger.exception("Case store load failed; starting with empty registry")
+            return 0
+        loaded = 0
+        with self._lock:
+            for data in stored:
+                try:
+                    session = ResearchSession.from_full_dict(
+                        data,
+                        snapshots=data.get("snapshots") or {},
+                        timeline=data.get("timeline") or [],
+                    )
+                except Exception:  # noqa: BLE001 - skip corrupt rows
+                    logger.exception("Skipping unloadable research session row")
+                    continue
+                if session.session_id in self._sessions:
+                    continue
+                if len(self._sessions) >= self._max_sessions:
+                    logger.warning(
+                        "Research session cap reached during rehydrate; "
+                        "skipping '%s'",
+                        session.session_id,
+                    )
+                    break
+                self._sessions[session.session_id] = session
+                loaded += 1
+        return loaded
 
     # ------------------------------------------------------------------
     # Session CRUD
@@ -335,6 +505,7 @@ class ResearchRegistry:
                 metadata=dict(metadata or {}),
             )
             self._sessions[session.session_id] = session
+            self._persist(session)
             return session
 
     def get_session(self, session_id: str) -> ResearchSession:
@@ -350,7 +521,15 @@ class ResearchRegistry:
 
     def remove_session(self, session_id: str) -> Optional[ResearchSession]:
         with self._lock:
-            return self._sessions.pop(session_id, None)
+            removed = self._sessions.pop(session_id, None)
+        if removed is not None and self._store is not None:
+            try:
+                self._store.delete_session(session_id)
+            except Exception:  # noqa: BLE001 - durability must not break research
+                logger.exception(
+                    "Case store delete failed for research session '%s'", session_id
+                )
+        return removed
 
     # ------------------------------------------------------------------
     # Timeline
@@ -401,6 +580,9 @@ class ResearchRegistry:
             # can tell the timeline was pruned rather than silently
             # complete.
             event.metadata["dropped_oldest_for_cap"] = True
+        # Every registry mutation funnels through this append, so one
+        # persist hook here covers notes/evidence/hypotheses/snapshots.
+        self._persist(session)
         return event
 
     def append_timeline_event(

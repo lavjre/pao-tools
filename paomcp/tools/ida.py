@@ -185,6 +185,44 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def ida_publish_crash(
+        address: Any,
+        signal: str,
+        database: Optional[str] = None,
+        classification: Optional[str] = None,
+        note: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Publish a debugger crash finding as an IDA comment (GDB->IDB)."""
+        services = get_services(ctx)
+        return await run_blocking(
+            lambda: services.ida.publish_crash(
+                address,
+                signal,
+                database,
+                classification=classification,
+                note=note,
+            )
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def ida_publish_note(
+        address: Any,
+        text: str,
+        database: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Publish free text as an IDA comment at an address (GDB->IDB)."""
+        services = get_services(ctx)
+        return await run_blocking(
+            lambda: services.ida.publish_note(address, text, database)
+        )
+
+    @mcp.tool()
+    @catch_errors()
     async def ida_dbg_start(
         database: Optional[str] = None,
         ctx: Context = CurrentContext(),

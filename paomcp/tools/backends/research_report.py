@@ -54,6 +54,8 @@ from paomcp.tools.backends.research import (
 
 PARSER_VERSION = "1"
 RESEARCH_REPORT_SCHEMA = "pao.research-report.v1"
+BOUNTY_REPORT_SCHEMA = "pao.bounty-report.v1"
+BOUNTY_SEVERITIES: Tuple[str, ...] = ("critical", "high", "medium", "low", "info")
 
 REPORT_FORMATS: Tuple[str, ...] = ("json", "markdown", "html")
 
@@ -569,10 +571,153 @@ class ResearchReport:
             warnings=None,
         )
 
+    # ------------------------------------------------------------------
+    # Bounty report (triage-ready finding from one session)
+    # ------------------------------------------------------------------
+    def generate_bounty_report(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        severity: str,
+        affected_target: str,
+        remediation: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Render a triager-ready bounty finding from a research session.
+
+        Root cause comes only from ``supported``/``confirmed``-state
+        hypotheses (a ``proposed`` hypothesis is never promoted to a root
+        cause); PoC steps come from the reproduction guide plus linked
+        crash evidence.  Missing pieces are listed explicitly instead of
+        being papered over.
+        """
+        if not isinstance(title, str) or not title.strip():
+            raise ReportError("title must be a non-empty string")
+        if severity not in BOUNTY_SEVERITIES:
+            raise ReportError(
+                f"severity {severity!r} must be one of {list(BOUNTY_SEVERITIES)}"
+            )
+        if not isinstance(affected_target, str) or not affected_target.strip():
+            raise ReportError("affected_target must be a non-empty string")
+        session = self._registry.get_session(session_id)
+        with session._lock:
+            payload = self._build_json_payload(session)
+        by_state = payload["hypotheses"]["by_state"]
+        root_causes = [
+            h for state in ("supported", "confirmed") for h in by_state.get(state, [])
+        ]
+        crashes = payload["facts"]["crashes"]
+        reproduction = payload["reproduction"]
+        lines = [
+            f"# {title.strip()}",
+            "",
+            f"**Severity:** {severity}",
+            f"**Affected target:** {affected_target.strip()}",
+            f"**Session:** {session.name} (`{session.session_id}`)",
+            "",
+            "## Summary",
+            "",
+            (
+                f"Investigation `{session.name}` links "
+                f"{len(crashes)} crash(es), "
+                f"{len(root_causes)} supported root-cause "
+                f"hypothes{'is' if len(root_causes) == 1 else 'es'}, and "
+                f"{payload['counts']['evidence']} evidence items."
+            ),
+            "",
+            "## Proof of Concept",
+            "",
+        ]
+        supplied = reproduction.get("supplied", {})
+        if supplied:
+            for key in ("binary", "argv", "env", "working_dir", "target_spec"):
+                if supplied.get(key) is not None:
+                    lines.append(f"- `{key}`: `{supplied[key]}`")
+        else:
+            lines.append("- No target spec recorded in session metadata.")
+        hints = reproduction.get("timeline_hints", {})
+        for label, key in (
+            ("First crash observed", "first_crash_at"),
+            ("First reproduction", "first_reproduction_at"),
+        ):
+            if hints.get(key):
+                lines.append(f"- {label}: {hints[key]}")
+        for crash in crashes:
+            ref = crash.get("ref") or crash.get("evidence_id", "")
+            lines.append(f"- Crash evidence: `{ref}`")
+        missing = reproduction.get("missing", [])
+        if missing:
+            lines.append(f"- Still missing for replay: {', '.join(missing)}.")
+        lines += ["", "## Root Cause", ""]
+        if root_causes:
+            for hyp in root_causes:
+                lines.append(f"- **[{hyp.get('state')}]** {hyp.get('statement', '')}")
+                if hyp.get("rationale"):
+                    lines.append(f"  - Rationale: {hyp['rationale']}")
+        else:
+            lines.append(
+                "- No supported root-cause hypothesis yet; see open hypotheses below."
+            )
+        lines += ["", "## Impact", ""]
+        lines.append(
+            "Impact follows from the linked crash evidence and the confirmed "
+            "primitive. Fill in product-specific blast radius before filing."
+        )
+        lines += ["", "## Remediation", ""]
+        lines.append(
+            remediation.strip()
+            if isinstance(remediation, str) and remediation.strip()
+            else "- Not proposed yet: record a fix hypothesis first."
+        )
+        lines += ["", "## Open Hypotheses & Gaps", ""]
+        for hyp in by_state.get("proposed", []) + by_state.get("unknown", []):
+            lines.append(f"- **[{hyp.get('state')}]** {hyp.get('statement', '')}")
+        for gap in payload["known_unknowns"]:
+            lines.append(f"- Gap: {gap}")
+        markdown = "\n".join(lines).rstrip() + "\n"
+        return {
+            "schema": BOUNTY_REPORT_SCHEMA,
+            "session_id": session_id,
+            "title": title.strip(),
+            "severity": severity,
+            "affected_target": affected_target.strip(),
+            "markdown": markdown,
+            "root_cause_hypotheses": root_causes,
+            "crash_count": len(crashes),
+            "counts": payload["counts"],
+        }
+
+    def generate_bounty_report_response(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        severity: str,
+        affected_target: str,
+        remediation: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        parsed = self.generate_bounty_report(
+            session_id=session_id,
+            title=title,
+            severity=severity,
+            affected_target=affected_target,
+            remediation=remediation,
+        )
+        return build_backend_response(
+            "generate_bounty_report",
+            parsed=parsed,
+            raw_responses=[],
+            state="MANAGED",
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
 
 __all__ = [
     "ReportError",
     "ResearchReport",
     "RESEARCH_REPORT_SCHEMA",
     "REPORT_FORMATS",
+    "BOUNTY_REPORT_SCHEMA",
+    "BOUNTY_SEVERITIES",
 ]

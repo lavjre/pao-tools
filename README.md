@@ -106,7 +106,7 @@ tool answers in the same envelope.
 
 ## Response API
 
-The current server contract exposes 188 MCP tools. Every tool returns the same
+The current server contract exposes 193 MCP tools. Every tool returns the same
 `api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
@@ -222,7 +222,7 @@ claude plugin marketplace add git@github.com:lavjre/pao-tools.git
 claude plugin install pao-tools@pao-tools
 ```
 
-After install, the `pao-tools` MCP server appears as a stdio server and its 188
+After install, the `pao-tools` MCP server appears as a stdio server and its 193
 tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
 available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
 (`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
@@ -309,6 +309,23 @@ Flow: `ida_idb_open(path)` returns a session id, pass it as `database` to
 `get_ida_status` reports `ready: false` and every bridge tool degrades to a
 typed verdict instead of failing startup. Bridge defaults are token-lean
 (limit 100, max 1000) and large payloads spill to artifacts like the rest.
+Publish findings back with `ida_publish_crash` / `ida_publish_note`, which
+write IDA comments through `idc.set_cmt` via `py_eval`.
+
+## Cases, fuzzing, and bounty reports
+
+Research sessions persist to `cases.db` under the runtime root and rehydrate
+on startup, so multi-day investigations survive restarts. `generate_fuzz_inputs`
+builds deterministic file-input corpora (zeros/cyclic/bitflips) and
+`run_fuzz_batch` feeds them to the target under GDB with signature-digest
+crash dedup; novel crashes link straight into a research session as crash
+evidence. `generate_bounty_report` renders a triager-ready finding (summary,
+PoC, root cause from supported hypotheses only, impact, remediation, gaps).
+
+Remote binds are fail-closed: loopback needs nothing, anything else requires
+`PAO_ALLOW_REMOTE=1` plus a `PAO_MCP_TOKEN` bearer (per listener, `/healthz`
+stays open). `GET /readyz` reports debugger readiness honestly (503 when the
+default debug session is down; Ghidra/IDA stay advisory).
 
 ## Scope and limits
 

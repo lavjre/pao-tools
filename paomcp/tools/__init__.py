@@ -13,6 +13,7 @@ def register_all_tools(mcp: FastMCP) -> None:
         debug,
         debugger_memory,
         elf_runtime,
+        fuzz,
         heap,
         ida,
         inspect,
@@ -39,6 +40,7 @@ def register_all_tools(mcp: FastMCP) -> None:
     debug.register(mcp)
     debugger_memory.register(mcp)
     elf_runtime.register(mcp)
+    fuzz.register(mcp)
     heap.register(mcp)
     ida.register(mcp)
     inspect.register(mcp)

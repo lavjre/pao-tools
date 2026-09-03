@@ -14,6 +14,7 @@ reasons instead of raising at startup — same contract as GhidraDecompiler.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -536,6 +537,121 @@ class IdaProMCP:
         if database:
             params["database"] = database
         return self._call("dbg_read", params)
+
+    @staticmethod
+    def _comment_script(address: int, comment: str) -> str:
+        """Build IDAPython publishing one non-repeatable comment.
+
+        ``json.dumps`` yields a valid Python string literal, so newlines
+        and quotes in findings cannot break out of the snippet.
+        """
+        return (
+            "import idc\n"
+            f"ok = idc.set_cmt({address:#x}, {json.dumps(comment)}, 0)\n"
+            f'print("PAO_PUBLISH:" + ("ok" if ok else "failed"))\n'
+        )
+
+    @staticmethod
+    def _parse_address(address: Any) -> int:
+        if isinstance(address, bool):
+            raise ValueError(f"IDA address must be an integer, got {address!r}")
+        if isinstance(address, int):
+            value = address
+        else:
+            text = str(address).strip()
+            try:
+                value = int(text, 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"IDA address must be an integer, got {address!r}")
+        if value < 0:
+            raise ValueError(f"IDA address cannot be negative, got {address!r}")
+        return value
+
+    def publish_crash(
+        self,
+        address: Any,
+        signal: str,
+        database: Optional[str] = None,
+        classification: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Publish a debugger crash finding as an IDA comment (via py_eval)."""
+        if not signal or not str(signal).strip():
+            raise ValueError("signal cannot be empty")
+        try:
+            ea = self._parse_address(address)
+        except ValueError as exc:
+            return build_backend_response(
+                "ida/publish_crash",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error=str(exc),
+                error_type="ValueError",
+            )
+        lines = [f"PAO crash: {signal.strip()} at {ea:#x}"]
+        if classification and str(classification).strip():
+            lines.append(f"classification: {str(classification).strip()}")
+        if note and str(note).strip():
+            lines.append(str(note).strip())
+        comment = "\n".join(lines)
+        if len(comment) > MAX_IDA_CODE_BYTES:
+            return build_backend_response(
+                "ida/publish_crash",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error="comment exceeds the IDA payload cap; shorten note",
+                error_type="ValueError",
+            )
+        result = self.py_eval(self._comment_script(ea, comment), database)
+        parsed = dict(result.get("parsed", {}) or {})
+        parsed["published"] = {
+            "address": ea,
+            "signal": signal.strip(),
+            "comment": comment,
+        }
+        result["parsed"] = parsed
+        result["command"] = "ida/publish_crash"
+        return result
+
+    def publish_note(
+        self, address: Any, text: str, database: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Publish free text as an IDA comment at an address (via py_eval)."""
+        if not text or not str(text).strip():
+            raise ValueError("text cannot be empty")
+        try:
+            ea = self._parse_address(address)
+        except ValueError as exc:
+            return build_backend_response(
+                "ida/publish_note",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error=str(exc),
+                error_type="ValueError",
+            )
+        comment = f"PAO note at {ea:#x}\n{str(text).strip()}"
+        if len(comment) > MAX_IDA_CODE_BYTES:
+            return build_backend_response(
+                "ida/publish_note",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error="comment exceeds the IDA payload cap; shorten text",
+                error_type="ValueError",
+            )
+        result = self.py_eval(self._comment_script(ea, comment), database)
+        parsed = dict(result.get("parsed", {}) or {})
+        parsed["published"] = {"address": ea, "comment": comment}
+        result["parsed"] = parsed
+        result["command"] = "ida/publish_note"
+        return result
 
     def dbg_write(self, regions: Any, database: Optional[str] = None) -> Dict[str, Any]:
         rejected = self._capped("ida/dbg_write", regions, kind="dbg_write regions")
