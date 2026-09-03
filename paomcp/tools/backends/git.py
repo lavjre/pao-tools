@@ -148,13 +148,16 @@ class GitTools:
                 logger.info(f"Checking out version: {version}")
 
                 # A depth-1 clone cannot fetch arbitrary tags/SHAs, so
-                # unshallow before fetching the specific ref.
+                # unshallow before fetching the specific ref. Every git
+                # invocation carries a timeout so a wedged remote cannot
+                # pin a worker slot forever.
                 if shallow:
                     subprocess.run(
                         ["git", "fetch", "--unshallow", "origin"],
                         cwd=repo_path,
                         capture_output=True,
                         text=True,
+                        timeout=300,
                     )
 
                 # First, fetch the specific ref if needed. The explicit --
@@ -164,6 +167,7 @@ class GitTools:
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    timeout=300,
                 )
 
                 # Try to checkout the version
@@ -172,6 +176,7 @@ class GitTools:
                     cwd=repo_path,
                     capture_output=True,
                     text=True,
+                    timeout=120,
                 )
 
                 if checkout_result.returncode != 0:
@@ -181,6 +186,7 @@ class GitTools:
                         cwd=repo_path,
                         capture_output=True,
                         text=True,
+                        timeout=120,
                     )
 
                 if checkout_result.returncode != 0:

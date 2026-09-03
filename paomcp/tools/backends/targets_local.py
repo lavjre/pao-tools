@@ -24,7 +24,11 @@ from typing import (
     Tuple,
 )
 
-from paomcp.tools.backends.foundation import build_backend_response, parse_int
+from paomcp.tools.backends.foundation import (
+    build_backend_response,
+    parse_int,
+    validate_attach_pid,
+)
 from paomcp.tools.backends.gdb import GdbController
 
 from paomcp.tools.backends.targets_base import (
@@ -158,6 +162,10 @@ class AttachPidProvider:
             pid = handle.spec.pid
             if pid is None:
                 raise TargetError("attach_pid spec has no pid")
+            try:
+                pid = validate_attach_pid(pid)
+            except ValueError as exc:
+                raise TargetError(str(exc))
             if not _pid_is_alive(pid):
                 raise TargetError(f"pid {pid} is not alive")
             handle.pid = pid

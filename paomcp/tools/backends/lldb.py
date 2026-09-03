@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 from paomcp.tools.backends.backend import BackendUnavailableError
-from paomcp.tools.backends.foundation import parse_int
+from paomcp.tools.backends.foundation import parse_int, validate_attach_pid
 from paomcp.tools.backends.gdb import (
     DEFAULT_STOP_RECORD_LIMIT,
     _session_popen_kwargs,
@@ -502,13 +502,34 @@ class LldbController:
         return result
 
     # -- lifecycle of the inferior ------------------------------------
+    @staticmethod
+    def _quote_lldb_path(value: str) -> str:
+        """Quote one path for an lldb command line."""
+        if any(c in value for c in ("\x00", "\r", "\n")):
+            raise ValueError("lldb path contains a forbidden control character")
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
     def set_file(self, filepath: str) -> Dict[str, Any]:
-        result = self._execute(f"target create {filepath}")
+        result = self._execute(f"target create {self._quote_lldb_path(filepath)}")
         self._state = "stopped"
         result["state"] = self._state
         return result
 
     def attach(self, pid: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        try:
+            pid = validate_attach_pid(pid)
+        except ValueError as exc:
+            return (
+                {
+                    "success": False,
+                    "command": f"process attach -p {pid}",
+                    "state": self._state,
+                    "pid": self._inferior_pid,
+                    "error": str(exc),
+                    "type": "ValueError",
+                },
+                [],
+            )
         result = self._execute(f"process attach -p {pid}")
         if result.get("success"):
             self._inferior_pid = pid

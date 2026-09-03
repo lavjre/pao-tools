@@ -718,6 +718,33 @@ class TestCaptureGlibc:
         with pytest.raises(ValueError, match="empty or whitespace"):
             history.capture_heap_snapshot(name="   ")
 
+    def test_capture_rejects_non_positive_arena_cap(self, monkeypatch) -> None:
+        _pin_classification(monkeypatch, _glibc_classification())
+        history = _build_history()
+        with pytest.raises(ValueError, match="max_arenas must be positive"):
+            history.capture_heap_snapshot(max_arenas=0)
+
+    def test_capture_truncates_arena_walk_explicitly(self, monkeypatch) -> None:
+        _pin_classification(monkeypatch, _glibc_classification())
+        addrs = [0x7FFF_F7E0_0000, 0x7FFF_F7E1_0000, 0x7FFF_F7E2_0000]
+        arenas_response = _canned_backend_response(
+            "list_arenas",
+            {
+                "arenas": [
+                    {"address": addr, "is_main": i == 0, "index": i}
+                    for i, addr in enumerate(addrs)
+                ]
+            },
+        )
+        history = _build_history(arenas_response=arenas_response)
+        response = history.capture_heap_snapshot(max_arenas=2)
+        parsed = response["parsed"]
+        assert parsed["verdict"] == "captured"
+        assert parsed["summary"]["arena_count"] == 2
+        assert parsed["summary"]["arenas_truncated"] is True
+        assert [a["arena_address"] for a in parsed["arenas"]] == addrs[:2]
+        assert any("max_arenas" in w for w in response.get("warnings") or [])
+
     def test_capture_rejects_non_positive_chunk_cap(self) -> None:
         history = _build_history()
         with pytest.raises(ValueError, match="must be positive"):

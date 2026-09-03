@@ -24,7 +24,11 @@ from typing import (
     Tuple,
 )
 
-from paomcp.tools.backends.foundation import build_backend_response, parse_int
+from paomcp.tools.backends.foundation import (
+    build_backend_response,
+    parse_int,
+    validate_attach_pid,
+)
 from paomcp.tools.backends.gdb import GdbController
 
 from paomcp.tools.backends.targets_base import (
@@ -133,8 +137,12 @@ class GdbserverProvider:
             port = spec.port or _find_free_tcp_port(host)
             argv: List[str] = [self._executable]
             if spec.pid is not None:
-                argv += ["--attach", f"{host}:{port}", str(spec.pid)]
-                handle.pid = spec.pid
+                try:
+                    validated_pid = validate_attach_pid(spec.pid)
+                except ValueError as exc:
+                    raise TargetError(str(exc))
+                argv += ["--attach", f"{host}:{port}", str(validated_pid)]
+                handle.pid = validated_pid
             else:
                 if not spec.binary_path:
                     raise TargetError("gdbserver spec has neither binary_path nor pid")

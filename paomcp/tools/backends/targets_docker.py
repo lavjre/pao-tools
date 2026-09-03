@@ -55,22 +55,53 @@ def _default_docker_runner(argv: List[str], timeout_sec: float) -> Tuple[int, st
     return completed.returncode, completed.stdout, completed.stderr
 
 
-BLOCKED_DOCKER_FLAGS = {
+BLOCKED_DOCKER_PREFIXES = (
     "--privileged",
     "--pid",
     "--network",
     "--uts",
     "--ipc",
-    "-v",
     "--volume",
     "--mount",
     "--device",
     "--cap-add",
     "--cap-drop",
     "--security-opt",
-}
+    "--cgroupns",
+    "--gpus",
+    "--runtime",
+    "-v",
+)
 
-BLOCKED_DOCKER_TOKENS = ("--privileged", "-v /", "-v/", "--pid=host", "--network=host")
+
+def _docker_flag_name(entry: str) -> str:
+    """Normalize one extra arg to its flag name (``--cap-add=x`` -> ``--cap-add``)."""
+    text = entry.strip().lower()
+    for separator in ("=", ":"):
+        head, sep, _ = text.partition(separator)
+        if sep and head.startswith("-"):
+            return head
+    return text.split()[0] if text else ""
+
+
+def validate_docker_extra_args(extra_args) -> None:
+    """Reject privilege/mount/device/network escapes in all spellings.
+
+    Only the flag *name* is compared (``--cap-add=NET_ADMIN`` normalizes to
+    ``--cap-add``), so ``--flag value``, ``--flag=value`` and glued short
+    forms like ``-v/src:/dst`` are all caught. Plain values pass through:
+    they are inert without their flag.
+    """
+    for extra in list(extra_args or []):
+        name = _docker_flag_name(extra)
+        if not name:
+            continue
+        if name in BLOCKED_DOCKER_PREFIXES or name.startswith("-v"):
+            raise TargetError(
+                f"Blocked unsafe docker_extra_args entry '{extra}': "
+                "privileged mode, host mounts, host pid/network, devices, "
+                "runtimes, GPUs and capability changes are not allowed"
+            )
 
 
 class DockerProvider:
@@ -122,17 +153,8 @@ class DockerProvider:
                 argv += ["-w", spec.docker_workdir]
             for env_name, env_value in spec.env.items():
                 argv += ["-e", f"{env_name}={env_value}"]
-            for extra in list(spec.docker_extra_args or []):
-                lowered = extra.strip().lower()
-                if lowered in BLOCKED_DOCKER_FLAGS or any(
-                    tok in lowered for tok in BLOCKED_DOCKER_TOKENS
-                ):
-                    raise TargetError(
-                        f"Blocked unsafe docker_extra_args entry '{extra}': "
-                        "privileged mode, host mounts, host pid/network, devices, "
-                        "and capability changes are not allowed"
-                    )
-                argv.append(extra)
+            validate_docker_extra_args(spec.docker_extra_args)
+            argv.extend(list(spec.docker_extra_args or []))
             argv += [spec.docker_image]
             argv += list(spec.argv or [])
             rc, stdout, stderr = self._docker(argv)

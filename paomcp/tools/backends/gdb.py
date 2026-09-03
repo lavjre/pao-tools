@@ -22,6 +22,8 @@ from pygdbmi import gdbcontroller
 from pygdbmi.IoManager import IoManager
 from pygdbmi.constants import GdbTimeoutError
 
+from paomcp.tools.backends.foundation import validate_attach_pid
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_STOP_RECORD_LIMIT = 64
@@ -649,23 +651,15 @@ class GdbController:
 
     def attach(self, pid: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """Attach to an existing process using MI command (-target-attach)"""
-        if pid <= 1:
+        try:
+            pid = validate_attach_pid(pid)
+        except ValueError as exc:
             failure: Dict[str, Any] = {
                 "success": False,
                 "command": f"-target-attach {pid}",
                 "state": self._state,
                 "pid": self._inferior_pid,
-                "error": f"Refusing to attach to PID {pid}: PID 0/1 would destabilize the container host",
-                "type": "ValueError",
-            }
-            return failure, []
-        if pid == os.getpid():
-            failure = {
-                "success": False,
-                "command": f"-target-attach {pid}",
-                "state": self._state,
-                "pid": self._inferior_pid,
-                "error": "Refusing to attach to our own debugger supervisor process",
+                "error": str(exc),
                 "type": "ValueError",
             }
             return failure, []

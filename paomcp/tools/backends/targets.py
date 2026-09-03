@@ -64,9 +64,6 @@ from paomcp.tools.backends.targets_docker import (
 from paomcp.tools.backends.targets_gdbserver import (
     GdbserverProvider,
     TcpRemoteProvider,
-    _attach_via_gdb_remote,
-    _find_free_tcp_port,
-    _wait_for_tcp_listen,
 )
 from paomcp.tools.backends.targets_local import (
     AttachPidProvider,
@@ -80,7 +77,6 @@ from paomcp.tools.backends.targets_qemu import (
 from paomcp.tools.backends.targets_ssh import (
     SshClientFactory,
     SshProvider,
-    _default_ssh_client_factory,
 )
 
 

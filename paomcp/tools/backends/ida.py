@@ -18,6 +18,7 @@ import logging
 import os
 import threading
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import requests
 
 from paomcp.tools.backends.foundation import build_backend_response
@@ -28,10 +29,37 @@ DEFAULT_IDA_MCP_URL = os.environ.get("PAO_IDA_MCP_URL", "http://127.0.0.1:13337/
 DEFAULT_IDALIB_MCP_URL = os.environ.get(
     "PAO_IDALIB_MCP_URL", "http://127.0.0.1:8745/mcp"
 )
-DEFAULT_IDA_TIMEOUT_SEC = float(os.environ.get("PAO_IDA_TIMEOUT_SEC", "30"))
+DEFAULT_IDA_TIMEOUT_SEC = 30.0
+try:
+    _configured_timeout = float(os.environ.get("PAO_IDA_TIMEOUT_SEC", "30"))
+except (TypeError, ValueError):
+    _configured_timeout = DEFAULT_IDA_TIMEOUT_SEC
+if _configured_timeout <= 0:
+    _configured_timeout = DEFAULT_IDA_TIMEOUT_SEC
+DEFAULT_IDA_TIMEOUT_SEC = _configured_timeout
 MAX_IDA_TIMEOUT_SEC = 120.0
 DEFAULT_IDA_LIMIT = 100
 MAX_IDA_LIMIT = 1000
+MAX_IDA_CODE_BYTES = 64 * 1024
+MAX_IDA_REGIONS = 256
+
+
+def _with_debug_extension(url: str) -> str:
+    """Append ``ext=dbg`` to an IDA MCP URL without string-matching hacks."""
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("ext", "dbg")
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def _check_code_budget(value: Any, *, kind: str) -> None:
+    size = len(value) if isinstance(value, (str, bytes, list, dict)) else 0
+    if size > MAX_IDA_CODE_BYTES:
+        raise ValueError(
+            f"IDA {kind} payload is {size} bytes, exceeding the "
+            f"{MAX_IDA_CODE_BYTES}-byte cap; split it across calls"
+        )
+
 
 # Small curated subset: keeps pao-tools lean instead of proxying
 # all 60+ IDA tools verbatim (token cost on every list_tools call).
@@ -178,10 +206,7 @@ class IdaProMCP:
         urls: tuple = (self.mcp_url, self.idalib_url)
         if method in DBG_METHODS:
             # Debugger tools are hidden unless ?ext=dbg is present.
-            urls = tuple(
-                u if "ext=" in u else (u + ("&ext=dbg" if "?" in u else "?ext=dbg"))
-                for u in urls
-            )
+            urls = tuple(_with_debug_extension(u) for u in urls)
         for url in urls:
             try:
                 data = self._post(url, payload)
@@ -324,6 +349,23 @@ class IdaProMCP:
             params["database"] = database
         return self._call("find_bytes", params)
 
+    @staticmethod
+    def _capped(command: str, value: Any, *, kind: str) -> Optional[Dict[str, Any]]:
+        """Reject over-budget IDA payloads with a typed failure (or None)."""
+        try:
+            _check_code_budget(value, kind=kind)
+        except ValueError as exc:
+            return build_backend_response(
+                command,
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error=str(exc),
+                error_type="ValueError",
+            )
+        return None
+
     def py_eval(self, code: str, database: Optional[str] = None) -> Dict[str, Any]:
         if not code or not code.strip():
             return build_backend_response(
@@ -335,6 +377,9 @@ class IdaProMCP:
                 error="code cannot be empty",
                 error_type="ValueError",
             )
+        rejected = self._capped("ida/py_eval", code, kind="py_eval code")
+        if rejected is not None:
+            return rejected
         params: Dict[str, Any] = {"code": code}
         if database:
             params["database"] = database
@@ -346,6 +391,16 @@ class IdaProMCP:
         mode: str = "prefer_headless",
         preferred_session_id: str = "",
     ) -> Dict[str, Any]:
+        if not input_path or not str(input_path).strip():
+            return build_backend_response(
+                "ida/idb_open",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error="input_path cannot be empty",
+                error_type="ValueError",
+            )
         if mode not in (
             "prefer_headless",
             "force_headless",
@@ -461,12 +516,44 @@ class IdaProMCP:
         return self._call("dbg_stacktrace", params)
 
     def dbg_read(self, regions: Any, database: Optional[str] = None) -> Dict[str, Any]:
+        rejected = self._capped("ida/dbg_read", regions, kind="dbg_read regions")
+        if rejected is not None:
+            return rejected
+        if isinstance(regions, list) and len(regions) > MAX_IDA_REGIONS:
+            return build_backend_response(
+                "ida/dbg_read",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error=(
+                    f"dbg_read accepts at most {MAX_IDA_REGIONS} regions, "
+                    f"got {len(regions)}"
+                ),
+                error_type="ValueError",
+            )
         params = {"regions": regions}
         if database:
             params["database"] = database
         return self._call("dbg_read", params)
 
     def dbg_write(self, regions: Any, database: Optional[str] = None) -> Dict[str, Any]:
+        rejected = self._capped("ida/dbg_write", regions, kind="dbg_write regions")
+        if rejected is not None:
+            return rejected
+        if isinstance(regions, list) and len(regions) > MAX_IDA_REGIONS:
+            return build_backend_response(
+                "ida/dbg_write",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error=(
+                    f"dbg_write accepts at most {MAX_IDA_REGIONS} regions, "
+                    f"got {len(regions)}"
+                ),
+                error_type="ValueError",
+            )
         params = {"regions": regions}
         if database:
             params["database"] = database

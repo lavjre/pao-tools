@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -297,41 +298,69 @@ class TestLocalProcessProvider:
 # ---------------------------------------------------------------------------
 # AttachPidProvider
 # ---------------------------------------------------------------------------
+@pytest.fixture
+def sleeper_pid():
+    """Spawn a child sleep process as an attachable non-self PID."""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        yield proc.pid
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
 class TestAttachPidProvider:
-    def test_start_verifies_liveness(self) -> None:
+    def test_start_verifies_liveness(self, sleeper_pid: int) -> None:
         registry = TargetRegistry()
         handle = registry.create(
             TargetSpec.from_config(
-                "attach_pid", {"pid": os.getpid()}, session_id="sess"
+                "attach_pid", {"pid": sleeper_pid}, session_id="sess"
             )
         )
         registry.start_target_response(target_id=handle.target_id)
         assert handle.state == TargetState.RUNNING
-        assert handle.pid == os.getpid()
+        assert handle.pid == sleeper_pid
 
-    def test_stop_detaches_never_kills(self) -> None:
+    def test_config_rejects_non_positive_pid(self) -> None:
+        with pytest.raises(TargetError, match="positive 'pid'"):
+            TargetSpec.from_config("attach_pid", {"pid": 0}, session_id="sess")
+
+    def test_start_refuses_init_self_and_parent_pids(self) -> None:
+        registry = TargetRegistry()
+        for bad_pid in (1, os.getpid(), os.getppid()):
+            handle = registry.create(
+                TargetSpec.from_config(
+                    "attach_pid", {"pid": bad_pid}, session_id="sess"
+                )
+            )
+            response = registry.start_target_response(target_id=handle.target_id)
+            assert response["parsed"]["success"] is False
+            assert "Refusing to attach" in response["parsed"]["error"]
+            assert handle.state == TargetState.ERROR
+
+    def test_stop_detaches_never_kills(self, sleeper_pid: int) -> None:
         registry = TargetRegistry()
         handle = registry.create(
             TargetSpec.from_config(
-                "attach_pid", {"pid": os.getpid()}, session_id="sess"
+                "attach_pid", {"pid": sleeper_pid}, session_id="sess"
             )
         )
         registry.start_target_response(target_id=handle.target_id)
         registry.stop_target_response(target_id=handle.target_id)
         assert handle.state == TargetState.DETACHED
-        # The current interpreter is definitely still alive.
-        assert os.getpid() > 0
+        # The child is still alive: stop() detaches without killing.
+        assert handle.pid == sleeper_pid
 
 
 # ---------------------------------------------------------------------------
 # attach_debugger dispatch
 # ---------------------------------------------------------------------------
 class TestAttachDebugger:
-    def test_attach_success_marks_target_attached(self) -> None:
+    def test_attach_success_marks_target_attached(self, sleeper_pid: int) -> None:
         registry = TargetRegistry()
         handle = registry.create(
             TargetSpec.from_config(
-                "attach_pid", {"pid": os.getpid()}, session_id="sess"
+                "attach_pid", {"pid": sleeper_pid}, session_id="sess"
             )
         )
         registry.start_target_response(target_id=handle.target_id)
@@ -343,13 +372,13 @@ class TestAttachDebugger:
         assert parsed["success"] is True
         assert parsed["attach"]["attach"]["success"] is True
         assert handle.state == TargetState.ATTACHED
-        assert fake_gdb.attach_calls == [os.getpid()]
+        assert fake_gdb.attach_calls == [sleeper_pid]
 
-    def test_attach_failure_records_error(self) -> None:
+    def test_attach_failure_records_error(self, sleeper_pid: int) -> None:
         registry = TargetRegistry()
         handle = registry.create(
             TargetSpec.from_config(
-                "attach_pid", {"pid": os.getpid()}, session_id="sess"
+                "attach_pid", {"pid": sleeper_pid}, session_id="sess"
             )
         )
         registry.start_target_response(target_id=handle.target_id)

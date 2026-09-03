@@ -1,5 +1,7 @@
 """Unit tests for the reusable backend foundation primitives."""
 
+import os
+
 import pytest
 
 from paomcp.tools.backends.foundation import (
@@ -9,6 +11,7 @@ from paomcp.tools.backends.foundation import (
     mapping_for,
     merge_warnings,
     parse_int,
+    validate_attach_pid,
 )
 
 
@@ -133,3 +136,17 @@ def test_merge_warnings_appends():
     assert response["warnings"] == ["a", "b", "c"]
     merge_warnings(response, None)
     assert response["warnings"] == ["a", "b", "c"]
+
+
+def test_validate_attach_pid_accepts_ordinary_pids():
+    assert validate_attach_pid(4242) == 4242
+
+
+def test_validate_attach_pid_rejects_reserved_and_self():
+    for bad in (0, 1, -5, True, "1234", None, 3.5):
+        with pytest.raises(ValueError):
+            validate_attach_pid(bad)
+    with pytest.raises(ValueError, match="supervisor"):
+        validate_attach_pid(os.getpid())
+    with pytest.raises(ValueError, match="parent"):
+        validate_attach_pid(os.getppid())

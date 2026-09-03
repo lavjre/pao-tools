@@ -98,6 +98,47 @@ class TestDockerStart:
         with pytest.raises(TargetError, match="'docker_image'"):
             TargetSpec.from_config("docker", {})
 
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            "--privileged",
+            "--cap-add=NET_ADMIN",
+            "--cap-drop ALL",
+            "--device=/dev/kvm",
+            "--volume=x:/y",
+            "-v",
+            "-v/src:/dst",
+            "-v /:/host",
+            "--mount=type=bind,src=/,dst=/host",
+            "--security-opt=seccomp=unconfined",
+            "--pid=host",
+            "--pid",
+            "--network=host",
+            "--gpus=all",
+            "--runtime=nvidia",
+        ],
+    )
+    def test_privilege_mount_device_flags_rejected(self, extra: str) -> None:
+        runner = _FakeDockerRunner()
+        provider = DockerProvider(runner=runner)
+        handle = _docker_registry(runner).create(
+            _docker_spec(docker_extra_args=[extra])
+        )
+        with pytest.raises(TargetError, match="Blocked unsafe"):
+            provider.start(handle)
+        assert runner.calls == []
+
+    @pytest.mark.parametrize(
+        "extra",
+        ["--memory=512m", "--cpus=2", "--read-only", "--shm-size=256m", "--user=1000"],
+    )
+    def test_benign_resource_flags_pass_through(self, extra: str) -> None:
+        runner = _FakeDockerRunner(script=[(0, "cid\n", "")])
+        registry = _docker_registry(runner)
+        handle = registry.create(_docker_spec(docker_extra_args=[extra]))
+        registry.start_target_response(target_id=handle.target_id)
+        assert extra in runner.calls[0][0]
+
 
 class TestDockerStop:
     def test_stop_runs_docker_stop_then_marks_stopped(self) -> None:

@@ -9,6 +9,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+from paomcp.tools.backends.targets_gdbserver import (
+    _attach_via_gdb_remote,
+    _find_free_tcp_port,
+    _wait_for_tcp_listen,
+)
 from paomcp.tools.backends.targets import (
     TARGET_CONNECT_SCHEMA,
     TARGET_DISCONNECT_SCHEMA,
@@ -19,9 +24,6 @@ from paomcp.tools.backends.targets import (
     TargetSpec,
     TargetState,
     TcpRemoteProvider,
-    _attach_via_gdb_remote,
-    _find_free_tcp_port,
-    _wait_for_tcp_listen,
 )
 
 

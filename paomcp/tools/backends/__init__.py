@@ -1,4 +1,11 @@
-"""Internal backend adapters used by MCP tool registrations."""
+"""Internal backend adapters used by MCP tool registrations.
+
+Re-export policy: this package exposes the stable facade surface (session
+components, analyzers, registries). Split submodules (``heap_glibc_*``,
+``rop_*``, ``crash_*``, ``targets_*``) are importable directly, but only
+names listed here are covered by the cross-module compatibility tests --
+import anything else from its defining submodule.
+"""
 
 from .backend import (
     BackendSpec,
@@ -109,6 +116,7 @@ __all__ = [
     "MEMORY_REGION_SCHEMA",
     "MachOFile",
     "load_macho",
+    "parse_macho",
     "PwndbgTools",
     "SubprocessTools",
     "GitTools",

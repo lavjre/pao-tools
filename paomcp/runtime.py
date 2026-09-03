@@ -1,11 +1,13 @@
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import uvicorn
+from starlette.middleware import Middleware
 
 from paomcp.http.attach import create_attach_app
+from paomcp.http.auth import BearerAuthMiddleware, check_remote_bind
 from paomcp.server import create_mcp
 from paomcp.services import close_services, create_services
 
@@ -81,14 +83,27 @@ def run_http(
         attach_port,
     )
 
+    # Loopback binds need nothing; any non-loopback bind fails closed here
+    # unless PAO_ALLOW_REMOTE=1 and PAO_MCP_TOKEN are both set. Auth is
+    # scoped per listener so a remote attach port never weakens loopback MCP.
+    token_mcp = check_remote_bind(host, what="MCP server")
+    token_attach = check_remote_bind(attach_host, what="attach server")
+
     services = create_services()
     mcp = create_mcp(services=services)
     attach_app = create_attach_app(services)
+    if token_attach is not None:
+        attach_app.add_middleware(BearerAuthMiddleware, token=token_attach)
     attach_handle = _start_attach_server(attach_host, attach_port, attach_app)
 
     try:
         logger.info("Launching FastMCP server via mcp.run(transport='http')...")
-        mcp.run(transport="http", host=host, port=port, path=http_path)
+        extra_kwargs: Dict[str, Any] = (
+            {"middleware": [Middleware(BearerAuthMiddleware, token=token_mcp)]}
+            if token_mcp is not None
+            else {}
+        )
+        mcp.run(transport="http", host=host, port=port, path=http_path, **extra_kwargs)
     except KeyboardInterrupt:
         logger.info("Received interrupt, shutting down Pao Tools server")
     finally:

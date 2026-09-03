@@ -442,6 +442,7 @@ class HeapHistory:
         *,
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
+        max_arenas: int = 16,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Capture and store a typed heap snapshot for this session."""
@@ -456,6 +457,8 @@ class HeapHistory:
             raise ValueError(
                 f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
             )
+        if max_arenas <= 0:
+            raise ValueError(f"max_arenas must be positive, got {max_arenas!r}")
 
         classification, _mappings, profile, component_status = self._prepare_context(
             cancellation_check
@@ -514,6 +517,14 @@ class HeapHistory:
             warnings.append(f"list_arenas: {w}")
 
         raw_arenas = arena_list_parsed.get("arenas", []) or []
+        arenas_truncated = len(raw_arenas) > max_arenas
+        if arenas_truncated:
+            raw_arenas = raw_arenas[:max_arenas]
+            warnings.append(
+                f"Arena walk capped at {max_arenas} of "
+                f"{len(arena_list_parsed.get('arenas', []) or [])} arenas; "
+                "pass a larger max_arenas for full coverage"
+            )
         arena_summaries: List[Dict[str, Any]] = []
         chunk_ledger: List[Dict[str, Any]] = []
 
@@ -595,6 +606,7 @@ class HeapHistory:
             "summary": {
                 "chunk_count": len(chunk_ledger),
                 "arena_count": len(arena_summaries),
+                "arenas_truncated": arenas_truncated,
             },
         }
         entry = self._remember(name=name, payload=payload)

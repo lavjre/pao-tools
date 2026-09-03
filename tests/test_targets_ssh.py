@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from paomcp.tools.backends.targets_ssh import _default_ssh_client_factory
 from paomcp.tools.backends.targets import (
     DEFAULT_LIBC_FETCH_PATHS,
     TARGET_FETCH_LIBS_SCHEMA,
@@ -18,7 +19,6 @@ from paomcp.tools.backends.targets import (
     TargetRegistry,
     TargetSpec,
     TargetState,
-    _default_ssh_client_factory,
 )
 
 

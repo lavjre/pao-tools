@@ -556,6 +556,7 @@ def register(mcp: FastMCP) -> None:
         session_id: str,
         name: Optional[str] = None,
         max_chunks_per_bin: int = 512,
+        max_arenas: int = 16,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Capture heap snapshot (16 entries/64MiB budget, oldest evicted).
@@ -564,6 +565,7 @@ def register(mcp: FastMCP) -> None:
             session_id: Session to inspect.
             name: Name for later diff/lookup; omitted => id-only.
             max_chunks_per_bin: Cap per bin (default 512).
+            max_arenas: Cap arenas walked (default 16, truncated explicitly).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -575,6 +577,7 @@ def register(mcp: FastMCP) -> None:
             lambda: session.tools.heap.capture_heap_snapshot(
                 name=name,
                 max_chunks_per_bin=max_chunks_per_bin,
+                max_arenas=max_arenas,
                 cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
                     operation_id
                 ),

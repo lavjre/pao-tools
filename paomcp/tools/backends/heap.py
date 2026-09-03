@@ -795,6 +795,7 @@ class HeapTools:
         *,
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
+        max_arenas: int = 16,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         gate = self._gdb_gate("capture_heap_snapshot")
@@ -803,6 +804,7 @@ class HeapTools:
         return self._analyzer().capture_heap_snapshot(
             name=name,
             max_chunks_per_bin=max_chunks_per_bin,
+            max_arenas=max_arenas,
             cancellation_check=cancellation_check,
         )
 

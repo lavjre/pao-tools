@@ -141,6 +141,29 @@ class TestLifecycle:
             controller.initialize()
 
 
+class TestAttachGuardrails:
+    def test_attach_refuses_reserved_pids_without_touching_lldb(
+        self, monkeypatch
+    ) -> None:
+        controller = _make_controller(monkeypatch, list(BANNER))
+        for bad_pid in (0, 1):
+            result, context = controller.attach(bad_pid)
+            assert result["success"] is False
+            assert result["type"] == "ValueError"
+            assert context == []
+        import os
+
+        result, _ = controller.attach(os.getpid())
+        assert result["success"] is False
+
+    def test_set_file_quotes_paths(self, monkeypatch) -> None:
+        captured: Dict = {}
+        controller = _make_controller(monkeypatch, list(BANNER), captured)
+        controller.set_file("/tmp/my prog/x")
+        writes = captured["popen"].stdin.writes
+        assert any('target create "/tmp/my prog/x"' in w for w in writes)
+
+
 class TestCommandExecution:
     def test_execute_command_returns_console_lines(self, monkeypatch) -> None:
         lines = list(BANNER)

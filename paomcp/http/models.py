@@ -1,16 +1,18 @@
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+
+GdbCommand = Annotated[str, StringConstraints(max_length=4096)]
 
 
 class AttachRequest(BaseModel):
     """Request body for /attach."""
 
-    pre: Optional[List[str]] = Field(default=None)
-    pid: int
-    after: Optional[List[str]] = Field(default=None)
-    where: Optional[str] = Field(default=None)
-    session_id: str
+    pre: Optional[List[GdbCommand]] = Field(default=None, max_length=32)
+    pid: int = Field(gt=1)
+    after: Optional[List[GdbCommand]] = Field(default=None, max_length=32)
+    where: Optional[str] = Field(default=None, max_length=1024)
+    session_id: str = Field(max_length=64)
 
 
 class AttachResponse(BaseModel):

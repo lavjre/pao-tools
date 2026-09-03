@@ -12,6 +12,7 @@ values so it stays trivially unit-testable without a debugger.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
@@ -169,6 +170,33 @@ def merge_warnings(
     return response
 
 
+def validate_attach_pid(pid: Any) -> int:
+    """Validate a PID before any debugger/gdbserver attach.
+
+    Rejects PID 0/1 (kernel/init — attaching destabilizes the host),
+    our own supervisor process, and our parent process. Non-integer
+    inputs are rejected; bools are rejected explicitly (``True == 1``).
+    Returns the normalized int on success, raises ValueError otherwise.
+    Every attach path (GDB, LLDB, attach_pid, gdbserver, /attach) must
+    funnel through here instead of reimplementing the blocklist.
+    """
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        raise ValueError(f"attach pid must be an integer, got {pid!r}")
+    if pid <= 1:
+        raise ValueError(
+            f"Refusing to attach to PID {pid}: PID 0/1 would destabilize the host"
+        )
+    if pid == os.getpid():
+        raise ValueError("Refusing to attach to our own debugger supervisor process")
+    try:
+        parent = os.getppid()
+    except Exception:
+        parent = None
+    if parent is not None and pid == parent:
+        raise ValueError("Refusing to attach to our parent process")
+    return pid
+
+
 __all__ = [
     "DEFAULT_PARSER_VERSION",
     "build_backend_response",
@@ -178,4 +206,5 @@ __all__ = [
     "WriterNotQuiescentError",
     "LiveInferiorGuard",
     "merge_warnings",
+    "validate_attach_pid",
 ]
