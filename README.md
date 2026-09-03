@@ -312,6 +312,24 @@ typed verdict instead of failing startup. Bridge defaults are token-lean
 Publish findings back with `ida_publish_crash` / `ida_publish_note`, which
 write IDA comments through `idc.set_cmt` via `py_eval`.
 
+## Task profiles
+
+Listing all 199 tools costs ~28k tokens before any work happens. Set
+`PAO_PROFILE` to pay only for the mission (server logs the active profile
+at startup; default `full` keeps everything):
+
+| Profile | Tools | Scope |
+|---------|-------|-------|
+| `full` | 199 | Everything (default). |
+| `pwn` | 169 | Debugger, crash triage, heap, ROP, targets, exploit running. No IDA/Mach-O/kernel. |
+| `rev` | 126 | Static analysis, Ghidra + IDA, dynamic reading. No heap/ROP/crash/attack. |
+| `bounty` | 192 | Research, triage, fuzzing, reporting. No write primitives or drivers. |
+
+Each profile ships a workflow skill under `skills/` (`pwn-exploit-dev`,
+`reverse-engineering`, `bounty-hunting`, plus the existing
+`heap-exploitation-triage`): ordered tool workflows with rules, so
+findings build on each other instead of guessing.
+
 ## Cases, fuzzing, and bounty reports
 
 Research sessions persist to `cases.db` under the runtime root and rehydrate

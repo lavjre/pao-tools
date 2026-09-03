@@ -1,7 +1,7 @@
 {
   "name": "pao-tools",
   "displayName": "Pao Tools",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Autonomous low-level security research MCP server driving pwndbg/gdb and pwndbg-lldb: debugger sessions, memory forensics, glibc heap analysis (corruption classification, House-of-* technique detection, UAF scans), ROP/gadget tooling, and exploit-research session management.",
   "author": {
     "name": "Pao Tools"

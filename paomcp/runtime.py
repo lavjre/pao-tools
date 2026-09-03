@@ -1,4 +1,5 @@
 import logging
+import os
 import threading
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -58,8 +59,9 @@ def _stop_attach_server(handle: Optional[AttachServerHandle]) -> None:
 
 def run_stdio() -> None:
     logger.info("Initializing Pao Tools server (stdio mode)...")
+    logger.info("Tool profile: %s", os.environ.get("PAO_PROFILE", "full"))
     services = create_services()
-    mcp = create_mcp(services=services)
+    mcp = create_mcp(services=services, profile=os.environ.get("PAO_PROFILE"))
     try:
         logger.info("Starting MCP server in stdio mode...")
         mcp.run(transport="stdio")
@@ -90,7 +92,7 @@ def run_http(
     token_attach = check_remote_bind(attach_host, what="attach server")
 
     services = create_services()
-    mcp = create_mcp(services=services)
+    mcp = create_mcp(services=services, profile=os.environ.get("PAO_PROFILE"))
     attach_app = create_attach_app(services)
     if token_attach is not None:
         attach_app.add_middleware(BearerAuthMiddleware, token=token_attach)

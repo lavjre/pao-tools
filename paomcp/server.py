@@ -13,13 +13,15 @@ from paomcp.tools import register_all_tools
 logger = logging.getLogger(__name__)
 
 
-def create_mcp(services: Optional[AppServices] = None) -> FastMCP:
+def create_mcp(
+    services: Optional[AppServices] = None, profile: Optional[str] = None
+) -> FastMCP:
     mcp = FastMCP(
         name="pao-tools",
         lifespan=create_lifespan(services=services),
     )
     register_health_routes(mcp)
-    register_all_tools(mcp)
+    register_all_tools(mcp, profile=profile)
     return mcp
 
 

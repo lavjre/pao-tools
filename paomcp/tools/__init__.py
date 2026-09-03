@@ -1,9 +1,19 @@
 """FastMCP tool registration package."""
 
+from typing import Optional
+
 from fastmcp import FastMCP
 
+from paomcp.tools.profiles import resolve_profile
 
-def register_all_tools(mcp: FastMCP) -> None:
+
+def register_all_tools(mcp: FastMCP, profile: Optional[str] = None) -> None:
+    """Register tool modules, restricted to a task profile when named.
+
+    ``profile`` is one of ``full`` (default), ``pwn``, ``rev``, ``bounty``
+    (see :mod:`paomcp.tools.profiles`). Modules outside the profile are
+    never registered, so ``list_tools`` only costs what the mission needs.
+    """
     from . import (
         artifacts,
         attack,
@@ -32,31 +42,37 @@ def register_all_tools(mcp: FastMCP) -> None:
         targets,
     )
 
-    artifacts.register(mcp)
-    attack.register(mcp)
-    compatibility.register(mcp)
-    crash.register(mcp)
-    decompiler.register(mcp)
-    debug.register(mcp)
-    debugger_memory.register(mcp)
-    elf_runtime.register(mcp)
-    fuzz.register(mcp)
-    heap.register(mcp)
-    ida.register(mcp)
-    inspect.register(mcp)
-    kernel_slub.register(mcp)
-    macho.register(mcp)
-    operations.register(mcp)
-    platform.register(mcp)
-    processes.register(mcp)
-    repos.register(mcp)
-    regions.register(mcp)
-    python_env.register(mcp)
-    paocli.register(mcp)
-    research.register(mcp)
-    rop.register(mcp)
-    static_analysis.register(mcp)
-    targets.register(mcp)
+    enabled = resolve_profile(profile)
+    modules = {
+        "artifacts": artifacts,
+        "attack": attack,
+        "compatibility": compatibility,
+        "crash": crash,
+        "decompiler": decompiler,
+        "debug": debug,
+        "debugger_memory": debugger_memory,
+        "elf_runtime": elf_runtime,
+        "fuzz": fuzz,
+        "heap": heap,
+        "ida": ida,
+        "inspect": inspect,
+        "kernel_slub": kernel_slub,
+        "macho": macho,
+        "operations": operations,
+        "platform": platform,
+        "processes": processes,
+        "paocli": paocli,
+        "python_env": python_env,
+        "repos": repos,
+        "regions": regions,
+        "research": research,
+        "rop": rop,
+        "static_analysis": static_analysis,
+        "targets": targets,
+    }
+    for name, module in modules.items():
+        if enabled is None or name in enabled:
+            module.register(mcp)
 
 
 __all__ = ["register_all_tools"]
