@@ -54,6 +54,8 @@ from .research import (
     TimelineEvent,
 )
 from .fuzz import FUZZ_BATCH_SCHEMA, FUZZ_INPUTS_SCHEMA, FuzzBatch, generate_inputs
+from .kernel_oops import KERNEL_OOPS_SCHEMA, analyze_kernel_oops
+from .musl import MUSL_CHUNK_SCHEMA, MUSL_GROUPS_SCHEMA, MuslAnalyzer
 from .research_bundle import BundleError, ResearchBundle
 from .research_report import ReportError, ResearchReport
 from .research_store import CaseStore
@@ -165,4 +167,9 @@ __all__ = [
     "generate_inputs",
     "FUZZ_BATCH_SCHEMA",
     "FUZZ_INPUTS_SCHEMA",
+    "analyze_kernel_oops",
+    "KERNEL_OOPS_SCHEMA",
+    "MuslAnalyzer",
+    "MUSL_CHUNK_SCHEMA",
+    "MUSL_GROUPS_SCHEMA",
 ]

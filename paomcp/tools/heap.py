@@ -818,5 +818,68 @@ def register(mcp: FastMCP) -> None:
         )
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def inspect_musl_chunk(
+        session_id: str,
+        address: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Resolve a musl user pointer to its mallocng group; verdict valid/corrupted.
+
+        Args:
+            session_id: Session to inspect.
+            address: Hex/dec user pointer.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.inspect_musl_chunk(
+                address=address,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_musl_groups(
+        session_id: str,
+        max_groups: int = 64,
+        max_areas: int = 16,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Inventory musl allocation groups via ctx.meta_area_head.
+
+        Args:
+            session_id: Session to inspect.
+            max_groups: Cap groups returned (max 4096).
+            max_areas: Cap meta areas walked (max 64).
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.list_musl_groups(
+                max_groups=max_groups,
+                max_areas=max_areas,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]

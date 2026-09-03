@@ -106,7 +106,7 @@ tool answers in the same envelope.
 
 ## Response API
 
-The current server contract exposes 193 MCP tools. Every tool returns the same
+The current server contract exposes 199 MCP tools. Every tool returns the same
 `api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
@@ -222,7 +222,7 @@ claude plugin marketplace add git@github.com:lavjre/pao-tools.git
 claude plugin install pao-tools@pao-tools
 ```
 
-After install, the `pao-tools` MCP server appears as a stdio server and its 193
+After install, the `pao-tools` MCP server appears as a stdio server and its 199
 tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
 available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
 (`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
@@ -326,6 +326,12 @@ Remote binds are fail-closed: loopback needs nothing, anything else requires
 `PAO_ALLOW_REMOTE=1` plus a `PAO_MCP_TOKEN` bearer (per listener, `/healthz`
 stays open). `GET /readyz` reports debugger readiness honestly (503 when the
 default debug session is down; Ghidra/IDA stay advisory).
+
+musl targets get typed `inspect_musl_chunk` / `list_musl_groups` (mallocng
+group math mirrored from source, debug-symbol resolved, never guessed);
+kernel logs get `analyze_kernel_oops` (fault kind, RIP, trace, stable
+fingerprint); JIT regions get write-watch (`arm_region_watch` /
+`check_region_watches`) to catch code emission as byte diffs.
 
 ## Scope and limits
 

@@ -746,5 +746,26 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def analyze_kernel_oops(
+        log_text: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Triage a Linux kernel oops/panic log (no debugger needed).
+
+        Parses fault kind (NULL deref, KASAN UAF/OOB, GPF, ...), fault
+        address, RIP symbol+offset, call trace, CPU/comm, taint, and slab
+        cache, with an ASLR-stable fingerprint for dedup. Paste dmesg or
+        serial output (max 1MiB).
+
+        Args:
+            log_text: Kernel log text containing the oops.
+        """
+        from paomcp.tools.backends.kernel_oops import analyze_kernel_oops as triage
+
+        _ = ctx
+        return await run_blocking(lambda: triage(log_text))
+
 
 __all__ = ["register"]

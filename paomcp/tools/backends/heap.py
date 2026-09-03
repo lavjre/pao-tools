@@ -261,6 +261,19 @@ class HeapTools:
             discovery=self.discovery,
         )
 
+        # musl mallocng is likewise self-gated: dedicated tools route here
+        # directly while the family-routed generic tools keep returning the
+        # honest ``unsupported`` verdict for musl (musl has no bins/arenas).
+        from .musl import MuslAnalyzer  # noqa: PLC0415 (same cycle rule)
+
+        self.musl = MuslAnalyzer(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
+        )
+
     # How long a detected family stays cached on this facade.  Short on
     # purpose: the components re-classify per call anyway, so this only avoids
     # a second full classification when consecutive dispatched calls land
@@ -616,6 +629,39 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    # ---- musl mallocng surface -------------------------------------
+    def inspect_musl_chunk(
+        self,
+        *,
+        address: str,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve a user pointer to its mallocng group and validate it."""
+        gate = self._gdb_gate("inspect_musl_chunk")
+        if gate is not None:
+            return gate
+        return self.musl.inspect_musl_chunk(
+            address=address,
+            cancellation_check=cancellation_check,
+        )
+
+    def list_musl_groups(
+        self,
+        *,
+        max_groups: int = 64,
+        max_areas: int = 16,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Inventory musl allocation groups via ctx.meta_area_head."""
+        gate = self._gdb_gate("list_musl_groups")
+        if gate is not None:
+            return gate
+        return self.musl.list_musl_groups(
+            max_groups=max_groups,
+            max_areas=max_areas,
+            cancellation_check=cancellation_check,
+        )
+
     # ---- S6.11 libmalloc zone surface --------------------------------
     def inspect_libmalloc_zones(
         self,
@@ -692,6 +738,43 @@ class HeapTools:
             address_kind=address_kind,
             cancellation_check=cancellation_check,
         )
+
+    def arm_region_watch(
+        self,
+        *,
+        address: str,
+        length: int,
+        label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Snapshot a region hash for later JIT-write detection."""
+        gate = self._gdb_gate("arm_region_watch")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().arm_region_watch(
+            address=address,
+            length=length,
+            label=label,
+        )
+
+    def check_region_watches(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Re-hash armed regions; report changed byte ranges."""
+        gate = self._gdb_gate("check_region_watches")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().check_region_watches(
+            cancellation_check=cancellation_check
+        )
+
+    def disarm_region_watch(self, *, watch_id: str) -> Dict[str, Any]:
+        """Drop one armed region watch."""
+        gate = self._gdb_gate("disarm_region_watch")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().disarm_region_watch(watch_id=watch_id)
 
     # ---- S6.4 heap corruption classifier ------------------------------
     def classify_heap_corruption(

@@ -9,7 +9,7 @@ allocator-independent -- no family gate.  Nothing is written, so there is no
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
@@ -86,6 +86,80 @@ def register(mcp: FastMCP) -> None:
                     operation_id
                 ),
             ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def arm_region_watch(
+        session_id: str,
+        address: str,
+        length: int,
+        label: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Snapshot a region hash to detect later JIT writes.
+
+        Args:
+            session_id: Session to inspect.
+            address: Hex/dec region base.
+            length: Bytes to watch (max 64MiB total retained baselines).
+            label: Optional human tag echoed in check output.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.arm_region_watch(
+                address=address,
+                length=length,
+                label=label,
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def check_region_watches(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Re-hash armed regions; report changed byte ranges (JIT emission)."""
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.check_region_watches(
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def disarm_region_watch(
+        session_id: str,
+        watch_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Drop one armed region watch."""
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.disarm_region_watch(watch_id=watch_id),
         )
         result["session_id"] = session.session_id
         return result

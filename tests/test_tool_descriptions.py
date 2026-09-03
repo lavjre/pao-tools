@@ -71,7 +71,7 @@ async def test_all_mcp_tools_publish_unified_response_schema():
         "meta",
     }
 
-    assert len(tools) == 193
+    assert len(tools) == 199
     tool_names = {tool.name for tool in tools}
     assert {"paocli", "paocli_stop", "list_paocli_sessions"} <= tool_names
     assert {"decompile_binary", "get_decompiler_status"} <= tool_names
@@ -183,6 +183,13 @@ async def test_all_mcp_tools_publish_unified_response_schema():
     assert "generate_bounty_report" in tool_names
     assert {"generate_fuzz_inputs", "run_fuzz_batch"} <= tool_names
     assert {"ida_publish_crash", "ida_publish_note"} <= tool_names
+    assert {"inspect_musl_chunk", "list_musl_groups"} <= tool_names
+    assert {
+        "arm_region_watch",
+        "check_region_watches",
+        "disarm_region_watch",
+        "analyze_kernel_oops",
+    } <= tool_names
     legacy_prefix = "".join(("pwn", "cli"))
     assert all(legacy_prefix not in name for name in tool_names)
     removed_backend = "".join(("ret", "dec"))

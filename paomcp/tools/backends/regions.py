@@ -27,8 +27,11 @@ gate -- a heap of any (or unknown) family can be region-tracked.
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.foundation import (
     LiveInferiorGuard,
     build_backend_response,
@@ -39,6 +42,11 @@ from paomcp.tools.backends.heap import PARSER_VERSION
 
 JIT_REGIONS_SCHEMA = "pao.jit-regions.v1"
 MEMORY_REGION_SCHEMA = "pao.memory-region.v1"
+REGION_WATCH_SCHEMA = "pao.region-watch.v1"
+MAX_WATCH_BYTES = 64 * 1024 * 1024
+MAX_WATCH_BASELINE_BYTES = 64 * 1024 * 1024
+MAX_WATCHES = 32
+MAX_REPORTED_RANGES = 64
 
 # Region normalization constants.
 _PERMISSION_CHARS = frozenset("rwxps-")
@@ -84,6 +92,7 @@ class JitRegionTracker:
 
     def __init__(self, facade: Any) -> None:
         self.facade = facade
+        self._watches: Dict[str, Dict[str, Any]] = {}
 
     # -- context -----------------------------------------------------
     def _require_live(self) -> None:
@@ -285,9 +294,184 @@ class JitRegionTracker:
             warnings=warnings,
         )
 
+    # -- write-watch (JIT code-emission detection) -------------------
+    def _read_exact(self, address: int, length: int) -> Optional[bytes]:
+        """Read exactly ``length`` bytes or return None (never partial)."""
+        result = self.facade.gdb.read_memory_bytes(f"0x{address:x}", length)
+        if not result.get("success"):
+            return None
+        contents = DebuggerOperations._memory_contents(result)
+        if contents is None:
+            return None
+        try:
+            raw = bytes.fromhex(str(contents))
+        except ValueError:
+            return None
+        return raw if len(raw) == length else None
+
+    @staticmethod
+    def _changed_ranges(before: bytes, after: bytes) -> List[List[int]]:
+        """Coalesce differing offsets into [start, end) ranges (capped)."""
+        ranges: List[List[int]] = []
+        start: Optional[int] = None
+        for offset, (old, new) in enumerate(zip(before, after)):
+            if old != new:
+                if start is None:
+                    start = offset
+            elif start is not None:
+                ranges.append([start, offset])
+                start = None
+                if len(ranges) >= MAX_REPORTED_RANGES:
+                    return ranges
+        if start is not None and len(ranges) < MAX_REPORTED_RANGES:
+            ranges.append([start, len(before)])
+        return ranges
+
+    def arm_region_watch(
+        self,
+        *,
+        address: str,
+        length: int,
+        label: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Snapshot a region hash; later checks report JIT writes as diffs."""
+        self._require_live()
+        base = parse_int(address)
+        if base is None:
+            raise ValueError(f"address must be an integer, got {address!r}")
+        if length <= 0 or length > MAX_WATCH_BYTES:
+            raise ValueError(f"length must be between 1 and {MAX_WATCH_BYTES}")
+        if len(self._watches) >= MAX_WATCHES:
+            raise ValueError(f"at most {MAX_WATCHES} region watches per session")
+        retained = sum(len(w["snapshot"]) for w in self._watches.values())
+        if retained + length > MAX_WATCH_BASELINE_BYTES:
+            raise ValueError(
+                "region-watch baseline budget exhausted "
+                f"({retained} of {MAX_WATCH_BASELINE_BYTES} bytes retained); "
+                "disarm a watch or watch a smaller range"
+            )
+        snapshot = self._read_exact(base, length)
+        if snapshot is None:
+            return build_backend_response(
+                "arm_region_watch",
+                parsed={
+                    "schema": REGION_WATCH_SCHEMA,
+                    "supported": True,
+                    "verdict": "unreadable",
+                    "reason": "region bytes could not be read at arm time",
+                    "watch_id": None,
+                },
+                raw_responses=[],
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=None,
+            )
+        watch_id = uuid.uuid4().hex[:12]
+        self._watches[watch_id] = {
+            "watch_id": watch_id,
+            "address": base,
+            "length": length,
+            "label": label,
+            "sha256": hashlib.sha256(snapshot).hexdigest(),
+            "snapshot": snapshot,
+        }
+        return build_backend_response(
+            "arm_region_watch",
+            parsed={
+                "schema": REGION_WATCH_SCHEMA,
+                "supported": True,
+                "verdict": "armed",
+                "watch_id": watch_id,
+                "address": base,
+                "length": length,
+                "label": label,
+            },
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def check_region_watches(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Re-hash every armed region; report changed byte ranges."""
+        self._require_live()
+        reports: List[Dict[str, Any]] = []
+        for watch in list(self._watches.values()):
+            if cancellation_check is not None:
+                cancellation_check()
+            current = self._read_exact(watch["address"], watch["length"])
+            if current is None:
+                reports.append({**watch, "verdict": "unreadable", "changed": None})
+                continue
+            digest = hashlib.sha256(current).hexdigest()
+            if digest == watch["sha256"]:
+                reports.append({**watch, "verdict": "unchanged", "changed": False})
+                continue
+            # Re-read the baseline is impossible (it lived only as a hash),
+            # so changed ranges need both buffers: keep the last hash AND
+            # the last full bytes for armed watches.
+            baseline = watch.get("snapshot")
+            if baseline is None or len(baseline) != watch["length"]:
+                reports.append(
+                    {
+                        **{k: v for k, v in watch.items() if k != "snapshot"},
+                        "verdict": "changed",
+                        "changed": True,
+                        "changed_ranges": [],
+                        "changed_range_count": 0,
+                        "note": "baseline bytes not retained; re-arm for ranges",
+                    }
+                )
+                continue
+            ranges = self._changed_ranges(baseline, current)
+            reports.append(
+                {
+                    **{k: v for k, v in watch.items() if k != "snapshot"},
+                    "verdict": "changed",
+                    "changed": True,
+                    "changed_ranges": ranges,
+                    "changed_range_count": len(ranges),
+                    "changed_bytes": sum(e - s for s, e in ranges),
+                }
+            )
+        return build_backend_response(
+            "check_region_watches",
+            parsed={
+                "schema": REGION_WATCH_SCHEMA,
+                "watch_count": len(reports),
+                "changed_count": sum(1 for r in reports if r.get("changed")),
+                "watches": reports,
+            },
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
+    def disarm_region_watch(self, *, watch_id: str) -> Dict[str, Any]:
+        """Drop one armed region watch."""
+        removed = self._watches.pop(watch_id, None)
+        return build_backend_response(
+            "disarm_region_watch",
+            parsed={
+                "schema": REGION_WATCH_SCHEMA,
+                "watch_id": watch_id,
+                "removed": removed is not None,
+            },
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=None,
+        )
+
 
 __all__ = [
     "JitRegionTracker",
     "JIT_REGIONS_SCHEMA",
     "MEMORY_REGION_SCHEMA",
+    "REGION_WATCH_SCHEMA",
 ]

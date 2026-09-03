@@ -382,3 +382,46 @@ class TestFacadeRouting:
         parsed = heap.classify_memory_region(address=hex(0x300000))["parsed"]
         assert parsed["verdict"] == "mapped"
         assert parsed["region"]["jit_candidate"] is True
+
+
+class TestRegionWatch:
+    def test_arm_check_unchanged_disarm(self):
+        heap, gdb = build_regions()
+        gdb.place(0x300000, b"\x90" * 256)
+        armed = heap.arm_region_watch(address=hex(0x300000), length=256, label="jit")
+        assert armed["parsed"]["verdict"] == "armed"
+        watch_id = armed["parsed"]["watch_id"]
+        checked = heap.check_region_watches()["parsed"]
+        assert checked["watch_count"] == 1
+        assert checked["changed_count"] == 0
+        assert checked["watches"][0]["verdict"] == "unchanged"
+        dropped = heap.disarm_region_watch(watch_id=watch_id)["parsed"]
+        assert dropped["removed"] is True
+        assert heap.check_region_watches()["parsed"]["watch_count"] == 0
+
+    def test_write_shows_changed_ranges(self):
+        heap, gdb = build_regions()
+        blob = bytearray(b"\x90" * 256)
+        gdb.place(0x300000, bytes(blob))
+        heap.arm_region_watch(address=hex(0x300000), length=256)
+        # The fake serves exact placements, so emulate a JIT write by
+        # replacing the whole blob with two patched ranges.
+        blob[10:14] = b"\xcc" * 4
+        blob[100:102] = b"\xcc" * 2
+        gdb.place(0x300000, bytes(blob))
+        report = heap.check_region_watches()["parsed"]["watches"][0]
+        assert report["verdict"] == "changed"
+        assert report["changed"] is True
+        assert report["changed_ranges"] == [[10, 14], [100, 102]]
+        assert report["changed_bytes"] == 6
+
+    def test_arm_unreadable_region(self):
+        heap, _ = build_regions()
+        parsed = heap.arm_region_watch(address=hex(0x9FFF0000), length=64)["parsed"]
+        assert parsed["verdict"] == "unreadable"
+        assert parsed["watch_id"] is None
+
+    def test_arm_validates_bounds(self):
+        heap, _ = build_regions()
+        with pytest.raises(ValueError, match="length"):
+            heap.arm_region_watch(address=hex(0x300000), length=0)
