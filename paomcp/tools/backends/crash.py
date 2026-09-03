@@ -708,7 +708,18 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
                 "stable": False,
             }
 
-        host_path = os.path.realpath(raw_path)
+        if (
+            os.name == "nt"
+            and normalized.startswith("/")
+            and not normalized.startswith("//")
+        ):
+            # A POSIX-style absolute path observed from an inferior (e.g. a
+            # Linux container target) is not a Windows host path; resolving
+            # it would prepend the current drive letter and fabricate an
+            # identity (``/workspace/target`` -> ``D:/Workspace/target``).
+            host_path = normalized
+        else:
+            host_path = os.path.realpath(raw_path)
         resolved = host_path.replace("\\", "/").rstrip("/")
         identity: Dict[str, Any] = {
             "kind": "file",

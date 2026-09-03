@@ -1544,3 +1544,11 @@ def test_core_reference_rejects_failed_payload_integrity():
             session_id="alpha",
             verification={"valid": False, "artifact": metadata.to_dict()},
         )
+
+
+def test_module_identity_keeps_posix_container_paths_verbatim():
+    identity = CrashTriage._module_identity({"file": "/workspace/target"})
+    assert identity["kind"] == "file"
+    assert identity["path"] == "/workspace/target"
+    assert identity["name"] == "target"
+    assert identity["stable"] is True
