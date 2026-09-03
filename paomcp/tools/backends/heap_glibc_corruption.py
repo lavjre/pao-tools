@@ -65,6 +65,8 @@ from paomcp.tools.backends.heap_snapshots import (
 )
 
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
+from paomcp.tools.backends.heap_technique_catalog import technique_hints_for
+from paomcp.tools.backends.heap_technique_context import resolve_top_chunk
 
 # ----------------------------------------------------------------------
 # glibc malloc_chunk parsing
@@ -474,13 +476,7 @@ class GlibcHeapCorruption:
 
         # Additive technique-analysis hints over the already-collected inspector
         # outputs.  Purely additive: never mutates findings, verdicts, or the
-        # check list.  Lazy import keeps the module-level import cycle broken
-        # (heap_techniques imports this module at its top).
-        from .heap_techniques import (
-            resolve_top_chunk,
-            technique_hints_for,
-        )  # noqa: PLC0415
-
+        # check list.
         top_chunk = resolve_top_chunk(
             bins=self.bins,
             arenas=self.arenas,
