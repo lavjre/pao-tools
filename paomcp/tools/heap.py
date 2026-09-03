@@ -556,6 +556,8 @@ def register(mcp: FastMCP) -> None:
         name: Optional[str] = None,
         max_chunks_per_bin: int = 512,
         max_arenas: int = 16,
+        max_ledger_entries: int = 100000,
+        timeout_seconds: Optional[float] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Capture heap snapshot (16 entries/64MiB budget, oldest evicted).
@@ -565,6 +567,8 @@ def register(mcp: FastMCP) -> None:
             name: Name for later diff/lookup; omitted => id-only.
             max_chunks_per_bin: Cap per bin (default 512).
             max_arenas: Cap arenas walked (default 16, truncated explicitly).
+            max_ledger_entries: Cap ledger rows (default 100000).
+            timeout_seconds: Overall budget, default 300 (env PAO_SNAPSHOT_TIMEOUT_SECONDS).
         """
         services = get_services(ctx)
         session = resolve_debug_session(
@@ -577,6 +581,8 @@ def register(mcp: FastMCP) -> None:
                 name=name,
                 max_chunks_per_bin=max_chunks_per_bin,
                 max_arenas=max_arenas,
+                max_ledger_entries=max_ledger_entries,
+                timeout_seconds=timeout_seconds,
                 cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
                     operation_id
                 ),

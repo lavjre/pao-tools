@@ -837,6 +837,14 @@ class TestArenaLayoutCache:
             "2.35",
             "/lib/libc.so.6",
             64,
+            None,
+        )
+        assert arena_layout_cache_key(classification, profile, epoch=3) == (
+            "glibc",
+            "2.35",
+            "/lib/libc.so.6",
+            64,
+            3,
         )
         assert (
             arena_layout_cache_key({**classification, "family": "musl"}, profile)
@@ -845,3 +853,17 @@ class TestArenaLayoutCache:
         assert (
             arena_layout_cache_key({**classification, "evidence": []}, profile) is None
         )
+
+    def test_epoch_change_retires_cached_layout(self):
+        dbg = ArenaFakeDebugger()
+        arenas, gdb = build_arenas(debugger=dbg)
+        self._ring(gdb)
+        assert arenas.list_arenas()["parsed"]["verdict"] == "parsed"
+        # New inferior epoch (re-run): offsets must resolve again, so break
+        # resolution and expect unresolvable instead of a stale hit.
+        current_epoch = gdb.get_inferior_epoch()
+        gdb.get_inferior_epoch = lambda: current_epoch + 1
+        for key in [k for k in dbg.expression_map if "main_arena." in k]:
+            del dbg.expression_map[key]
+        result = arenas.list_arenas()
+        assert result["parsed"]["verdict"] == "unresolvable"

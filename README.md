@@ -323,7 +323,7 @@ at startup; default `full` keeps everything):
 | `full` | 199 | Everything (default). |
 | `pwn` | 169 | Debugger, crash triage, heap, ROP, targets, exploit running. No IDA/Mach-O/kernel. |
 | `rev` | 126 | Static analysis, Ghidra + IDA, dynamic reading. No heap/ROP/crash/attack. |
-| `bounty` | 192 | Research, triage, fuzzing, reporting. No write primitives or drivers. |
+| `bounty` | 192 | Research, triage, fuzzing, reporting. Omits write-primitive/driver modules (scoping only). |
 | `chrome` | 154 | Browser/JIT: debugger, crash, JIT regions, decompilers. No heap/ROP/attack. |
 | `kernel` | 165 | Oops triage, SLUB, QEMU targets. No userland heap/drivers. |
 | `firmware` | 84 | Static-only reversing. No live target at all. |
@@ -334,6 +334,10 @@ Each profile ships a workflow skill under `skills/` (`pwn-exploit-dev`,
 `kernel-exploitation`, `firmware-reversing`, `ctf-pwn`, plus the existing
 `heap-exploitation-triage`): ordered tool workflows with rules, so
 findings build on each other instead of guessing.
+
+Profiles are token budgets, not authority boundaries: unregistered modules
+simply disappear from `list_tools`, while the backend bundle stays fully
+constructed. Never rely on a profile for isolation.
 
 ## Cases, fuzzing, and bounty reports
 

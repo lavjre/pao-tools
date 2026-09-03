@@ -27,6 +27,44 @@ from typing import (
 from paomcp.tools.backends.foundation import build_backend_response, parse_int
 from paomcp.tools.backends.gdb import GdbController
 
+# System PATH used to resolve provider infrastructure binaries (qemu,
+# gdbserver). Deliberately independent of any caller-supplied PATH so a
+# spec env cannot redirect which helper executable gets spawned. An
+# explicit absolute path in the spec bypasses the lookup (checked below).
+SYSTEM_EXECUTABLE_PATH = os.defpath or os.pathsep.join(
+    ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
+)
+
+
+def resolve_infra_executable(name: str, *, what: str) -> str:
+    """Resolve an infrastructure helper binary to an absolute path.
+
+    Bare names are looked up on the sanitized system PATH only; absolute
+    paths must exist and be executable. Anything else raises TargetError
+    instead of letting ``Popen`` resolve through a caller-controlled PATH.
+    """
+    import shutil
+
+    if not isinstance(name, str) or not name.strip():
+        raise TargetError(f"{what} must be a non-empty executable name")
+    candidate = name.strip()
+    if os.path.sep in candidate or (
+        os.path.altsep is not None and os.path.altsep in candidate
+    ):
+        resolved = os.path.abspath(candidate)
+        if os.path.isfile(resolved) and os.access(resolved, os.X_OK):
+            return resolved
+        raise TargetError(f"{what} '{candidate}' does not exist or is not executable")
+    found = shutil.which(candidate, path=SYSTEM_EXECUTABLE_PATH)
+    if found is None:
+        raise TargetError(
+            f"{what} '{candidate}' not found on the system PATH "
+            f"({SYSTEM_EXECUTABLE_PATH}); pass an absolute path to use a "
+            "custom build"
+        )
+    return found
+
+
 PARSER_VERSION = "1"
 TARGET_CREATE_SCHEMA = "pao.target-create.v1"
 TARGET_LIST_SCHEMA = "pao.target-list.v1"

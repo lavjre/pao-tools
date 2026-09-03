@@ -162,6 +162,8 @@ class AllocatorAnalyzer(Protocol):
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         max_arenas: int = 16,
+        max_ledger_entries: int = 100_000,
+        timeout_seconds: Optional[float] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]: ...
 
@@ -329,12 +331,16 @@ class _ForwardingAnalyzer:
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         max_arenas: int = 16,
+        max_ledger_entries: int = 100_000,
+        timeout_seconds: Optional[float] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         return self.facade.history.capture_heap_snapshot(
             name=name,
             max_chunks_per_bin=max_chunks_per_bin,
             max_arenas=max_arenas,
+            max_ledger_entries=max_ledger_entries,
+            timeout_seconds=timeout_seconds,
             cancellation_check=cancellation_check,
         )
 

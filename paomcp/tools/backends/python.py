@@ -62,7 +62,7 @@ class PythonTools:
 
             # Create venv using UV
             cmd = ["uv", "venv", self.venv_path]
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
             if result.returncode == 0:
                 logger.info("Installing default packages...")
@@ -75,7 +75,7 @@ class PythonTools:
                     self.venv_path,
                 ] + self.DEFAULT_PACKAGES
                 install_result = subprocess.run(
-                    install_cmd, capture_output=True, text=True
+                    install_cmd, capture_output=True, text=True, timeout=600
                 )
 
                 if install_result.returncode == 0:
@@ -148,17 +148,33 @@ class PythonTools:
                 "type": type(e).__name__,
             }
 
+    # Ad-hoc code is staged as a temp file before execution; cap it so a
+    # runaway paste cannot fill the scripts dir.
+    MAX_CODE_BYTES = 256 * 1024
+
     def execute_code(
         self, code: str, cwd: Optional[str] = None, timeout: Optional[float] = 300.0
     ) -> Dict[str, Any]:
         """
         Execute ad-hoc Python code using a temporary runtime script.
 
-        :param code: Python code to execute
+        :param code: Python code to execute (capped at 256 KiB)
         :param cwd: Working directory for execution
         :param timeout: Execution timeout in seconds
         :returns: Execution results
         """
+        if not isinstance(code, str) or not code.strip():
+            return {"success": False, "error": "code cannot be empty"}
+        if len(code.encode("utf-8")) > self.MAX_CODE_BYTES:
+            return {
+                "success": False,
+                "error": (
+                    f"code is {len(code.encode('utf-8'))} bytes, exceeding the "
+                    f"{self.MAX_CODE_BYTES}-byte cap; stage it as a file and "
+                    "use execute_script instead"
+                ),
+                "type": "ValueError",
+            }
         try:
             # Create temporary script file
             fd, script_path = tempfile.mkstemp(
@@ -186,10 +202,28 @@ class PythonTools:
         """
         Install additional Python packages using UV.
 
+        Mutating the shared venv is gated behind ``PAO_ALLOW_PIP_INSTALL=1``:
+        installs persist for every later session, so they stay opt-in.
+
         :param packages: List of packages to install
         :param upgrade: Whether to upgrade existing packages
         :returns: Installation results
         """
+        if os.environ.get("PAO_ALLOW_PIP_INSTALL", "").lower() not in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return {
+                "success": False,
+                "packages": packages,
+                "error": (
+                    "Package installation is disabled; set PAO_ALLOW_PIP_INSTALL=1 "
+                    "to allow mutating the shared Python environment"
+                ),
+                "type": "PermissionError",
+            }
         try:
             # Build UV pip install command
             cmd = ["uv", "pip", "install", "--python", self.venv_path]

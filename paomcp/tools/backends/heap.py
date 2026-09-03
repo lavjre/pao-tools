@@ -68,6 +68,7 @@ from paomcp.tools.backends.heap_schemas import (
     DEFAULT_MAX_HEAP_SNAPSHOT_BYTES,
 )
 from paomcp.tools.backends.heap_snapshots import (
+    DEFAULT_MAX_SNAPSHOT_LEDGER_ENTRIES,
     HeapHistory,
     HeapSnapshotError,
 )
@@ -879,6 +880,8 @@ class HeapTools:
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         max_arenas: int = 16,
+        max_ledger_entries: int = DEFAULT_MAX_SNAPSHOT_LEDGER_ENTRIES,
+        timeout_seconds: Optional[float] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         gate = self._gdb_gate("capture_heap_snapshot")
@@ -888,6 +891,8 @@ class HeapTools:
             name=name,
             max_chunks_per_bin=max_chunks_per_bin,
             max_arenas=max_arenas,
+            max_ledger_entries=max_ledger_entries,
+            timeout_seconds=timeout_seconds,
             cancellation_check=cancellation_check,
         )
 

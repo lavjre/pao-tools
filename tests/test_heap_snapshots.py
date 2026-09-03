@@ -721,8 +721,16 @@ class TestCaptureGlibc:
     def test_capture_rejects_non_positive_arena_cap(self, monkeypatch) -> None:
         _pin_classification(monkeypatch, _glibc_classification())
         history = _build_history()
-        with pytest.raises(ValueError, match="max_arenas must be positive"):
+        with pytest.raises(ValueError, match="max_arenas must be between"):
             history.capture_heap_snapshot(max_arenas=0)
+        with pytest.raises(ValueError, match="max_arenas must be between"):
+            history.capture_heap_snapshot(max_arenas=10**9)
+        with pytest.raises(ValueError, match="max_chunks_per_bin must be between"):
+            history.capture_heap_snapshot(max_chunks_per_bin=10**9)
+        with pytest.raises(ValueError, match="max_ledger_entries must be between"):
+            history.capture_heap_snapshot(max_ledger_entries=0)
+        with pytest.raises(ValueError, match="timeout_seconds must be positive"):
+            history.capture_heap_snapshot(timeout_seconds=0)
 
     def test_capture_truncates_arena_walk_explicitly(self, monkeypatch) -> None:
         _pin_classification(monkeypatch, _glibc_classification())
@@ -745,9 +753,52 @@ class TestCaptureGlibc:
         assert [a["arena_address"] for a in parsed["arenas"]] == addrs[:2]
         assert any("max_arenas" in w for w in response.get("warnings") or [])
 
+    def test_capture_truncates_ledger_explicitly(self, monkeypatch) -> None:
+        _pin_classification(monkeypatch, _glibc_classification())
+        arena_addr = 0x7FFF_F7E0_0000
+        arenas_response = _canned_backend_response(
+            "list_arenas",
+            {"arenas": [{"address": arena_addr, "is_main": True, "index": 0}]},
+        )
+        fastbins_response = _canned_backend_response(
+            "inspect_fastbins",
+            {
+                "verdict": "parsed",
+                "fastbins": [
+                    {
+                        "index": 0,
+                        "chain": [
+                            {"chunk_address": 0x1000, "size": 32},
+                            {"chunk_address": 0x2000, "size": 32},
+                            {"chunk_address": 0x3000, "size": 32},
+                        ],
+                    }
+                ],
+            },
+        )
+        history = _build_history(
+            arenas_response=arenas_response, fastbins_response=fastbins_response
+        )
+        response = history.capture_heap_snapshot(max_ledger_entries=1)
+        parsed = response["parsed"]
+        assert parsed["summary"]["ledger_truncated"] is True
+        assert parsed["summary"]["chunk_count"] == 1
+        assert any("ledger" in w for w in response.get("warnings") or [])
+
+    def test_capture_deadline_expires(self, monkeypatch) -> None:
+        _pin_classification(monkeypatch, _glibc_classification())
+        history = _build_history()
+        ticks = iter([1000.0, 1000.0 + 400.0])
+        monkeypatch.setattr(
+            "paomcp.tools.backends.heap_snapshots.time.monotonic",
+            lambda: next(ticks, 1000.0 + 400.0),
+        )
+        with pytest.raises(TimeoutError, match="exceeded its .* budget"):
+            history.capture_heap_snapshot(timeout_seconds=300.0)
+
     def test_capture_rejects_non_positive_chunk_cap(self) -> None:
         history = _build_history()
-        with pytest.raises(ValueError, match="must be positive"):
+        with pytest.raises(ValueError, match="must be between"):
             history.capture_heap_snapshot(max_chunks_per_bin=0)
 
 

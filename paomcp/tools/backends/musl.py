@@ -14,6 +14,7 @@ hardcoded table; without debug symbols every entry point reports
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -23,6 +24,10 @@ from paomcp.tools.backends.foundation import (
     build_backend_response,
     mapping_for,
     parse_int,
+)
+from paomcp.tools.backends.heap_glibc_arenas import (
+    arena_layout_cache_key,
+    inferior_epoch,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,11 @@ class MuslAnalyzer:
         self.debugger = debugger
         self.session_id = session_id
         self.discovery = discovery
+        # Layout cache: offsets/sizes are libc-stable, so one resolve per
+        # libc identity serves the session. Volatile fields (ctx address,
+        # secret, class-table address) are never cached: ASLR slides
+        # addresses and the secret is per-exec random.
+        self._layout_cache: Optional[Tuple[tuple, Dict[str, Any]]] = None
 
     # ------------------------------------------------------------------
     # Live-target helpers
@@ -118,6 +128,46 @@ class MuslAnalyzer:
             ),
             "classes_addr": self._eval_int("(void*)&__malloc_size_classes"),
         }
+
+    def cached_musl_layout(
+        self,
+        classification: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the mallocng layout, resolving once per libc identity.
+
+        Only stable fields (area-head/meta offsets, meta size) come from
+        the cache; ``ctx_addr``, ``secret`` and ``classes_addr`` are always
+        re-read (ASLR slide, per-exec secret). Nothing is cached when the
+        layout is unresolvable, preserving the legacy always-resolve path.
+        """
+        key = arena_layout_cache_key(
+            classification, profile, family="musl", epoch=inferior_epoch(self.gdb)
+        )
+        layout: Dict[str, Any]
+        if (
+            key is not None
+            and self._layout_cache is not None
+            and self._layout_cache[0] == key
+        ):
+            layout = copy.deepcopy(self._layout_cache[1])
+        else:
+            full = self._resolve_context()
+            layout = {
+                k: v
+                for k, v in full.items()
+                if k not in ("ctx_addr", "secret", "classes_addr")
+            }
+            if (
+                key is not None
+                and layout.get("area_head_off") is not None
+                and layout.get("meta_size") in (40, 28)
+            ):
+                self._layout_cache = (key, copy.deepcopy(layout))
+        layout["ctx_addr"] = self._eval_int("(void*)&__malloc_context")
+        layout["secret"] = self._eval_int("(unsigned long)__malloc_context.secret")
+        layout["classes_addr"] = self._eval_int("(void*)&__malloc_size_classes")
+        return layout
 
     def _allocator(self, classification: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -249,7 +299,7 @@ class MuslAnalyzer:
             )
         check("alignment_16", True, target)
 
-        context = self._resolve_context()
+        context = self.cached_musl_layout(classification, profile)
         missing = sorted(k for k, v in context.items() if v is None)
         if missing:
             return self._unresolvable(
@@ -468,7 +518,7 @@ class MuslAnalyzer:
             return self._unsupported(
                 "list_musl_groups", MUSL_GROUPS_SCHEMA, classification, profile
             )
-        context = self._resolve_context()
+        context = self.cached_musl_layout(classification, profile)
         missing = sorted(k for k, v in context.items() if v is None)
         try:
             pointer_bits = profile.get("pointer_bits") or 64

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -50,13 +51,13 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------
 # heap snapshot history and diff
 # ----------------------------------------------------------------------
-HEAP_SNAPSHOT_SCHEMA = "pao.heap-snapshot.v1"
-HEAP_SNAPSHOT_LIST_SCHEMA = "pao.heap-snapshot-list.v1"
-HEAP_SNAPSHOT_DIFF_SCHEMA = "pao.heap-snapshot-diff.v1"
-HEAP_SNAPSHOT_LINK_SCHEMA = "pao.heap-snapshot-link.v1"
-
-DEFAULT_MAX_HEAP_SNAPSHOTS = 16
-DEFAULT_MAX_HEAP_SNAPSHOT_BYTES = 64 * 1024 * 1024
+# Snapshot schemas, entry count and byte budgets live in heap_schemas (the
+# single source re-exported above); only snapshot-local caps stay here.
+DEFAULT_MAX_SNAPSHOT_LEDGER_ENTRIES = 100_000
+DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 300.0
+MAX_SNAPSHOT_ARENAS = 256
+MAX_SNAPSHOT_CHUNKS_PER_BIN = 16384
+MAX_SNAPSHOT_LEDGER_ENTRIES = 1_000_000
 
 
 class HeapSnapshotError(RuntimeError):
@@ -443,6 +444,8 @@ class HeapHistory:
         name: Optional[str] = None,
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_REGULAR_BIN,
         max_arenas: int = 16,
+        max_ledger_entries: int = DEFAULT_MAX_SNAPSHOT_LEDGER_ENTRIES,
+        timeout_seconds: Optional[float] = None,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Capture and store a typed heap snapshot for this session."""
@@ -453,12 +456,33 @@ class HeapHistory:
                 )
             if not name.strip():
                 raise ValueError("snapshot name may not be empty or whitespace-only")
-        if max_chunks_per_bin <= 0:
+        if max_chunks_per_bin <= 0 or max_chunks_per_bin > MAX_SNAPSHOT_CHUNKS_PER_BIN:
             raise ValueError(
-                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
+                "max_chunks_per_bin must be between 1 and "
+                f"{MAX_SNAPSHOT_CHUNKS_PER_BIN}, got {max_chunks_per_bin!r}"
             )
-        if max_arenas <= 0:
-            raise ValueError(f"max_arenas must be positive, got {max_arenas!r}")
+        if max_arenas <= 0 or max_arenas > MAX_SNAPSHOT_ARENAS:
+            raise ValueError(
+                f"max_arenas must be between 1 and {MAX_SNAPSHOT_ARENAS}, "
+                f"got {max_arenas!r}"
+            )
+        if max_ledger_entries <= 0 or max_ledger_entries > MAX_SNAPSHOT_LEDGER_ENTRIES:
+            raise ValueError(
+                "max_ledger_entries must be between 1 and "
+                f"{MAX_SNAPSHOT_LEDGER_ENTRIES}, got {max_ledger_entries!r}"
+            )
+        if timeout_seconds is None:
+            timeout_seconds = float(
+                os.environ.get(
+                    "PAO_SNAPSHOT_TIMEOUT_SECONDS",
+                    str(DEFAULT_SNAPSHOT_TIMEOUT_SECONDS),
+                )
+            )
+        if timeout_seconds <= 0:
+            raise ValueError(
+                f"timeout_seconds must be positive, got {timeout_seconds!r}"
+            )
+        deadline = time.monotonic() + timeout_seconds
 
         classification, _mappings, profile, component_status = self._prepare_context(
             cancellation_check
@@ -527,8 +551,20 @@ class HeapHistory:
             )
         arena_summaries: List[Dict[str, Any]] = []
         chunk_ledger: List[Dict[str, Any]] = []
+        ledger_truncated = False
 
+        def _check_deadline() -> None:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"heap snapshot exceeded its {timeout_seconds:g}s budget; "
+                    "retry scoped with smaller max_arenas/max_chunks_per_bin"
+                )
+
+        _check_deadline()
         for arena_entry in raw_arenas:
+            if cancellation_check is not None:
+                cancellation_check()
+            _check_deadline()
             addr = arena_entry.get("address")
             if addr is None:
                 continue
@@ -568,13 +604,22 @@ class HeapHistory:
             for w in bins_response.get("warnings") or []:
                 warnings.append(f"inspect_bins[{addr_int:#x}]: {w}")
 
-            chunk_ledger.extend(
-                self._chunk_ledger_from_arena_bins(
-                    arena_address=addr_int,
-                    fastbins_parsed=fastbins_response.get("parsed"),
-                    bins_parsed=bins_response.get("parsed"),
+            for ledger_entry in self._chunk_ledger_from_arena_bins(
+                arena_address=addr_int,
+                fastbins_parsed=fastbins_response.get("parsed"),
+                bins_parsed=bins_response.get("parsed"),
+            ):
+                if len(chunk_ledger) >= max_ledger_entries:
+                    ledger_truncated = True
+                    break
+                chunk_ledger.append(ledger_entry)
+            if ledger_truncated:
+                warnings.append(
+                    f"Chunk ledger capped at {max_ledger_entries} entries; "
+                    "pass a larger max_ledger_entries for full coverage"
                 )
-            )
+                break
+            _check_deadline()
 
         tcache_response = self.bins.inspect_tcache(
             cancellation_check=cancellation_check
@@ -586,7 +631,16 @@ class HeapHistory:
             "verdict": tcache_parsed.get("verdict"),
             "bin_count": len(tcache_parsed.get("bins", []) or []),
         }
-        chunk_ledger.extend(self._chunk_ledger_from_tcache(tcache_parsed))
+        for ledger_entry in self._chunk_ledger_from_tcache(tcache_parsed):
+            if len(chunk_ledger) >= max_ledger_entries:
+                if not ledger_truncated:
+                    ledger_truncated = True
+                    warnings.append(
+                        f"Chunk ledger capped at {max_ledger_entries} entries; "
+                        "pass a larger max_ledger_entries for full coverage"
+                    )
+                break
+            chunk_ledger.append(ledger_entry)
 
         payload = {
             "schema": HEAP_SNAPSHOT_SCHEMA,
@@ -607,6 +661,7 @@ class HeapHistory:
                 "chunk_count": len(chunk_ledger),
                 "arena_count": len(arena_summaries),
                 "arenas_truncated": arenas_truncated,
+                "ledger_truncated": ledger_truncated,
             },
         }
         entry = self._remember(name=name, payload=payload)

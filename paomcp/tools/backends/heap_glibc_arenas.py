@@ -106,20 +106,26 @@ _MALLOC_STATE_FIELDS: Tuple[Tuple[str, str, int], ...] = (
 
 
 def arena_layout_cache_key(
-    classification: Mapping[str, Any], profile: Mapping[str, Any]
+    classification: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    family: str = "glibc",
+    epoch: Optional[int] = None,
 ) -> Optional[tuple]:
     """Key a resolved arena layout by libc identity (no GDB calls).
 
     Field offsets depend only on the loaded libc -- never on the ASLR slide
     or inferior state -- so one ``resolve()`` per (family, version, libc
-    file, pointer width) serves every later inspection in the session.
-    Returns ``None`` when no glibc mapping is visible (static binaries):
-    callers must then resolve fresh rather than risk a stale hit across
-    different binaries.
+    file, pointer width, inferior epoch) serves every later inspection in
+    the session. The epoch (bumped on every run/attach) retires entries
+    across inferior restarts; pass ``None`` when the controller cannot
+    report one. Returns ``None`` when no matching mapping is visible
+    (static binaries): callers must then resolve fresh rather than risk a
+    stale hit across different binaries.
     """
     if not isinstance(classification, Mapping) or not isinstance(profile, Mapping):
         return None
-    if classification.get("family") != "glibc":
+    if classification.get("family") != family:
         return None
     libc_file = None
     evidence = classification.get("evidence")
@@ -127,7 +133,7 @@ def arena_layout_cache_key(
         for item in evidence:
             if (
                 isinstance(item, Mapping)
-                and item.get("family") == "glibc"
+                and item.get("family") == family
                 and item.get("file")
             ):
                 libc_file = str(item.get("file"))
@@ -143,7 +149,20 @@ def arena_layout_cache_key(
         str(classification.get("version")),
         libc_file,
         profile.get("pointer_bits"),
+        epoch,
     )
+
+
+def inferior_epoch(gdb: Any) -> Optional[int]:
+    """Read the inferior epoch counter when the controller reports one."""
+    getter = getattr(gdb, "get_inferior_epoch", None)
+    if not callable(getter):
+        return None
+    try:
+        epoch = getter()
+    except Exception:
+        return None
+    return epoch if isinstance(epoch, int) and not isinstance(epoch, bool) else None
 
 
 class ArenaLayoutResolver:
@@ -251,7 +270,9 @@ class GlibcArenas:
         address every run while offsets stay put, so the address is always
         re-read (one eval) and spliced into the cached offsets.
         """
-        key = arena_layout_cache_key(classification, profile)
+        key = arena_layout_cache_key(
+            classification, profile, epoch=inferior_epoch(self.gdb)
+        )
         if (
             key is not None
             and self._layout_cache is not None

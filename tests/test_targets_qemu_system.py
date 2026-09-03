@@ -68,6 +68,12 @@ class TestQemuSystemSpec:
 # argv construction (pure)
 # ---------------------------------------------------------------------------
 class TestQemuSystemArgv:
+    @pytest.fixture(autouse=True)
+    def _fake_which(self, monkeypatch) -> None:
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name, path=None: f"/usr/bin/{name}")
+
     def _spec(self, **overrides: Any) -> TargetSpec:
         config = {
             "qemu_binary": "qemu-system-x86_64",
@@ -78,7 +84,7 @@ class TestQemuSystemArgv:
 
     def test_argv_starts_with_gdb_and_pause_flags(self) -> None:
         argv = QemuSystemProvider._build_argv(self._spec(), "127.0.0.1", 4444)
-        assert argv[0] == "qemu-system-x86_64"
+        assert argv[0] == "/usr/bin/qemu-system-x86_64"
         assert argv[1:5] == ["-gdb", "tcp:127.0.0.1:4444", "-S", "-nographic"]
 
     def test_machine_and_memory_get_flags(self) -> None:
@@ -129,6 +135,55 @@ class TestQemuSystemArgv:
         spec = TargetSpec(kind=TargetKind.QEMU_SYSTEM, kernel_path="/boot/vmlinuz")
         with pytest.raises(TargetError, match="qemu_binary"):
             QemuSystemProvider._build_argv(spec, "127.0.0.1", 4444)
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            "-virtfs",
+            "-fsdev",
+            "-netdev",
+            "-nic",
+            "-net",
+            "-daemonize",
+        ],
+    )
+    def test_supervision_escaping_flags_rejected(self, extra: str) -> None:
+        from paomcp.tools.backends.targets_qemu import validate_qemu_extra_args
+
+        with pytest.raises(TargetError, match="Blocked unsafe"):
+            validate_qemu_extra_args([extra, "user,id=n0"])
+
+    def test_benign_qemu_flags_pass_through(self) -> None:
+        from paomcp.tools.backends.targets_qemu import validate_qemu_extra_args
+
+        validate_qemu_extra_args(["-cpu", "max", "-smp", "1", "-m", "512M"])
+
+    def test_infra_executable_resolution(self, tmp_path, monkeypatch) -> None:
+        import shutil
+
+        from paomcp.tools.backends.targets_base import resolve_infra_executable
+
+        def _which(name, path=None):
+            return None if "no_such" in name else "/usr/bin/" + name
+
+        monkeypatch.setattr(shutil, "which", _which)
+        assert (
+            resolve_infra_executable("qemu-system-x86_64", what="qemu_binary")
+            == "/usr/bin/qemu-system-x86_64"
+        )
+        helper = tmp_path / "gdbserver"
+        helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+        if os.access(str(helper), os.X_OK):
+            assert resolve_infra_executable(str(helper), what="gdbserver") == str(
+                helper
+            )
+        else:
+            with pytest.raises(TargetError, match="not executable"):
+                resolve_infra_executable(str(helper), what="gdbserver")
+        with pytest.raises(TargetError, match="not found"):
+            resolve_infra_executable("__pao_no_such_helper__", what="qemu_binary")
+        with pytest.raises(TargetError, match="non-empty"):
+            resolve_infra_executable("   ", what="qemu_binary")
 
 
 # ---------------------------------------------------------------------------

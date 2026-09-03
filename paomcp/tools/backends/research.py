@@ -745,6 +745,81 @@ class ResearchRegistry:
             session._touch()
             return evidence
 
+    def link_evidence_batch(
+        self,
+        *,
+        session_id: str,
+        items: Sequence[Mapping[str, Any]],
+        max_items: int = 500,
+    ) -> List[ResearchEvidence]:
+        """Link many evidence entries with one timeline event + one persist.
+
+        Validates everything up front so a bad item fails the batch before
+        anything is recorded. Caps batch size to bound a single call.
+        """
+        entries = list(items or [])
+        if not entries:
+            raise ResearchError("items cannot be empty")
+        if len(entries) > max_items:
+            raise ResearchError(
+                f"batch of {len(entries)} exceeds max_items={max_items}"
+            )
+        for position, item in enumerate(entries):
+            if not isinstance(item, Mapping):
+                raise ResearchError(f"item {position} must be a mapping")
+            if item.get("kind") not in EVIDENCE_KINDS:
+                raise ResearchError(
+                    f"item {position} kind {item.get('kind')!r} must be one of "
+                    f"{list(EVIDENCE_KINDS)}"
+                )
+            ref = item.get("ref")
+            if not isinstance(ref, str) or not ref.strip():
+                raise ResearchError(f"item {position} ref must be a non-empty string")
+        session = self.get_session(session_id)
+        with session._lock:
+            if len(session.evidence) + len(entries) > self._max_evidence:
+                raise ResearchError(
+                    f"batch of {len(entries)} would exceed the "
+                    f"{self._max_evidence} evidence cap"
+                )
+            linked: List[ResearchEvidence] = []
+            for item in entries:
+                hypothesis_id = item.get("hypothesis_id")
+                if (
+                    hypothesis_id is not None
+                    and hypothesis_id not in session.hypotheses
+                ):
+                    raise ResearchError(
+                        f"hypothesis '{hypothesis_id}' not found in session"
+                    )
+                note_id = item.get("note_id")
+                if note_id is not None and note_id not in session.notes:
+                    raise ResearchError(f"note '{note_id}' not found in session")
+                evidence = ResearchEvidence(
+                    evidence_id=uuid.uuid4().hex[:12],
+                    kind=item["kind"],
+                    ref=str(item["ref"]).strip(),
+                    description=item.get("description"),
+                    hypothesis_id=hypothesis_id,
+                    note_id=note_id,
+                    metadata=(
+                        dict(item["metadata"])
+                        if isinstance(item.get("metadata"), Mapping)
+                        else {}
+                    ),
+                )
+                session.evidence[evidence.evidence_id] = evidence
+                linked.append(evidence)
+            kinds = sorted({e.kind for e in linked})
+            self._append_event_locked(
+                session,
+                kind="crash" if kinds == ["crash"] else "other",
+                summary=f"linked {len(linked)} evidence items ({', '.join(kinds)})",
+                metadata={"evidence_ids": [e.evidence_id for e in linked]},
+            )
+            session._touch()
+            return linked
+
     # ------------------------------------------------------------------
     # Hypotheses
     # ------------------------------------------------------------------

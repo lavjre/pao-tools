@@ -35,6 +35,7 @@ from paomcp.tools.backends.targets_base import (
     TargetKind,
     TargetSpec,
     TargetState,
+    resolve_infra_executable,
 )
 from paomcp.tools.backends.targets_gdbserver import (
     _attach_via_gdb_remote,
@@ -44,6 +45,46 @@ from paomcp.tools.backends.targets_gdbserver import (
 from paomcp.tools.backends.targets_local import (
     LocalProcessProvider,
 )
+
+
+def _qemu_flag_name(entry: str) -> str:
+    """Normalize one extra arg to its flag name (``-netdev x`` -> ``-netdev``)."""
+    text = entry.strip()
+    for separator in ("=",):
+        head, sep, _ = text.partition(separator)
+        if sep and head.startswith("-"):
+            return head.lower()
+    return text.split()[0].lower() if text else ""
+
+
+BLOCKED_QEMU_FLAGS = frozenset(
+    {
+        "-virtfs",
+        "-fsdev",
+        "-netdev",
+        "-nic",
+        "-net",
+        "-daemonize",
+        "-daemon",
+    }
+)
+
+
+def validate_qemu_extra_args(extra_args) -> None:
+    """Reject QEMU flags that escape supervision or the declared disk set.
+
+    ``-virtfs``/``-fsdev`` share host trees, ``-netdev``/``-nic``/``-net``
+    rewire host networking, and ``-daemonize`` detaches from our process
+    supervision. ``-drive``/``-kernel``/``-initrd`` file operands stay under
+    workspace containment enforced at target creation.
+    """
+    for extra in list(extra_args or []):
+        if _qemu_flag_name(extra) in BLOCKED_QEMU_FLAGS:
+            raise TargetError(
+                f"Blocked unsafe qemu_extra_args entry '{extra}': host "
+                "filesystem sharing, custom networking, and detaching from "
+                "supervision are not allowed"
+            )
 
 
 class QemuUserProvider:
@@ -80,11 +121,15 @@ class QemuUserProvider:
             binary = os.path.abspath(spec.binary_path)
             if not os.path.isfile(binary):
                 raise TargetError(f"binary '{binary}' does not exist")
+            qemu_executable = resolve_infra_executable(
+                spec.qemu_binary, what="qemu_binary"
+            )
             host = spec.host or "127.0.0.1"
             port = spec.port or _find_free_tcp_port(host)
-            argv: List[str] = [spec.qemu_binary]
+            argv: List[str] = [qemu_executable]
             if spec.qemu_ld_prefix:
                 argv += ["-L", spec.qemu_ld_prefix]
+            validate_qemu_extra_args(spec.qemu_extra_args)
             argv += list(spec.qemu_extra_args or [])
             argv += ["-g", str(port), binary] + list(spec.argv or [])
             handle._set_state(TargetState.STARTING)
@@ -204,7 +249,7 @@ class QemuSystemProvider:
                 "qemu_system spec requires 'qemu_binary' " "(e.g. 'qemu-system-x86_64')"
             )
         argv: List[str] = [
-            spec.qemu_binary,
+            resolve_infra_executable(spec.qemu_binary, what="qemu_binary"),
             "-gdb",
             f"tcp:{host}:{port}",
             "-S",  # freeze the guest at boot so attach never races
@@ -225,6 +270,7 @@ class QemuSystemProvider:
                 "-drive",
                 f"file={os.path.abspath(spec.disk_path)},format=raw",
             ]
+        validate_qemu_extra_args(spec.qemu_extra_args)
         argv += list(spec.qemu_extra_args or [])
         return argv
 

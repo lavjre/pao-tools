@@ -15,6 +15,94 @@ from paomcp.tools.common import (
 )
 from paomcp.utils.paths import resolve_workspace_path
 
+# Host-side config keys that must stay inside the workspace. SSH key
+# material is deliberately excluded: secrets live outside the workspace
+# by nature (``~/.ssh``), and reading them equals what ``run_command``
+# can already do. ``docker_workdir`` is container-side, not host-side.
+_WORKSPACE_PATH_KEYS = (
+    "binary_path",
+    "working_dir",
+    "kernel_path",
+    "initrd_path",
+    "disk_path",
+    "qemu_ld_prefix",
+)
+
+# QEMU flags in extra_args whose file operand must also stay contained.
+_QEMU_FILE_FLAGS = ("-drive", "-kernel", "-initrd")
+
+
+def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
+    """Rewrite host-side target paths into the workspace namespace.
+
+    Raises ValueError (surfaced as INVALID_ARGUMENT) when a host-side
+    path escapes the workspace. SSH key paths and container-side values
+    pass through untouched; see ``_WORKSPACE_PATH_KEYS``.
+    """
+    import shlex
+
+    contained = dict(config)
+    for key in _WORKSPACE_PATH_KEYS:
+        value = contained.get(key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        contained[key] = resolve_workspace_path(
+            str(value),
+            workspace_root=workspace_root,
+            require_exists=False,
+            kind=key,
+        )
+    extra = contained.get("qemu_extra_args")
+    if isinstance(extra, str):
+        extra = shlex.split(extra)
+    if isinstance(extra, list):
+        normalized: list = []
+        pending_file_flag: str | None = None
+        for token in extra:
+            if not isinstance(token, str):
+                normalized.append(token)
+                pending_file_flag = None
+                continue
+            if pending_file_flag is not None:
+                normalized.append(
+                    _contain_qemu_file_operand(
+                        pending_file_flag, token, workspace_root=workspace_root
+                    )
+                )
+                pending_file_flag = None
+                continue
+            if token in _QEMU_FILE_FLAGS:
+                pending_file_flag = token
+            normalized.append(token)
+        contained["qemu_extra_args"] = normalized
+    return contained
+
+
+def _contain_qemu_file_operand(flag: str, value: str, *, workspace_root: str) -> str:
+    """Contain ``-drive file=...`` / ``-kernel`` / ``-initrd`` operands."""
+    if flag == "-drive":
+        parts = value.split(",")
+        rebuilt = []
+        for part in parts:
+            name, sep, val = part.partition("=")
+            if sep and name.strip().lower() == "file" and val.strip():
+                val = resolve_workspace_path(
+                    val.strip(),
+                    workspace_root=workspace_root,
+                    require_exists=False,
+                    kind="qemu drive file",
+                )
+                rebuilt.append(f"{name}={val}")
+            else:
+                rebuilt.append(part)
+        return ",".join(rebuilt)
+    return resolve_workspace_path(
+        value,
+        workspace_root=workspace_root,
+        require_exists=False,
+        kind=f"qemu {flag} path",
+    )
+
 
 def _resolve_session_id(services: Any, session_id: Optional[str]) -> Optional[str]:
     """Return the caller-provided session id, or fall back to the default."""
@@ -52,6 +140,10 @@ def register(mcp: FastMCP) -> None:
         merged_config = dict(config) if config else {}
         if backend is not None:
             merged_config["backend"] = backend
+        merged_config = _contain_target_config(
+            merged_config,
+            workspace_root=services.runtime_paths.workspace_root,
+        )
         return services.target_registry.create_target_response(
             kind=kind,
             config=merged_config or None,

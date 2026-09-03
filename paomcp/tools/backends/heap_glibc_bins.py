@@ -79,6 +79,7 @@ from paomcp.tools.backends.heap_glibc_arenas import (
     NBINS,
     NFASTBINS,
     arena_layout_cache_key,
+    inferior_epoch,
 )
 
 # ----------------------------------------------------------------------
@@ -169,7 +170,9 @@ class GlibcBins:
         per-thread ``tcache_address`` is always read fresh because threads
         come and go while offsets stay put.
         """
-        key = arena_layout_cache_key(classification, profile)
+        key = arena_layout_cache_key(
+            classification, profile, epoch=inferior_epoch(self.gdb)
+        )
         if (
             key is not None
             and self._tcache_layout_cache is not None

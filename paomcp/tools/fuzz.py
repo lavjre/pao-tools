@@ -1,5 +1,6 @@
 """MCP tools for bounded file-input fuzz batches."""
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -13,9 +14,12 @@ from paomcp.tools.common import (
     get_services,
     resolve_binary_path,
     resolve_debug_session,
+    run_blocking,
     run_session_action,
 )
 from paomcp.utils.paths import resolve_workspace_path
+
+logger = logging.getLogger(__name__)
 
 
 def register(mcp: FastMCP) -> None:
@@ -107,23 +111,31 @@ def register(mcp: FastMCP) -> None:
         result = await run_session_action(session, _run)
         result["session_id"] = session.session_id
         if research_session_id is not None and result.get("success"):
-            linked = []
-            for novel in (result.get("parsed", {}) or {}).get("novel", []) or []:
-                crash_id = novel.get("crash_id")
-                if not crash_id:
-                    continue
-                try:
-                    services.research_registry.link_evidence_response(
+            items = [
+                {
+                    "kind": "crash",
+                    "ref": str(novel.get("crash_id")),
+                    "description": (
+                        f"fuzz novel crash signal={novel.get('signal')} "
+                        f"input={novel.get('input_path')}"
+                    ),
+                }
+                for novel in (result.get("parsed", {}) or {}).get("novel", []) or []
+                if novel.get("crash_id")
+            ]
+            if not items:
+                result["research_linked"] = []
+                return result
+            try:
+                # One batched link: a single timeline event and one persist.
+                linked = await run_blocking(
+                    lambda: services.research_registry.link_evidence_batch(
                         session_id=research_session_id,
-                        kind="crash",
-                        ref=str(crash_id),
-                        description=(
-                            f"fuzz novel crash signal={novel.get('signal')} "
-                            f"input={novel.get('input_path')}"
-                        ),
+                        items=items,
                     )
-                    linked.append(crash_id)
-                except Exception:  # noqa: BLE001 - linking never fails a batch
-                    continue
-            result["research_linked"] = linked
+                )
+                result["research_linked"] = [e.evidence_id for e in linked]
+            except Exception:  # noqa: BLE001 - linking never fails a batch
+                logger.exception("Fuzz research linking failed")
+                result["research_linked"] = []
         return result

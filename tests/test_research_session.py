@@ -287,3 +287,49 @@ class TestDefaults:
         assert DEFAULT_MAX_NOTES_PER_SESSION >= 100
         assert DEFAULT_MAX_EVIDENCE_PER_SESSION >= 100
         assert DEFAULT_MAX_HYPOTHESES_PER_SESSION >= 10
+
+
+class TestLinkEvidenceBatch:
+    def _session(self, registry=None):
+        registry = registry or ResearchRegistry()
+        session = registry.create_session(name="batch")
+        return registry, session.session_id
+
+    def test_batch_links_with_one_timeline_event(self) -> None:
+        registry, sid = self._session()
+        linked = registry.link_evidence_batch(
+            session_id=sid,
+            items=[
+                {"kind": "crash", "ref": "crash-1"},
+                {"kind": "artifact", "ref": "art-1", "description": "core"},
+            ],
+        )
+        assert len(linked) == 2
+        session = registry.get_session(sid)
+        assert len(session.evidence) == 2
+        # Exactly one timeline event for the whole batch.
+        assert len(session.timeline) == 1
+        assert "linked 2 evidence" in session.timeline[0].summary
+
+    def test_batch_validates_before_recording(self) -> None:
+        registry, sid = self._session()
+        with pytest.raises(ResearchError, match="kind"):
+            registry.link_evidence_batch(
+                session_id=sid,
+                items=[
+                    {"kind": "crash", "ref": "ok-1"},
+                    {"kind": "bogus", "ref": "bad"},
+                ],
+            )
+        assert len(registry.get_session(sid).evidence) == 0
+
+    def test_batch_respects_caps(self) -> None:
+        registry, sid = self._session()
+        with pytest.raises(ResearchError, match="max_items"):
+            registry.link_evidence_batch(
+                session_id=sid,
+                items=[{"kind": "other", "ref": f"r{i}"} for i in range(501)],
+                max_items=500,
+            )
+        with pytest.raises(ResearchError, match="items cannot be empty"):
+            registry.link_evidence_batch(session_id=sid, items=[])

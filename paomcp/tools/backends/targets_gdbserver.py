@@ -39,6 +39,7 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    resolve_infra_executable,
 )
 from paomcp.tools.backends.targets_local import (
     LocalProcessProvider,
@@ -135,7 +136,7 @@ class GdbserverProvider:
             spec = handle.spec
             host = spec.host or "127.0.0.1"
             port = spec.port or _find_free_tcp_port(host)
-            argv: List[str] = [self._executable]
+            argv: List[str] = []
             if spec.pid is not None:
                 try:
                     validated_pid = validate_attach_pid(spec.pid)
@@ -150,6 +151,7 @@ class GdbserverProvider:
                 if not os.path.isfile(binary):
                     raise TargetError(f"binary '{binary}' does not exist")
                 argv += [f"{host}:{port}", binary] + list(spec.argv or [])
+            argv.insert(0, resolve_infra_executable(self._executable, what="gdbserver"))
             handle._set_state(TargetState.STARTING)
             env_full = dict(os.environ)
             env_full.update(spec.env or {})

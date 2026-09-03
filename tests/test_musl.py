@@ -161,7 +161,18 @@ class _FakeDiscovery:
         return [], None, {"mappings": True, "libcinfo": False}
 
     def classify(self, mappings, libcinfo):
-        return {"family": self._family, "version": "1.2.5", "confidence": "likely"}
+        return {
+            "family": self._family,
+            "version": "1.2.5",
+            "confidence": "likely",
+            "evidence": [
+                {
+                    "source": "mapping",
+                    "family": self._family,
+                    "file": "/lib/ld-musl-x86_64.so.1",
+                }
+            ],
+        }
 
     def target_profile(self, mappings):
         return {"pointer_bits": 64, "byteorder": "little"}
@@ -342,3 +353,25 @@ class TestListMuslGroups:
 
         with pytest.raises(ValueError, match="max_groups"):
             analyzer.list_musl_groups(max_groups=0)
+
+
+class TestMuslLayoutCache:
+    def test_second_inspect_reuses_cached_layout(self):
+        analyzer, gdb = _build()
+        user = _standard_layout(gdb)
+        first = analyzer.inspect_musl_chunk(address=hex(user))
+        assert first["parsed"]["verdict"] == "valid"
+        assert analyzer._layout_cache is not None
+        # Break every layout expression except the volatile re-reads: a
+        # fresh resolve() is now impossible, so valid output proves the hit.
+        keep = {
+            "(void*)&__malloc_context",
+            "(unsigned long)__malloc_context.secret",
+            "(void*)&__malloc_size_classes",
+        }
+        expressions = analyzer.debugger._expressions
+        for key in [k for k in expressions if k not in keep]:
+            del expressions[key]
+        second = analyzer.inspect_musl_chunk(address=hex(user))
+        assert second["parsed"]["verdict"] == "valid"
+        assert second["parsed"]["state"] == "in_use"

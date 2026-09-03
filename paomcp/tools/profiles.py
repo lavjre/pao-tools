@@ -4,6 +4,12 @@ Listing 199 tools costs ~28k tokens before any work happens. Profiles let
 an operator pay only for the mission at hand: each profile names the tool
 *modules* it keeps (see :func:`register_all_tools`), everything else is
 never registered. ``full`` (the default) keeps the entire surface.
+
+Profiles are token budgets, never authority boundaries: the backend bundle
+is still fully constructed per session, so an excluded module only removes
+its ``list_tools`` entries. A profile that omits e.g. write paths still
+runs in the same single trust domain as ``full`` -- do not rely on profiles
+for isolation.
 """
 
 from __future__ import annotations
@@ -67,8 +73,9 @@ REV_MODULES: FrozenSet[str] = frozenset(
 """Reverse engineering: static + dynamic reading; heap/rop/crash/attack stay out."""
 
 BOUNTY_MODULES: FrozenSet[str] = ALL_MODULES - {"attack", "paocli"}
-"""Vuln research + triage + reporting: everything except write primitives
-and interactive exploit drivers."""
+"""Vuln research + triage + reporting: omits the dedicated write-primitive
+and interactive-driver modules (memory writes stay reachable through the
+debugger and heap modules, so this is scoping, not a security boundary)."""
 
 CHROME_MODULES: FrozenSet[str] = frozenset(
     {

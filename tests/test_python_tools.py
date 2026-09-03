@@ -41,3 +41,28 @@ def test_python_tools_defaults_to_workspace_venv(tmp_path, monkeypatch):
     tools = PythonTools(workspace_dir=str(workspace))
 
     assert tools.venv_path == os.path.abspath(default_venv)
+
+
+def _tools_with_venv(tmp_path, monkeypatch):
+    workspace = tmp_path / "runtime-python"
+    venv = tmp_path / "venv"
+    venv.mkdir(parents=True)
+    monkeypatch.setenv("PAO_PYTHON_VENV", str(venv))
+    return PythonTools(workspace_dir=str(workspace))
+
+
+def test_install_packages_gated_behind_env_flag(tmp_path, monkeypatch):
+    monkeypatch.delenv("PAO_ALLOW_PIP_INSTALL", raising=False)
+    tools = _tools_with_venv(tmp_path, monkeypatch)
+    result = tools.install_packages(["requests"])
+    assert result["success"] is False
+    assert "PAO_ALLOW_PIP_INSTALL" in result["error"]
+
+
+def test_execute_code_rejects_empty_and_oversize(tmp_path, monkeypatch):
+    tools = _tools_with_venv(tmp_path, monkeypatch)
+    assert tools.execute_code("   ")["success"] is False
+    big = "x = 1\n" * (PythonTools.MAX_CODE_BYTES // 6 + 1)
+    result = tools.execute_code(big)
+    assert result["success"] is False
+    assert "cap" in result["error"]
