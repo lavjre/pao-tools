@@ -95,3 +95,15 @@ def test_dbg_call_appends_ext_param():
     ida.dbg_bps()
     assert captured
     assert all("ext=dbg" in u for u in captured)
+
+
+def test_session_is_shared_and_close_resets():
+    ida = IdaProMCP()
+    first = ida._session_client()
+    assert ida._session_client() is first
+    ida.close()
+    assert ida._session is None
+    # A new session is lazily created after close; close is idempotent.
+    assert ida._session_client() is not first
+    ida.close()
+    ida.close()

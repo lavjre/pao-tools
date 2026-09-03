@@ -441,3 +441,40 @@ class TestHeapToolsFacadeFastbins:
         result = facade.inspect_fastbins()
         assert result["parsed"]["verdict"] == "parsed"
         assert result["parsed"]["fastbins"][0]["length"] == 1
+
+
+class TestHeaderAndLinkGulp:
+    def test_contiguous_span_costs_one_roundtrip(self):
+        bins_, gdb, _ = build_bins(libc=_libc_version("2.31"))
+        chunk = HEAP_BASE + 0x800
+        gdb.place(chunk, b"\x00" * 8 + b"\x21" + b"\x00" * 7 + b"\x88" * 8)
+        gdb.read_calls.clear()
+        header, header_err, link, link_err = bins_._read_header_and_link(chunk, 16, 8)
+        assert header_err is None
+        assert link_err is None
+        assert len(header) == 16
+        assert link == b"\x88" * 8
+        assert len(gdb.read_calls) == 1
+
+    def test_split_placement_falls_back_to_two_reads(self):
+        bins_, gdb, _ = build_bins(libc=_libc_version("2.31"))
+        chunk = HEAP_BASE + 0x900
+        gdb.place(chunk, b"\x00" * 16)
+        gdb.place(chunk + 16, b"\x77" * 8)
+        gdb.read_calls.clear()
+        header, header_err, link, link_err = bins_._read_header_and_link(chunk, 16, 8)
+        assert header_err is None
+        assert link_err is None
+        assert link == b"\x77" * 8
+        # One failed gulp plus the two legacy split reads.
+        assert len(gdb.read_calls) == 3
+
+    def test_missing_link_reports_link_error(self):
+        bins_, gdb, _ = build_bins(libc=_libc_version("2.31"))
+        chunk = HEAP_BASE + 0xA00
+        gdb.place(chunk, b"\x00" * 16)
+        header, header_err, link, link_err = bins_._read_header_and_link(chunk, 16, 8)
+        assert header_err is None
+        assert len(header) == 16
+        assert link == b""
+        assert link_err is not None

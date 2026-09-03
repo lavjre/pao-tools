@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
@@ -77,6 +78,7 @@ from paomcp.tools.backends.heap_glibc_arenas import (
     BINS_ARRAY_LEN,
     NBINS,
     NFASTBINS,
+    arena_layout_cache_key,
 )
 
 # ----------------------------------------------------------------------
@@ -151,6 +153,36 @@ class GlibcBins:
         self.session_id = session_id
         self.discovery = discovery
         self.arenas = arenas
+        self._tcache_resolver = TcacheLayoutResolver(debugger)
+        # Tcache struct layout is libc-stable (cached per libc identity);
+        # the per-thread tcache address is re-read on every call.
+        self._tcache_layout_cache: Optional[Tuple[tuple, Dict[str, Any]]] = None
+
+    def cached_tcache_layout(
+        self,
+        classification: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the tcache layout, resolving once per libc identity.
+
+        Only resolvable layouts (usable struct size) are cached; the
+        per-thread ``tcache_address`` is always read fresh because threads
+        come and go while offsets stay put.
+        """
+        key = arena_layout_cache_key(classification, profile)
+        if (
+            key is not None
+            and self._tcache_layout_cache is not None
+            and self._tcache_layout_cache[0] == key
+        ):
+            layout = copy.deepcopy(self._tcache_layout_cache[1])
+        else:
+            full = self._tcache_resolver.resolve()
+            layout = {k: v for k, v in full.items() if k != "tcache_address"}
+            if key is not None and layout.get("struct_size"):
+                self._tcache_layout_cache = (key, copy.deepcopy(layout))
+        layout["tcache_address"] = self._tcache_resolver.read_tcache_address()
+        return layout
 
     # ------------------------------------------------------------------
     # Pure helpers (no debugger required)
@@ -210,6 +242,26 @@ class GlibcBins:
             return raw, f"short read: expected {byte_count} bytes, got {len(raw)}"
         return raw, None
 
+    def _read_header_and_link(
+        self, base_address: int, header_size: int, link_size: int
+    ) -> Tuple[bytes, Optional[str], bytes, Optional[str]]:
+        """Read a chunk header plus its adjacent link pointer.
+
+        The fast path is a single contiguous gulp (header and link are
+        adjacent by construction), which halves the GDB roundtrips per
+        chain step on healthy heaps.  When the gulp fails or comes back
+        short, fall back to two separate reads so partial-failure evidence
+        (header OK but link unreadable, or vice versa) keeps the exact
+        legacy shapes instead of collapsing into one error.
+        """
+        total = header_size + link_size
+        buf, err = self._read_bytes(base_address, total)
+        if err is None and len(buf) >= total:
+            return buf[:header_size], None, buf[header_size:], None
+        header, header_err = self._read_bytes(base_address, header_size)
+        link, link_err = self._read_bytes(base_address + header_size, link_size)
+        return header, header_err, link, link_err
+
     def _walk_fastbin_chain(
         self,
         head_address: int,
@@ -244,7 +296,10 @@ class GlibcBins:
                 "chunk_address": current,
                 "in_mapping": mapping_for(current, mappings) is not None,
             }
-            header, err = self._read_bytes(current, header_size)
+            fd_address = current + 2 * size_sz
+            header, err, fd_bytes, fd_err = self._read_header_and_link(
+                current, header_size, size_sz
+            )
             if err is not None or len(header) < header_size:
                 entry["readable"] = False
                 entry["read_error"] = err or "short read"
@@ -258,8 +313,6 @@ class GlibcBins:
             entry["size"] = size_field & ~SIZE_BITS_MASK
             entry["prev_inuse"] = bool(size_field & PREV_INUSE)
 
-            fd_address = current + 2 * size_sz
-            fd_bytes, fd_err = self._read_bytes(fd_address, size_sz)
             entry["fd_position"] = fd_address
             if fd_err is not None or len(fd_bytes) < size_sz:
                 entry["fd_raw"] = None
@@ -338,7 +391,7 @@ class GlibcBins:
                 extra={"fastbins": [], "component_status": component_status},
             )
 
-        layout = self.arenas.resolver.resolve()
+        layout = self.arenas.cached_arena_layout(classification, profile)
         fastbins_offset = layout["offsets"].get("fastbinsY")
         target_address: Optional[int]
         if arena_address is None:
@@ -588,7 +641,9 @@ class GlibcBins:
                 "chunk_address": chunk_address,
                 "in_mapping": mapping_for(current, mappings) is not None,
             }
-            header, header_err = self._read_bytes(chunk_address, header_size)
+            header, header_err, next_bytes, next_err = self._read_header_and_link(
+                chunk_address, header_size, size_sz
+            )
             if header_err is not None or len(header) < header_size:
                 entry["chunk_readable"] = False
                 entry["chunk_read_error"] = header_err or "short read"
@@ -602,7 +657,6 @@ class GlibcBins:
                 entry["size_field"] = size_field
                 entry["size"] = size_field & ~SIZE_BITS_MASK
 
-            next_bytes, next_err = self._read_bytes(current, size_sz)
             if next_err is not None or len(next_bytes) < size_sz:
                 entry["next_raw"] = None
                 entry["next_decoded"] = None
@@ -668,8 +722,7 @@ class GlibcBins:
                 },
             )
 
-        resolver = TcacheLayoutResolver(self.debugger)
-        layout = resolver.resolve()
+        layout = self.cached_tcache_layout(classification, profile)
 
         tcache_address = layout.get("tcache_address")
         struct_size = layout.get("struct_size")
@@ -1044,7 +1097,7 @@ class GlibcBins:
                 extra={"bins": [], "component_status": component_status},
             )
 
-        layout = self.arenas.resolver.resolve()
+        layout = self.arenas.cached_arena_layout(classification, profile)
         bins_offset = layout["offsets"].get("bins")
         target_address: Optional[int]
         if arena_address is None:
@@ -1230,6 +1283,10 @@ class TcacheLayoutResolver:
             return None
         parsed = result.get("parsed") or {}
         return parse_int(parsed.get("value"))
+
+    def read_tcache_address(self) -> Optional[int]:
+        """Read the live per-thread ``tcache`` pointer (one eval; never cached)."""
+        return self._eval_int("(void*)tcache")
 
     @staticmethod
     def _offset_expression(field_name: str) -> str:

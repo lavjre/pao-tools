@@ -115,6 +115,7 @@ def register(mcp: FastMCP) -> None:
         artifact_id: str,
         offset: int = 0,
         length: Optional[int] = None,
+        format: str = "auto",
         session_id: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
@@ -126,6 +127,8 @@ def register(mcp: FastMCP) -> None:
             length: Bytes to return. Defaults to the configured chunk size and is
                 capped by ``PAO_ARTIFACT_MAX_READ_BYTES``. Use repeated calls with
                 ``next_offset`` for streaming.
+            format: auto (text->content only, binary->base64 only), text,
+                base64, or both (legacy dual-field, costs ~2.3x tokens).
         """
         services = get_services(ctx)
         effective_length = (
@@ -137,6 +140,7 @@ def register(mcp: FastMCP) -> None:
                 session_id,
                 offset=offset,
                 length=effective_length,
+                format=format,
             )
         )
         return {"success": True, "session_id": session_id, **result}

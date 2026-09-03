@@ -105,11 +105,14 @@ def test_artifact_can_be_read_in_chunks(tmp_path):
 
     assert first["eof"] is False
     assert second["eof"] is True
+    # auto format returns decoded text only for JSON (utf-8) artifacts.
+    assert "content_base64" not in first
     assert first["content"] + second["content"] == payload.decode("utf-8")
-    recovered = base64.b64decode(first["content_base64"]) + base64.b64decode(
-        second["content_base64"]
-    )
-    assert recovered == payload
+    both = store.read(artifact.artifact_id, offset=0, length=5, format="both")
+    assert base64.b64decode(both["content_base64"]) == payload[:5]
+    assert both["content"] == payload[:5].decode("utf-8")
+    with pytest.raises(ValueError, match="format must be one of"):
+        store.read(artifact.artifact_id, offset=0, length=5, format="yaml")
 
 
 def test_artifact_file_copy_and_byte_ranges_are_lossless(tmp_path):
@@ -122,7 +125,10 @@ def test_artifact_file_copy_and_byte_ranges_are_lossless(tmp_path):
     chunks = []
     offset = 0
     while offset < artifact.size_bytes:
-        chunk = store.read(artifact.artifact_id, offset=offset, length=7)
+        chunk = store.read(
+            artifact.artifact_id, offset=offset, length=7, format="base64"
+        )
+        assert "content" not in chunk
         chunks.append(base64.b64decode(chunk["content_base64"]))
         offset = chunk["next_offset"]
 
@@ -715,7 +721,8 @@ def test_run_command_spools_large_stdout_to_artifact(tmp_path):
     assert result["success"] is True
     assert result["stdout"]["delivery"] == "artifact"
     artifact_id = result["stdout"]["artifact_id"]
-    stored = store.read(artifact_id)
+    stored = store.read(artifact_id, format="base64")
+    assert "content" not in stored
     assert base64.b64decode(stored["content_base64"]) == b"A" * 10000
 
 

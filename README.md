@@ -157,7 +157,8 @@ totals, while the full payload remains lossless in the artifact:
 
 Use the artifact tools to inspect, verify, stream, pin, delete, or clean stored output.
 `read_artifact` defaults to 256 KiB per call, allows at most 4 MiB per call, and
-returns exact bytes as Base64 plus a decoded text convenience field. By default
+defaults to `format=auto` (decoded text for text artifacts, Base64 for binary;
+`both` restores the legacy dual-field shape). By default
 artifacts expire after 72 hours; the store uses a 10 GiB soft quota and preserves
 2 GiB of free disk. Session-owned artifacts require the exact same `session_id`;
 unscoped artifacts can only be accessed with `session_id` omitted.

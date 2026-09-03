@@ -775,3 +775,73 @@ class TestHeapToolsFacade:
         gdb.place(MAIN_ARENA_ADDR, make_arena_bytes(top=0x1234))
         result = facade.inspect_arena()
         assert result["parsed"]["fields"]["top"] == 0x1234
+
+
+class TestArenaLayoutCache:
+    def _ring(self, gdb):
+        next_offset = STANDARD_OFFSETS_X86_64["next"]
+        gdb.place(
+            MAIN_ARENA_ADDR + next_offset,
+            MAIN_ARENA_ADDR.to_bytes(8, "little"),
+        )
+
+    def test_second_list_reuses_cached_offsets(self):
+        dbg = ArenaFakeDebugger()
+        arenas, gdb = build_arenas(debugger=dbg)
+        self._ring(gdb)
+        first = arenas.list_arenas()
+        assert first["parsed"]["verdict"] == "parsed"
+        assert arenas._layout_cache is not None
+        # Break every field-offset expression: a fresh resolve() is now
+        # impossible, so a second parsed verdict proves the cache hit.
+        for key in [k for k in dbg.expression_map if "main_arena." in k]:
+            del dbg.expression_map[key]
+        second = arenas.list_arenas()
+        assert second["parsed"]["verdict"] == "parsed"
+        assert second["parsed"]["count"] == 1
+
+    def test_libc_change_forces_reresolve(self):
+        dbg = ArenaFakeDebugger()
+        arenas, gdb = build_arenas(debugger=dbg)
+        self._ring(gdb)
+        assert arenas.list_arenas()["parsed"]["verdict"] == "parsed"
+        # Same version, different libc file: the cache key differs, so the
+        # layout is resolved again instead of reused.
+        alt_maps = [
+            (
+                dict(m, file="/opt/custom/libc.so.6")
+                if m.get("file") == "/lib/x86_64-linux-gnu/libc.so.6"
+                else m
+            )
+            for m in GLIBC_MAPS
+        ]
+        arenas.inspection._mappings = alt_maps
+        for key in [k for k in dbg.expression_map if "main_arena." in k]:
+            del dbg.expression_map[key]
+        result = arenas.list_arenas()
+        assert result["parsed"]["verdict"] == "unresolvable"
+
+    def test_cache_key_needs_glibc_mapping(self):
+        from paomcp.tools.backends.heap_glibc_arenas import arena_layout_cache_key
+
+        profile = {"pointer_bits": 64}
+        classification = {
+            "family": "glibc",
+            "version": "2.35",
+            "evidence": [
+                {"source": "mapping", "family": "glibc", "file": "/lib/libc.so.6"},
+            ],
+        }
+        assert arena_layout_cache_key(classification, profile) == (
+            "glibc",
+            "2.35",
+            "/lib/libc.so.6",
+            64,
+        )
+        assert (
+            arena_layout_cache_key({**classification, "family": "musl"}, profile)
+            is None
+        )
+        assert (
+            arena_layout_cache_key({**classification, "evidence": []}, profile) is None
+        )

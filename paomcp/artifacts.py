@@ -1286,8 +1286,17 @@ class ArtifactStore:
         *,
         offset: int = 0,
         length: Optional[int] = None,
+        format: str = "auto",
     ) -> Dict[str, Any]:
-        """Read a byte range, or the complete artifact when length is None."""
+        """Read a byte range, or the complete artifact when length is None.
+
+        ``format`` controls the payload encoding and defaults to ``auto``:
+        text artifacts return decoded ``content`` only, binary artifacts
+        return ``content_base64`` only.  ``both`` preserves the legacy
+        dual-field shape at ~2.3x token cost; prefer ``auto``.
+        """
+        if format not in ("auto", "text", "base64", "both"):
+            raise ValueError("format must be one of 'auto', 'text', 'base64', 'both'")
         if offset < 0:
             raise ValueError("offset cannot be negative")
         if length is not None and length < 0:
@@ -1310,15 +1319,23 @@ class ArtifactStore:
                 payload = artifact_file.read(requested_length)
 
         next_offset = offset + len(payload)
-        result = {
+        want_text = format in ("text", "both") or (
+            format == "auto" and metadata.encoding != BINARY_ARTIFACT_ENCODING
+        )
+        want_base64 = format in ("base64", "both") or (
+            format == "auto" and metadata.encoding == BINARY_ARTIFACT_ENCODING
+        )
+        result: Dict[str, Any] = {
             "artifact": metadata.to_dict(),
             "offset": offset,
             "length": len(payload),
             "next_offset": next_offset,
             "eof": next_offset >= metadata.size_bytes,
-            "content_base64": base64.b64encode(payload).decode("ascii"),
+            "format": format,
         }
-        if metadata.encoding != BINARY_ARTIFACT_ENCODING:
+        if want_base64:
+            result["content_base64"] = base64.b64encode(payload).decode("ascii")
+        if want_text:
             result["content"] = payload.decode(metadata.encoding, errors="replace")
         return result
 
@@ -1329,10 +1346,11 @@ class ArtifactStore:
         *,
         offset: int = 0,
         length: Optional[int] = None,
+        format: str = "auto",
     ) -> Dict[str, Any]:
         """Read an artifact range after enforcing debugger-session ownership."""
         self.assert_owner(artifact_id, session_id)
-        return self.read(artifact_id, offset=offset, length=length)
+        return self.read(artifact_id, offset=offset, length=length, format=format)
 
     def verify(
         self, artifact_id: str, session_id: Optional[str] = None

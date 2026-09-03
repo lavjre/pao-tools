@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import threading
@@ -104,6 +105,47 @@ _MALLOC_STATE_FIELDS: Tuple[Tuple[str, str, int], ...] = (
 )
 
 
+def arena_layout_cache_key(
+    classification: Mapping[str, Any], profile: Mapping[str, Any]
+) -> Optional[tuple]:
+    """Key a resolved arena layout by libc identity (no GDB calls).
+
+    Field offsets depend only on the loaded libc -- never on the ASLR slide
+    or inferior state -- so one ``resolve()`` per (family, version, libc
+    file, pointer width) serves every later inspection in the session.
+    Returns ``None`` when no glibc mapping is visible (static binaries):
+    callers must then resolve fresh rather than risk a stale hit across
+    different binaries.
+    """
+    if not isinstance(classification, Mapping) or not isinstance(profile, Mapping):
+        return None
+    if classification.get("family") != "glibc":
+        return None
+    libc_file = None
+    evidence = classification.get("evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if (
+                isinstance(item, Mapping)
+                and item.get("family") == "glibc"
+                and item.get("file")
+            ):
+                libc_file = str(item.get("file"))
+                break
+    if libc_file is None:
+        libc = classification.get("libc")
+        if isinstance(libc, Mapping) and libc.get("object"):
+            libc_file = str(libc.get("object"))
+    if libc_file is None:
+        return None
+    return (
+        str(classification.get("family")),
+        str(classification.get("version")),
+        libc_file,
+        profile.get("pointer_bits"),
+    )
+
+
 class ArenaLayoutResolver:
     """Resolve main_arena's address and malloc_state field offsets via GDB.
 
@@ -127,6 +169,10 @@ class ArenaLayoutResolver:
             return None
         parsed = result.get("parsed") or {}
         return parse_int(parsed.get("value"))
+
+    def read_arena_address(self) -> Optional[int]:
+        """Read the live ``main_arena`` address (one eval; ASLR-fresh)."""
+        return self._eval_int("(void*)&main_arena")
 
     @staticmethod
     def _offset_expression(field_name: str) -> str:
@@ -188,6 +234,40 @@ class GlibcArenas:
         self.session_id = session_id
         self.discovery = discovery
         self.resolver = ArenaLayoutResolver(debugger)
+        # Layout cache: offsets are libc-stable, so one resolve() per libc
+        # identity serves the whole session (see arena_layout_cache_key).
+        # Only resolvable layouts are cached; stripped-libc misses keep the
+        # legacy always-resolve behavior instead of freezing "unresolvable".
+        self._layout_cache: Optional[Tuple[tuple, Dict[str, Any]]] = None
+
+    def cached_arena_layout(
+        self,
+        classification: Mapping[str, Any],
+        profile: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the arena layout, resolving once per libc identity.
+
+        The cached copy carries fresh ``arena_address``: ASLR slides the
+        address every run while offsets stay put, so the address is always
+        re-read (one eval) and spliced into the cached offsets.
+        """
+        key = arena_layout_cache_key(classification, profile)
+        if (
+            key is not None
+            and self._layout_cache is not None
+            and self._layout_cache[0] == key
+        ):
+            layout = copy.deepcopy(self._layout_cache[1])
+            # ASLR slides the address every run while offsets stay put, so
+            # the address is always re-read (one eval). Failures are never
+            # stored: the next call retries from the intact cached offsets.
+            layout["arena_address"] = self.resolver.read_arena_address()
+            return layout
+        layout = self.resolver.resolve()
+        if key is not None and layout.get("offsets", {}).get("next") is not None:
+            stored = {k: v for k, v in layout.items() if k != "arena_address"}
+            self._layout_cache = (key, copy.deepcopy(stored))
+        return layout
 
     # ------------------------------------------------------------------
     # Pure parser core (no debugger required)
@@ -384,7 +464,7 @@ class GlibcArenas:
                 "list_arenas", ARENA_LIST_SCHEMA, classification, profile
             )
 
-        layout = self.resolver.resolve()
+        layout = self.cached_arena_layout(classification, profile)
         if layout["arena_address"] is None or layout["offsets"].get("next") is None:
             return self._unresolvable_response(
                 "list_arenas",
@@ -534,7 +614,7 @@ class GlibcArenas:
                 "inspect_arena", ARENA_INSPECTION_SCHEMA, classification, profile
             )
 
-        layout = self.resolver.resolve()
+        layout = self.cached_arena_layout(classification, profile)
         struct_size = layout.get("struct_size")
 
         target_address: Optional[int]

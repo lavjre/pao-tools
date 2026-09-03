@@ -355,6 +355,11 @@ def register(mcp: FastMCP) -> None:
         Output is not silently truncated. Large raw/parsed results use the shared
         lossless artifact response path, with optional `limit` for caller control.
         """
+        # Unbounded scans (e.g. a zero byte over a large binary) can return
+        # millions of matches and pin a worker for minutes, so an omitted
+        # limit defaults to a bounded scan with an explicit warning. Pass an
+        # explicit limit (backend max 1000000) for a full sweep.
+        effective_limit = 5000 if limit is None else limit
         session = resolve_debug_session(
             get_services(ctx), session_id=session_id, create_if_missing=False
         )
@@ -367,12 +372,19 @@ def register(mcp: FastMCP) -> None:
                 hex_encoded=hex_encoded,
                 executable=executable,
                 writable=writable,
-                limit=limit,
+                limit=effective_limit,
                 aligned=aligned,
                 step=step,
             ),
         )
         result["session_id"] = session.session_id
+        if limit is None:
+            warnings = result.setdefault("warnings", [])
+            if isinstance(warnings, list):
+                warnings.append(
+                    "Default match cap 5000 applied; pass an explicit limit "
+                    "for a wider scan"
+                )
         return result
 
     @mcp.tool()

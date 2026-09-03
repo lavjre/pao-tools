@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Any, Dict, List, Optional
-
 import requests
 
 from paomcp.tools.backends.foundation import build_backend_response
@@ -122,9 +122,33 @@ class IdaProMCP:
         self.idalib_url = idalib_url or DEFAULT_IDALIB_MCP_URL
         self.timeout_sec = _clamp_timeout(timeout_sec)
         self.model_schema_version = "1"
+        self._session: Optional[requests.Session] = None
+        self._session_lock = threading.Lock()
+
+    def _session_client(self) -> requests.Session:
+        """Shared keep-alive session (one TCP/TLS handshake, not one per call)."""
+        session = self._session
+        if session is None:
+            with self._session_lock:
+                if self._session is None:
+                    self._session = requests.Session()
+                session = self._session
+        return session
+
+    def close(self) -> None:
+        """Drop the keep-alive session; the bridge degrades, never raises."""
+        with self._session_lock:
+            session, self._session = self._session, None
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001 - shutdown path
+                logger.debug("IDA session close failed", exc_info=True)
 
     def _post(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        response = requests.post(url, json=payload, timeout=self.timeout_sec)
+        response = self._session_client().post(
+            url, json=payload, timeout=self.timeout_sec
+        )
         response.raise_for_status()
         data = response.json()
         if not isinstance(data, dict):

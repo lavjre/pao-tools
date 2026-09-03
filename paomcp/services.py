@@ -165,6 +165,11 @@ def create_services(
 def close_services(services: AppServices) -> None:
     logger.info("Shutting down Pao Tools server components...")
 
+    try:
+        services.ida.close()
+    except Exception:
+        logger.exception("Failed to close the IDA bridge session during shutdown")
+
     with services.paopipe_lock:
         for pipe in services.paopipe_sessions.values():
             try:

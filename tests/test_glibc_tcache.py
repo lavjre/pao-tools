@@ -648,3 +648,30 @@ class TestHeapToolsFacadeTcache:
         result = facade.inspect_tcache()
         assert result["parsed"]["verdict"] == "parsed"
         assert result["parsed"]["bins"][0]["length"] == 1
+
+
+class TestTcacheLayoutCache:
+    def _one(self, dbg):
+        bins_, gdb = build_bins(debugger=dbg, libc=_libc_version("2.31"))
+        user_addr = HEAP_BASE + 0x400
+        counts = [0] * TCACHE_MAX_BINS
+        counts[0] = 1
+        entries = [0] * TCACHE_MAX_BINS
+        entries[0] = user_addr
+        gdb.place(TCACHE_ADDR, make_tcache_bytes(counts=counts, entries=entries))
+        place_tcache_chain(gdb, [user_addr])
+        return bins_
+
+    def test_second_inspect_reuses_cached_layout(self):
+        dbg = TcacheAwareFakeDebugger()
+        bins_ = self._one(dbg)
+        assert bins_.inspect_tcache()["parsed"]["verdict"] == "parsed"
+        assert bins_._tcache_layout_cache is not None
+        # Break every layout expression except the per-thread address: a
+        # fresh resolve() is now impossible, so parsed output proves the hit.
+        for key in [k for k in dbg.expression_map if k != "(void*)tcache"]:
+            if "tcache" in key or "main_arena" in key or "sizeof" in key:
+                del dbg.expression_map[key]
+        result = bins_.inspect_tcache()
+        assert result["parsed"]["verdict"] == "parsed"
+        assert result["parsed"]["bins"][0]["length"] == 1
