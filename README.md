@@ -74,6 +74,11 @@ tool answers in the same envelope.
 - Typed glibc parsers: chunks, arenas, fastbins/tcache/regular bins with
   safe-linking evidence, corruption checks, free validation, and bounded heap
   snapshot diffs
+- glibc technique analysis: `analyze_heap_technique` runs a 13-detector
+  registry (House-of-* primitives, tcache/fastbin attacks, overlapping
+  chunks, top-chunk exhaustion) over one live snapshot, `detect_uaf` scans
+  writable mappings for dangling references into freed chunks, and
+  `heap_technique_catalog` documents the technique families statically
 - Apple libmalloc zone introspection: zone discovery, per-zone function and
   introspection tables, size-class probes, and pointer-ownership classification
 - Kernel SLUB slab analysis: `struct kmem_cache` geometry and hardened
@@ -100,6 +105,11 @@ tool answers in the same envelope.
 
 - Session-owned lossless artifacts with chunk delivery, SHA-256 verification,
   and retention control
+- Safety gates: `pip install` into the shared venv needs `PAO_ALLOW_PIP_INSTALL=1`;
+  heap snapshots take `max_ledger_entries` / `timeout_seconds` budgets
+  (`PAO_SNAPSHOT_TIMEOUT_SECONDS`, default 300s); `create_target` host paths
+  stay inside the workspace (SSH key paths pass through by design) and
+  `qemu_extra_args` rejects host-escape flags (virtfs, net, daemonize)
 - Versioned structured responses shared by every MCP tool, with pollable
   operation IDs, progress, cooperative cancellation, and resource caps
 - HTTP and stdio MCP transports
@@ -346,7 +356,8 @@ on startup, so multi-day investigations survive restarts. `generate_fuzz_inputs`
 builds deterministic file-input corpora (zeros/cyclic/bitflips) and
 `run_fuzz_batch` feeds them to the target under GDB with signature-digest
 crash dedup; novel crashes link straight into a research session as crash
-evidence. `generate_bounty_report` renders a triager-ready finding (summary,
+evidence (`link_evidence_batch` attaches a whole batch in one write).
+`generate_bounty_report` renders a triager-ready finding (summary,
 PoC, root cause from supported hypotheses only, impact, remediation, gaps).
 
 Remote binds are fail-closed: loopback needs nothing, anything else requires
@@ -363,8 +374,9 @@ fingerprint); JIT regions get write-watch (`arm_region_watch` /
 ## Scope and limits
 
 `pao-tools` is designed for a private, single-user research workflow. The typed
-heap surface covers glibc deeply; musl mallocng, jemalloc, and Scudo are detected
-and represented through the allocator contract, but do not yet have typed internal
+heap surface covers glibc deeply; musl mallocng has typed chunk/group parsers
+(`inspect_musl_chunk` / `list_musl_groups`), while jemalloc and Scudo are detected
+and represented through the allocator contract but do not yet have typed internal
 parsers, and allocation-event tracking is not included. The PartitionAlloc family
 is deliberately not walked — its freelists are per-PartitionPage and encoded
 `((slot ^ random) << 16)`, its metadata changes across Chrome versions, and
