@@ -1,6 +1,6 @@
 """Task profiles: curated module subsets behind ``PAO_PROFILE``.
 
-Listing 199 tools costs ~26k tokens before any work happens. Profiles let
+Listing 199 tools costs ~28k tokens before any work happens. Profiles let
 an operator pay only for the mission at hand: each profile names the tool
 *modules* it keeps (see :func:`register_all_tools`), everything else is
 never registered. ``full`` (the default) keeps the entire surface.

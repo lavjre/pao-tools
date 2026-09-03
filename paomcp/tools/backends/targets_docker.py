@@ -62,8 +62,11 @@ BLOCKED_DOCKER_PREFIXES = (
     "--uts",
     "--ipc",
     "--volume",
+    "--volumes-from",
+    "--volume-driver",
     "--mount",
     "--device",
+    "--device-cgroup-rule",
     "--cap-add",
     "--cap-drop",
     "--security-opt",
@@ -72,6 +75,9 @@ BLOCKED_DOCKER_PREFIXES = (
     "--runtime",
     "-v",
 )
+# NOTE: -p/--publish is deliberately allowed: exposing a container port is
+# the documented way to reach a gdbserver inside it (see tcp_remote). The
+# host side stays safe because compose binds 127.0.0.1 by default.
 
 
 def _docker_flag_name(entry: str) -> str:

@@ -26,7 +26,7 @@ class _FakeCrash:
         self._script = list(script)
         self.runs = []
 
-    def run_until_crash(self, *, arguments, mode, timeout_seconds):
+    def run_until_crash(self, *, arguments, mode, timeout_seconds, **kwargs):
         self.runs.append((arguments, mode, timeout_seconds))
         crashed, crash_id, signal = self._script.pop(0)
         return {
@@ -37,7 +37,7 @@ class _FakeCrash:
             }
         }
 
-    def capture_crash_snapshot(self, crash_id):
+    def capture_crash_snapshot(self, crash_id, **kwargs):
         return {"parsed": {"signature": {"digest": f"digest:{crash_id}"}}}
 
 
@@ -121,6 +121,38 @@ def test_batch_validates_budgets(tmp_path):
             corpus_dir=str(tmp_path),
             inputs=[],
             timeout_per_run=9999,
+        )
+
+
+def test_batch_rejects_oversize_corpus_before_writing(tmp_path, monkeypatch):
+    import paomcp.tools.backends.fuzz as fuzz_module
+
+    monkeypatch.setattr(fuzz_module, "MAX_TOTAL_CORPUS_BYTES", 1)
+    campaign = FuzzBatch("sess")
+    with pytest.raises(ValueError, match="batch budget"):
+        campaign.run_batch(
+            tools=_FakeTools([]),
+            binary_path="/x",
+            corpus_dir=str(tmp_path),
+            inputs=[{"index": 0, "hex": "4141"}],
+        )
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_batch_reraises_cancellation(tmp_path):
+    from paomcp.operations import OperationCancelledError
+
+    def cancel():
+        raise OperationCancelledError("stop")
+
+    campaign = FuzzBatch("sess")
+    with pytest.raises(OperationCancelledError):
+        campaign.run_batch(
+            tools=_FakeTools([(False, None, None)]),
+            binary_path="/x",
+            corpus_dir=str(tmp_path),
+            inputs=[{"index": 0, "hex": "00"}],
+            cancellation_check=cancel,
         )
 
 

@@ -116,6 +116,9 @@ class TestDockerStart:
             "--network=host",
             "--gpus=all",
             "--runtime=nvidia",
+            "--volumes-from=sidecar",
+            "--volume-driver=local",
+            "--device-cgroup-rule=c 10:200 rmw",
         ],
     )
     def test_privilege_mount_device_flags_rejected(self, extra: str) -> None:

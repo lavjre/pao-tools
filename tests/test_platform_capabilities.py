@@ -72,7 +72,7 @@ def _which(name: str):
 
 def _version(name: str):
     versions = {
-        "pao-tools": "0.3.0",
+        "pao-tools": "0.4.0",
         "fastmcp": "3.1.0",
         "pygdbmi": "0.11.0.0",
         "pwntools": "4.14.1",
@@ -104,7 +104,7 @@ def test_platform_manifest_aggregates_runtime_and_feature_groups():
     assert report["success"] is True
     assert report["ready"] is True
     assert report["platform"]["architecture"]["normalized"] == "amd64"
-    assert report["packages"]["pao-tools"]["version"] == "0.3.0"
+    assert report["packages"]["pao-tools"]["version"] == "0.4.0"
     assert report["runtimes"]["debugger"]["versions"]["pwndbg"] == "2026.02.18"
     assert report["runtimes"]["decompiler"]["version"] == "11.4.2"
     assert report["runtimes"]["paocli"]["version"] == "1.6-pao"

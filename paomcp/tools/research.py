@@ -408,7 +408,7 @@ def register(mcp: FastMCP) -> None:
     ) -> Dict[str, Any]:
         """Render a research session as a typed final report.
 
-        The report keeps the Stage-9 fact / heuristic / hypothesis
+        The report keeps the fact / heuristic / hypothesis
         distinction explicit: crash / heap / tool_result / artifact
         evidence entries and captured snapshots land in **facts**;
         notes tagged ``heuristic`` and evidence whose metadata carries

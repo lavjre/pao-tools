@@ -392,6 +392,15 @@ class JitRegionTracker:
             warnings=None,
         )
 
+    @staticmethod
+    def _public_watch(watch: Dict[str, Any]) -> Dict[str, Any]:
+        """Watch descriptor without the retained baseline bytes.
+
+        Baselines live server-side for diffing; echoing them would return
+        up to 64 MiB of raw bytes per watch inside the response itself.
+        """
+        return {k: v for k, v in watch.items() if k != "snapshot"}
+
     def check_region_watches(
         self,
         *,
@@ -405,11 +414,23 @@ class JitRegionTracker:
                 cancellation_check()
             current = self._read_exact(watch["address"], watch["length"])
             if current is None:
-                reports.append({**watch, "verdict": "unreadable", "changed": None})
+                reports.append(
+                    {
+                        **self._public_watch(watch),
+                        "verdict": "unreadable",
+                        "changed": None,
+                    }
+                )
                 continue
             digest = hashlib.sha256(current).hexdigest()
             if digest == watch["sha256"]:
-                reports.append({**watch, "verdict": "unchanged", "changed": False})
+                reports.append(
+                    {
+                        **self._public_watch(watch),
+                        "verdict": "unchanged",
+                        "changed": False,
+                    }
+                )
                 continue
             # Re-read the baseline is impossible (it lived only as a hash),
             # so changed ranges need both buffers: keep the last hash AND
@@ -418,7 +439,7 @@ class JitRegionTracker:
             if baseline is None or len(baseline) != watch["length"]:
                 reports.append(
                     {
-                        **{k: v for k, v in watch.items() if k != "snapshot"},
+                        **self._public_watch(watch),
                         "verdict": "changed",
                         "changed": True,
                         "changed_ranges": [],
@@ -430,7 +451,7 @@ class JitRegionTracker:
             ranges = self._changed_ranges(baseline, current)
             reports.append(
                 {
-                    **{k: v for k, v in watch.items() if k != "snapshot"},
+                    **self._public_watch(watch),
                     "verdict": "changed",
                     "changed": True,
                     "changed_ranges": ranges,

@@ -19,6 +19,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from paomcp.operations import OperationCancelledError
 from paomcp.tools.backends.foundation import build_backend_response
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ DEFAULT_TIMEOUT_PER_RUN_SECONDS = 10.0
 MAX_TIMEOUT_PER_RUN_SECONDS = 120.0
 DEFAULT_MAX_INPUT_LEN = 4096
 MAX_CONFIGURED_INPUT_LEN = 1024 * 1024
+MAX_TOTAL_CORPUS_BYTES = 256 * 1024 * 1024
 INPUT_STRATEGIES = ("zeros", "ones", "cyclic", "bitflip")
 
 
@@ -137,6 +139,13 @@ class FuzzBatch:
             raise ValueError(
                 f"timeout_per_run must be between 0 and {MAX_TIMEOUT_PER_RUN_SECONDS}"
             )
+        planned = list(inputs)[:max_runs]
+        total_bytes = sum(len(str(item.get("hex", ""))) // 2 for item in planned)
+        if total_bytes > MAX_TOTAL_CORPUS_BYTES:
+            raise ValueError(
+                f"planned corpus is ~{total_bytes} bytes, exceeding the "
+                f"{MAX_TOTAL_CORPUS_BYTES}-byte batch budget; split the batch"
+            )
         os.makedirs(corpus_dir, exist_ok=True)
         set_result = tools.set_file(binary_path)
         if not set_result.get("success"):
@@ -153,7 +162,6 @@ class FuzzBatch:
         seen_digests: Dict[str, Dict[str, Any]] = {}
         run_records: List[Dict[str, Any]] = []
         errors: List[str] = []
-        planned = list(inputs)[:max_runs]
         for position, item in enumerate(planned):
             if cancellation_check is not None:
                 cancellation_check()
@@ -175,7 +183,10 @@ class FuzzBatch:
                     arguments=[input_path],
                     mode="run",
                     timeout_seconds=timeout,
+                    cancellation_check=cancellation_check,
                 )
+            except OperationCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 - one bad run never kills a batch
                 logger.exception("Fuzz run %d failed", position)
                 errors.append(f"input {position}: run failed: {exc}")
@@ -195,7 +206,9 @@ class FuzzBatch:
             }
             if crashed:
                 crash_id = parsed.get("crash_id")
-                digest = self._crash_digest(tools, crash_id, parsed)
+                digest = self._crash_digest(
+                    tools, crash_id, parsed, cancellation_check=cancellation_check
+                )
                 record["digest"] = digest
                 if digest is not None and digest not in seen_digests:
                     seen_digests[digest] = record
@@ -225,7 +238,11 @@ class FuzzBatch:
         )
 
     def _crash_digest(
-        self, tools: Any, crash_id: Optional[str], parsed: Mapping[str, Any]
+        self,
+        tools: Any,
+        crash_id: Optional[str],
+        parsed: Mapping[str, Any],
+        cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Optional[str]:
         """Snapshot a crash and return its signature digest for dedup."""
         if not crash_id:
@@ -235,7 +252,11 @@ class FuzzBatch:
                 return None
             return f"{signal}:{stop}"
         try:
-            snapshot = tools.crash.capture_crash_snapshot(crash_id)
+            snapshot = tools.crash.capture_crash_snapshot(
+                crash_id, cancellation_check=cancellation_check
+            )
+        except OperationCancelledError:
+            raise
         except Exception:  # noqa: BLE001 - dedup is best-effort
             logger.exception("Fuzz crash snapshot failed for %s", crash_id)
             return None

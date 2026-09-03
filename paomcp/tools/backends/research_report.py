@@ -24,7 +24,7 @@ tools, no debugger, no artifact reads.  Evidence entries already point
 at everything the reader may want to open later; the report cites those
 pointers rather than duplicating the underlying blobs.
 
-The Stage-9 fact / heuristic / hypothesis distinction is preserved:
+The fact / heuristic / hypothesis distinction is preserved:
 
 * **facts**       -- direct observations recorded as evidence
                      (kind=crash/artifact/heap_snapshot/tool_result)
@@ -602,6 +602,21 @@ class ResearchReport:
         session = self._registry.get_session(session_id)
         with session._lock:
             payload = self._build_json_payload(session)
+
+        def _text(value: Any) -> str:
+            """Escape caller-controlled text so it cannot break markdown structure."""
+            out = str(value if value is not None else "")
+            out = out.replace("\\", "\\\\")
+            for char in ("`", "#", "<", ">", "[", "]", "*", "_"):
+                out = out.replace(char, "\\" + char)
+            return out
+
+        # Raw stripped values stay in the JSON contract; escaped copies are
+        # used for markdown rendering only.
+        title = title.strip()
+        affected_target = affected_target.strip()
+        md_title, md_target = _text(title), _text(affected_target)
+        session_name = _text(session.name)
         by_state = payload["hypotheses"]["by_state"]
         root_causes = [
             h for state in ("supported", "confirmed") for h in by_state.get(state, [])
@@ -609,16 +624,16 @@ class ResearchReport:
         crashes = payload["facts"]["crashes"]
         reproduction = payload["reproduction"]
         lines = [
-            f"# {title.strip()}",
+            f"# {md_title}",
             "",
             f"**Severity:** {severity}",
-            f"**Affected target:** {affected_target.strip()}",
-            f"**Session:** {session.name} (`{session.session_id}`)",
+            f"**Affected target:** {md_target}",
+            f"**Session:** {session_name} (`{session.session_id}`)",
             "",
             "## Summary",
             "",
             (
-                f"Investigation `{session.name}` links "
+                f"Investigation `{session_name}` links "
                 f"{len(crashes)} crash(es), "
                 f"{len(root_causes)} supported root-cause "
                 f"hypothes{'is' if len(root_causes) == 1 else 'es'}, and "
@@ -632,7 +647,7 @@ class ResearchReport:
         if supplied:
             for key in ("binary", "argv", "env", "working_dir", "target_spec"):
                 if supplied.get(key) is not None:
-                    lines.append(f"- `{key}`: `{supplied[key]}`")
+                    lines.append(f"- `{key}`: `{_text(supplied[key])}`")
         else:
             lines.append("- No target spec recorded in session metadata.")
         hints = reproduction.get("timeline_hints", {})
@@ -644,16 +659,18 @@ class ResearchReport:
                 lines.append(f"- {label}: {hints[key]}")
         for crash in crashes:
             ref = crash.get("ref") or crash.get("evidence_id", "")
-            lines.append(f"- Crash evidence: `{ref}`")
+            lines.append(f"- Crash evidence: `{_text(ref)}`")
         missing = reproduction.get("missing", [])
         if missing:
             lines.append(f"- Still missing for replay: {', '.join(missing)}.")
         lines += ["", "## Root Cause", ""]
         if root_causes:
             for hyp in root_causes:
-                lines.append(f"- **[{hyp.get('state')}]** {hyp.get('statement', '')}")
+                lines.append(
+                    f"- **[{hyp.get('state')}]** {_text(hyp.get('statement', ''))}"
+                )
                 if hyp.get("rationale"):
-                    lines.append(f"  - Rationale: {hyp['rationale']}")
+                    lines.append(f"  - Rationale: {_text(hyp['rationale'])}")
         else:
             lines.append(
                 "- No supported root-cause hypothesis yet; see open hypotheses below."
@@ -665,22 +682,24 @@ class ResearchReport:
         )
         lines += ["", "## Remediation", ""]
         lines.append(
-            remediation.strip()
+            _text(remediation.strip())
             if isinstance(remediation, str) and remediation.strip()
             else "- Not proposed yet: record a fix hypothesis first."
         )
         lines += ["", "## Open Hypotheses & Gaps", ""]
         for hyp in by_state.get("proposed", []) + by_state.get("unknown", []):
-            lines.append(f"- **[{hyp.get('state')}]** {hyp.get('statement', '')}")
+            lines.append(
+                f"- **[{hyp.get('state')}]** {_text(hyp.get('statement', ''))}"
+            )
         for gap in payload["known_unknowns"]:
-            lines.append(f"- Gap: {gap}")
+            lines.append(f"- Gap: {_text(gap)}")
         markdown = "\n".join(lines).rstrip() + "\n"
         return {
             "schema": BOUNTY_REPORT_SCHEMA,
             "session_id": session_id,
-            "title": title.strip(),
+            "title": title,
             "severity": severity,
-            "affected_target": affected_target.strip(),
+            "affected_target": affected_target,
             "markdown": markdown,
             "root_cause_hypotheses": root_causes,
             "crash_count": len(crashes),
