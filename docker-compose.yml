@@ -18,12 +18,18 @@ services:
       - apparmor:unconfined
     
     # Environment variables
+    # The server binds 0.0.0.0 inside the container (port mapping is
+    # host-loopback-only), so the fail-closed remote-bind gate requires
+    # PAO_ALLOW_REMOTE=1 plus a bearer token. Put PAO_MCP_TOKEN in .env
+    # (gitignored); compose fails fast when it is missing.
     environment:
       - PYTHONUNBUFFERED=1
       - RUST_LOG=info
       - FASTMCP_DEBUG=false
       - FASTMCP_LOG_LEVEL=INFO
       - PAO_RUNTIME_ROOT=/var/lib/pao
+      - PAO_ALLOW_REMOTE=1
+      - PAO_MCP_TOKEN=${PAO_MCP_TOKEN:?set PAO_MCP_TOKEN in .env before starting}
 
     # Expose MCP HTTP port
     ports:

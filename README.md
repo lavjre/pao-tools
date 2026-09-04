@@ -189,11 +189,17 @@ Build and run the server:
 ```bash
 docker build -t pao-tools:latest . --platform linux/amd64
 
+# The container binds 0.0.0.0, so the remote-bind gate needs an explicit
+# allow plus a bearer token (every route except /healthz requires it):
+export PAO_MCP_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
 docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
+  -e PAO_ALLOW_REMOTE=1 \
+  -e PAO_MCP_TOKEN \
   -v "$PWD/workspace:/workspace" \
   -v "pao-runtime:/var/lib/pao" \
   pao-tools:latest
