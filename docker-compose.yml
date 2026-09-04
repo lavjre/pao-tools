@@ -1,3 +1,5 @@
+name: pao-tools
+
 services:
   pao-tools:
     platform: linux/amd64
