@@ -1,11 +1,11 @@
 services:
-  pao-tools:
+  pao:
     platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile
-    image: pao-tools:latest
-    container_name: pao-tools-server
+    image: pao:latest
+    container_name: pao-server
     
     # Required for GDB to work properly
     cap_add:

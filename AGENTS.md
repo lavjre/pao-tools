@@ -38,7 +38,7 @@ python -m paomcp --stdio
 
 ### Build Docker image
 ```bash
-docker build -t pao-tools:latest . --platform linux/amd64
+docker build -t pao:latest . --platform linux/amd64
 ```
 
 Local helper script:
