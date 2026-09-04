@@ -15,14 +15,14 @@ echo -e "${GREEN}Building Pao Tools Docker image...${NC}"
 # Build the Docker image
 docker build \
     --platform linux/amd64 \
-    -t pao:latest \
-    -t pao:$(git rev-parse --short HEAD 2>/dev/null || echo "dev") \
+    -t pao-tools:latest \
+    -t pao-tools:$(git rev-parse --short HEAD 2>/dev/null || echo "dev") \
     .
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓ Build successful!${NC}"
     echo -e "${YELLOW}To run the container:${NC}"
-    echo "  docker run -p 127.0.0.1:5500:5500 --cap-add=SYS_PTRACE --cap-add=SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined pao:latest"
+    echo "  docker run -p 127.0.0.1:5500:5500 --cap-add=SYS_PTRACE --cap-add=SYS_ADMIN --security-opt seccomp=unconfined --security-opt apparmor=unconfined pao-tools:latest"
     echo -e "${YELLOW}Or use docker-compose:${NC}"
     echo "  docker-compose up -d"
 else

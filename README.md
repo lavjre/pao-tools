@@ -187,7 +187,7 @@ chmod +x workspace/chal
 Build and run the server:
 
 ```bash
-docker build -t pao:latest . --platform linux/amd64
+docker build -t pao-tools:latest . --platform linux/amd64
 
 docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
@@ -196,7 +196,7 @@ docker run --rm -p 127.0.0.1:5500:5500 \
   --security-opt apparmor=unconfined \
   -v "$PWD/workspace:/workspace" \
   -v "pao-runtime:/var/lib/pao" \
-  pao:latest
+  pao-tools:latest
 ```
 
 The default MCP endpoint is:
