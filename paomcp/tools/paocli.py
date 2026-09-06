@@ -222,6 +222,69 @@ def register(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @catch_errors()
+    async def paocli_link_evidence(
+        session_id: str,
+        research_session_id: str,
+        label: Optional[str] = None,
+        max_chars: int = 8000,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Drain a paocli pipe and link its output as research evidence.
+
+        Releases accumulated stdout + structured events without killing the
+        driver, stores them as a research note (capped), and links a
+        ``tool_result`` evidence entry pointing at the pipe session.
+
+        Args:
+            session_id: Pipe session id owning the paocli driver.
+            research_session_id: Research session receiving the evidence.
+            label: Human tag for the note/evidence description.
+            max_chars: Cap output chars stored in the note.
+        """
+        services = get_services(ctx)
+        resolved_session_id, pipe = get_paopipe(services, session_id=session_id)
+        with services.paopipe_lock:
+            output = pipe.release()
+            events = pipe.release_events()
+            alive = pipe.is_alive()
+            exit_code = pipe.get_exit_code()
+            driver_pid = pipe.get_pid()
+        body = (output or "")[-max(512, max_chars) :]
+        tag = (label or "paocli").strip() or "paocli"
+
+        def _link() -> Dict[str, Any]:
+            note = services.research_registry.add_note(
+                session_id=research_session_id,
+                body=f"[{tag}] paocli {resolved_session_id} output:\n{body}",
+                tags=["paocli", tag],
+            )
+            evidence = services.research_registry.link_evidence(
+                session_id=research_session_id,
+                kind="tool_result",
+                ref=f"paocli:{resolved_session_id}",
+                description=f"{tag}: {len(output or '')} chars, {len(events)} events",
+                note_id=note.note_id,
+                metadata={"driver_pid": driver_pid, "alive": alive},
+            )
+            return {
+                "note_id": note.note_id,
+                "evidence_id": evidence.evidence_id,
+            }
+
+        linked = await run_blocking(_link)
+        return {
+            "success": True,
+            "session_id": resolved_session_id,
+            "research_session_id": research_session_id,
+            "alive": alive,
+            "exit_code": exit_code,
+            "output_chars": len(output or ""),
+            "event_count": len(events),
+            **linked,
+        }
+
+    @mcp.tool()
+    @catch_errors()
     async def list_paocli_sessions(
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:

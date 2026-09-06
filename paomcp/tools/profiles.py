@@ -1,6 +1,6 @@
 """Task profiles: curated module subsets behind ``PAO_PROFILE``.
 
-Listing 199 tools costs ~28k tokens before any work happens. Profiles let
+Listing 212 tools costs ~28k tokens before any work happens. Profiles let
 an operator pay only for the mission at hand: each profile names the tool
 *modules* it keeps (see :func:`register_all_tools`), everything else is
 never registered. ``full`` (the default) keeps the entire surface.
@@ -192,7 +192,72 @@ def resolve_profile(name: Optional[str]) -> Optional[FrozenSet[str]]:
 
 def profile_from_env() -> Optional[FrozenSet[str]]:
     """Read the active profile from ``PAO_PROFILE`` (default ``full``)."""
+    raw = (
+        (os.environ.get("PAO_PROFILE", DEFAULT_PROFILE) or DEFAULT_PROFILE)
+        .strip()
+        .lower()
+    )
+    if raw == "auto":
+        # ``auto`` needs target context; the server boots ``full`` and the
+        # ``suggest_profile`` tool narrows per mission. Never crash startup.
+        return None
     return resolve_profile(os.environ.get("PAO_PROFILE", DEFAULT_PROFILE))
+
+
+def suggest_profile_for_target(
+    *,
+    filename: str = "",
+    mappings_hint: str = "",
+    goal: str = "",
+) -> Dict[str, str]:
+    """Recommend a task profile from target filename/mapping/goal hints (pure).
+
+    Rules (first match wins): firmware blob names -> ``firmware``; Mach-O /
+    dyld / iOS markers -> ``rev`` (Apple static+dynamic reading); vmlinux /
+    bzImage / oops / syzkaller markers -> ``kernel``; chrome / v8 / jit /
+    partition markers -> ``chrome``; bounty/report/cve markers -> ``bounty``;
+    ctf/flag/chal markers -> ``ctf``; heap/rop/exploit/pwn markers ->
+    ``pwn``; default -> ``full``. Every result carries a one-line reason.
+    """
+    blob = f"{filename}\n{mappings_hint}\n{goal}".lower()
+    if any(
+        k in blob
+        for k in ("firmware", ".bin", "squashfs", "uboot", "openwrt", "uimage", "trx")
+    ):
+        return {"profile": "firmware", "reason": "firmware blob markers matched"}
+    if any(
+        k in blob
+        for k in ("mach-o", "macho", ".dylib", "dyld", "ios", "ipsw", "libsystem")
+    ):
+        return {"profile": "rev", "reason": "apple/macho markers matched"}
+    if any(
+        k in blob
+        for k in (
+            "vmlinux",
+            "bzimage",
+            "vmlinuz",
+            "oops",
+            "syzkaller",
+            "slub",
+            "/sys/kernel/btf",
+        )
+    ):
+        return {"profile": "kernel", "reason": "kernel image/oops markers matched"}
+    if any(k in blob for k in ("chrome", "chromium", "v8", "partitionalloc", "jit")):
+        return {"profile": "chrome", "reason": "browser/jit markers matched"}
+    if any(
+        k in blob
+        for k in ("bounty", "hackerone", "bugcrowd", "cve", "report", "triager")
+    ):
+        return {"profile": "bounty", "reason": "bounty/report markers matched"}
+    if any(k in blob for k in ("ctf", "flag", "chal", "pico", "htb")):
+        return {"profile": "ctf", "reason": "ctf markers matched"}
+    if any(
+        k in blob
+        for k in ("heap", "rop", "exploit", "pwn", "pwndbg", "tcache", "fastbin")
+    ):
+        return {"profile": "pwn", "reason": "userland exploit markers matched"}
+    return {"profile": "full", "reason": "no specific markers; full surface"}
 
 
 __all__ = [
@@ -209,4 +274,5 @@ __all__ = [
     "DEFAULT_PROFILE",
     "resolve_profile",
     "profile_from_env",
+    "suggest_profile_for_target",
 ]

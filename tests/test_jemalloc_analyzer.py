@@ -322,11 +322,8 @@ class TestUnsupportedSurface:
             ("inspect_fastbins", FASTBIN_INSPECTION_SCHEMA),
             ("inspect_tcache", TCACHE_INSPECTION_SCHEMA),
             ("inspect_bins", BIN_INSPECTION_SCHEMA),
-            ("classify_heap_corruption", HEAP_CORRUPTION_SCHEMA),
             ("validate_free", FREE_VALIDATION_SCHEMA),
             ("analyze_heap_technique", HEAP_TECHNIQUE_SCHEMA),
-            ("detect_uaf", UAF_SCAN_SCHEMA),
-            ("capture_heap_snapshot", HEAP_SNAPSHOT_SCHEMA),
         ],
     )
     def test_returns_typed_unsupported(self, method, schema):

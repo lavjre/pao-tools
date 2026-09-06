@@ -12,9 +12,10 @@ Contract
   techniques, snapshot capture).  One implementer exists per supported family.
 * :func:`analyzer_for_family` maps a detected family to an analyzer.  ``glibc``
   resolves to :class:`GlibcAnalyzer` (full typed structural parser); ``jemalloc``
-  resolves to ``JemallocAnalyzer`` (extent/rtree core via pwndbg's plugin);
-  ``libmalloc`` resolves to ``LibmallocAnalyzer`` (malloc_zone introspection);
-  every other family (``musl``, ``scudo``, ``unknown``) resolves to
+  resolves to ``JemallocAnalyzer`` (extent/rtree + corruption/UAF/snapshot phase 2);
+  ``libmalloc`` resolves to ``LibmallocAnalyzer`` (malloc_zone
+  introspection); ``scudo`` resolves to ``ScudoAnalyzer`` (read-only header
+  scan); every other family (``musl``, ``unknown``) resolves to
   :class:`UnsupportedAnalyzer`.
 * :class:`GlibcAnalyzer` and :class:`UnsupportedAnalyzer` *forward* to the
   existing glibc components (``facade.glibc`` / ``facade.arenas`` /
@@ -369,9 +370,11 @@ def analyzer_for_family(
 
     ``glibc`` maps to :class:`GlibcAnalyzer`, ``jemalloc`` maps to
     :class:`~paomcp.tools.backends.jemalloc.JemallocAnalyzer` (extent/rtree
-    core), ``libmalloc`` maps to
+    + corruption/UAF/snapshot), ``libmalloc`` maps to
     :class:`~paomcp.tools.backends.libmalloc.LibmallocAnalyzer` (malloc_zone
-    introspection); every other family -- and an unresolvable detection
+    introspection), ``scudo`` maps to
+    :class:`~paomcp.tools.backends.scudo.ScudoAnalyzer` (read-only header
+    scan); every other family -- and an unresolvable detection
     (``None``) -- maps to :class:`UnsupportedAnalyzer`.  This is the single
     extension point for a new family's parser: add the family name to the
     dispatch and the facade starts routing to it.
@@ -390,6 +393,10 @@ def analyzer_for_family(
         from .libmalloc import LibmallocAnalyzer  # noqa: PLC0415
 
         return LibmallocAnalyzer(facade)
+    if family == "scudo":
+        from .scudo import ScudoAnalyzer  # noqa: PLC0415
+
+        return ScudoAnalyzer(facade)
     return UnsupportedAnalyzer(facade)
 
 

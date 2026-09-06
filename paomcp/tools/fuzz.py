@@ -139,3 +139,96 @@ def register(mcp: FastMCP) -> None:
                 logger.exception("Fuzz research linking failed")
                 result["research_linked"] = []
         return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def minimize_corpus(
+        inputs: List[Dict[str, Any]],
+        max_files: int = 2048,
+        max_bytes: int = 268435456,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Dedup a fuzz corpus by sha256, smallest-first under caps (pure).
+
+        Args:
+            inputs: Items shaped like ``generate_fuzz_inputs`` entries.
+            max_files: Cap files kept.
+            max_bytes: Cap total bytes kept.
+        """
+        from paomcp.tools.backends.fuzz_cov import minimize_corpus as _minimize
+
+        _ = ctx
+        return await run_blocking(
+            lambda: _minimize(inputs, max_files=max_files, max_bytes=max_bytes)
+        )
+
+    @mcp.tool()
+    @catch_errors()
+    async def run_afl_batch(
+        corpus_dir: str,
+        output_dir: str,
+        engine: str = "afl",
+        target_path: Optional[str] = None,
+        harness_path: Optional[str] = None,
+        time_seconds: int = 600,
+        mem_mb: int = 2048,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Run one bounded AFL++/libFuzzer campaign; honest unavailable when missing.
+
+        Args:
+            corpus_dir: Seed corpus dir under /workspace.
+            output_dir: Findings dir under /workspace.
+            engine: "afl" (afl-fuzz + target_path) or "libfuzzer" (harness_path).
+            target_path: Target binary under /workspace (afl).
+            harness_path: clang -fsanitize=fuzzer harness (libfuzzer).
+            time_seconds: Campaign budget (max 3600).
+            mem_mb: Memory limit per child.
+        """
+        from paomcp.tools.backends.fuzz_cov import run_coverage_batch
+
+        services = get_services(ctx)
+        workspace_root = services.runtime_paths.workspace_root
+        resolved_corpus = resolve_workspace_path(
+            corpus_dir,
+            workspace_root=workspace_root,
+            require_exists=False,
+            kind="corpus_dir",
+        )
+        resolved_out = resolve_workspace_path(
+            output_dir,
+            workspace_root=workspace_root,
+            require_exists=False,
+            kind="corpus_dir",
+        )
+        resolved_target = None
+        if target_path is not None:
+            resolved_target = resolve_workspace_path(
+                target_path,
+                workspace_root=workspace_root,
+                require_exists=False,
+                kind="binary_path",
+            )
+        resolved_harness = None
+        if harness_path is not None:
+            resolved_harness = resolve_workspace_path(
+                harness_path,
+                workspace_root=workspace_root,
+                require_exists=False,
+                kind="binary_path",
+            )
+        os.makedirs(resolved_corpus, exist_ok=True)
+        os.makedirs(resolved_out, exist_ok=True)
+
+        def _run() -> Dict[str, Any]:
+            return run_coverage_batch(
+                engine=engine,
+                target_path=resolved_target,
+                harness_path=resolved_harness,
+                corpus_dir=resolved_corpus,
+                output_dir=resolved_out,
+                time_seconds=time_seconds,
+                mem_mb=mem_mb,
+            )
+
+        return await run_blocking(_run)

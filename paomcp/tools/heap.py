@@ -886,5 +886,101 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def start_alloc_trace(
+        session_id: str,
+        symbols: Optional[List[str]] = None,
+        max_events: int = 10000,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Start opt-in malloc/free call-count tracing (breakpoints, bounded).
+
+        Args:
+            session_id: Session to trace.
+            symbols: Breakpoint symbols (default malloc+free, max 8).
+            max_events: Cap stored events (max 10000).
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.start_alloc_trace(
+                symbols=symbols,
+                max_events=max_events,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def list_alloc_events(
+        session_id: str,
+        trace_id: str,
+        limit: int = 100,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """List allocation-trace hit-count deltas for a trace.
+
+        Args:
+            session_id: Session that owns the trace.
+            trace_id: Trace id from start_alloc_trace.
+            limit: Max events returned.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.list_alloc_events(
+                trace_id=trace_id,
+                limit=limit,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def stop_alloc_trace(
+        session_id: str,
+        trace_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Stop an alloc trace and remove its breakpoints.
+
+        Args:
+            session_id: Session that owns the trace.
+            trace_id: Trace id from start_alloc_trace.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.stop_alloc_trace(
+                trace_id=trace_id,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]

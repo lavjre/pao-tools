@@ -321,3 +321,45 @@ def register(mcp: FastMCP) -> None:
                     return result
 
         return await run_blocking(compare_snapshots)
+
+    @mcp.tool()
+    @catch_errors()
+    async def extract_firmware(
+        image_path: str,
+        output_dir: Optional[str] = None,
+        timeout_seconds: int = 600,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Extract + carve a firmware image (unblob/binwalk when present, pure carve always).
+
+        Args:
+            image_path: Firmware image under the configured workspace.
+            output_dir: Extraction dir under the workspace (default auto).
+            timeout_seconds: Overall budget (max 3600).
+        """
+        from paomcp.tools.backends.firmware import extract_firmware as _extract
+
+        services = get_services(ctx)
+        workspace_root = services.runtime_paths.workspace_root
+        resolved_image = _resolve_workspace_file(
+            image_path, workspace_root, "image_path"
+        )
+        resolved_out = None
+        if output_dir is not None:
+            from paomcp.utils.paths import resolve_workspace_path as _resolve_dir
+
+            resolved_out = _resolve_dir(
+                output_dir,
+                workspace_root=workspace_root,
+                require_exists=False,
+                kind="corpus_dir",
+            )
+
+        def _run() -> Dict[str, Any]:
+            return _extract(
+                image_path=resolved_image,
+                output_dir=resolved_out,
+                timeout_seconds=timeout_seconds,
+            )
+
+        return await run_blocking(_run)

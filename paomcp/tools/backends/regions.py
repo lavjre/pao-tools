@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.foundation import (
@@ -294,6 +294,47 @@ class JitRegionTracker:
             warnings=warnings,
         )
 
+    def classify_pa_regions(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Flag PartitionAlloc-like super pages (region classifier, no freelist walk)."""
+        self._require_live()
+        _regions, raw_mappings, warnings, available = self._read_maps(
+            cancellation_check
+        )
+        if not available:
+            parsed: Dict[str, Any] = {
+                "schema": PA_REGIONS_SCHEMA,
+                "verdict": "unavailable",
+                "supported": False,
+                "candidates": [],
+                "reason": "memory maps unavailable or unparseable",
+            }
+        else:
+            candidates = classify_pa_candidates(raw_mappings)
+            parsed = {
+                "schema": PA_REGIONS_SCHEMA,
+                "verdict": "listed" if candidates else "none_found",
+                "supported": True,
+                "candidates": candidates,
+                "candidate_count": len(candidates),
+                "total_bytes": sum(int(c["size"]) for c in candidates),
+                "limit_note": (
+                    "super-page shape heuristic only; the encoded "
+                    "((slot ^ random) << 16) freelist is never decoded here"
+                ),
+            }
+        return build_backend_response(
+            "classify_pa_regions",
+            parsed=parsed,
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings,
+        )
+
     # -- write-watch (JIT code-emission detection) -------------------
     def _read_exact(self, address: int, length: int) -> Optional[bytes]:
         """Read exactly ``length`` bytes or return None (never partial)."""
@@ -490,9 +531,72 @@ class JitRegionTracker:
         )
 
 
+PA_REGIONS_SCHEMA = "pao.pa-regions.v1"
+_PA_SUPER_PAGE = 2 * 1024 * 1024
+_PA_MIN_SIZE = 1 * 1024 * 1024
+_PA_SLOT_HINTS = (64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def classify_pa_candidates(
+    mappings: Sequence[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Flag PartitionAlloc-like super pages from mappings (pure, no freelist walk).
+
+    A candidate is an anonymous writable non-executable region >= 1 MiB whose
+    size is a multiple of 1 MiB (super-page shaped). Confidence is ``medium``
+    when the file marker names partition_alloc/chrome or the start is 2 MiB
+    aligned, else ``low``. Slot sizes are hints, never facts: the encoded
+    ``((slot ^ random) << 16)`` freelist is deliberately never decoded here.
+    """
+    import re
+
+    out: List[Dict[str, Any]] = []
+    for mp in mappings:
+        try:
+            start = int(str(mp.get("start")), 16)
+            end = int(str(mp.get("end")), 16)
+        except (TypeError, ValueError):
+            continue
+        size = end - start
+        if size < _PA_MIN_SIZE:
+            continue
+        perms = str(mp.get("permissions") or "")
+        writable = bool(mp.get("writable")) or (len(perms) > 1 and perms[1] == "w")
+        executable = bool(mp.get("executable")) or (len(perms) > 2 and perms[2] == "x")
+        if not writable or executable:
+            continue
+        fname = str(mp.get("file") or "")
+        if fname.startswith("[") and fname not in ("[heap]", "[anon]", "[anon:scudo]"):
+            low = fname.lower()
+            if "partition" not in low and "chrome" not in low and "anon" not in low:
+                continue
+        aligned = (start % _PA_SUPER_PAGE) == 0
+        sized = (size % _PA_SUPER_PAGE) == 0
+        marker = "partition" in fname.lower() or "chrome" in fname.lower()
+        if not (aligned or sized or marker):
+            continue
+        confidence = "medium" if (marker or (aligned and sized)) else "low"
+        out.append(
+            {
+                "start": start,
+                "end": end,
+                "size": size,
+                "super_pages": size // _PA_SUPER_PAGE,
+                "aligned_2mib": aligned,
+                "file": fname,
+                "confidence": confidence,
+                "slot_size_hints": list(_PA_SLOT_HINTS),
+            }
+        )
+    out.sort(key=lambda r: int(r["size"]), reverse=True)
+    return out
+
+
 __all__ = [
     "JitRegionTracker",
     "JIT_REGIONS_SCHEMA",
     "MEMORY_REGION_SCHEMA",
     "REGION_WATCH_SCHEMA",
+    "PA_REGIONS_SCHEMA",
+    "classify_pa_candidates",
 ]

@@ -43,8 +43,8 @@ def test_profile_module_sets_cover_all_modules():
 
 @pytest.mark.asyncio
 async def test_full_profile_has_all_tools():
-    assert len(await _tool_names()) == 199
-    assert len(await _tool_names("full")) == 199
+    assert len(await _tool_names()) == 212
+    assert len(await _tool_names("full")) == 212
 
 
 @pytest.mark.asyncio

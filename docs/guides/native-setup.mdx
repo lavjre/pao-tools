@@ -1,0 +1,88 @@
+---
+title: "Native Setup (Linux / macOS, no Docker)"
+description: "Run pao-tools straight on your machine with scripts/setup-native.sh and paocli doctor."
+---
+
+Docker is the recommended path, but on Linux or macOS you can run everything
+natively. The installer script handles system packages, pwndbg (Linux), uv
+deps, the helper venv, Ghidra (opt-in), and writes `.env.native`.
+
+<Check>
+  macOS uses the lldb backend (`PAO_DEBUGGER_BACKEND=lldb`) and covers
+  Mach-O targets, static analysis, research, and decompilers. Live-debugging
+  Linux ELF binaries on a Mac still needs Docker or a VM — gdb cannot debug
+  there without kernel codesigning Apple does not grant.
+</Check>
+
+## Install
+
+<Steps>
+  <Step title="Run the installer">
+    ```bash
+    ./scripts/setup-native.sh --yes
+    # extras (all opt-in):
+    ./scripts/setup-native.sh --all --yes
+    # or pick: --with-ghidra --with-pwninit --with-fuzz --with-firmware
+    ```
+    Flags: `--with-ghidra` (pinned 12.1.2, sha-verified into
+    `~/.local/share/pao/ghidra`), `--with-pwninit` (Linux only),
+    `--with-fuzz` (afl++), `--with-firmware` (binwalk/squashfs + unblob in
+    the helper venv).
+  </Step>
+  <Step title="Verify with the doctor">
+    ```bash
+    uv run paocli doctor
+    uv run paocli doctor --strict  # nonzero exit when a required dep is missing
+    ```
+    Required on Linux: python ≥3.12, uv, pwndbg, gdb, git. Required on macOS:
+    python ≥3.12, uv, lldb, git. Everything else (java/Ghidra, qemu, afl++,
+    unblob, pwninit, one_gadget) is optional and only gates its own feature —
+    `extract_firmware` falls back to binwalk then pure carve, `run_afl_batch`
+    returns an honest `unavailable` verdict without afl-fuzz.
+  </Step>
+  <Step title="Start the server">
+    ```bash
+    source .env.native
+    uv run python -m paomcp            # HTTP on 127.0.0.1:5500/mcp
+    uv run python -m paomcp --stdio    # stdio transport instead
+    ```
+    State lands in `~/.local/share/pao/runtime` (override with
+    `PAO_RUNTIME_ROOT`). Keep `PAO_ALLOW_REMOTE=0` on a laptop; only set a
+    `PAO_MCP_TOKEN` if you bind off loopback.
+  </Step>
+</Steps>
+
+## What lives where
+
+| Path | Content |
+|------|---------|
+| `~/.local/share/pao/runtime` | sessions, artifacts, cases.db (`PAO_RUNTIME_ROOT`) |
+| `~/.local/share/pao/python-venv` | helper env: pwntools, ropper, ipython (`PAO_PYTHON_VENV`) |
+| `~/.local/share/pao/ghidra` | headless decompiler (`PAO_GHIDRA_HEADLESS`, opt-in) |
+| `~/.local/bin` | `pwninit`, uv shims (ensure on `PATH`) |
+| `./workspace` | your binaries and scripts (repo checkout) |
+| `./.env.native` | generated env template (git-ignored pattern: copy, don't commit secrets) |
+
+## Distro notes
+
+- **Debian/Ubuntu/Pop**: apt path is fully covered, including `gdb-multiarch`
+  for cross-arch ELF.
+- **Fedora/RHEL**: dnf path covered; afl++/binwalk install best-effort
+  (`|| true`) since repo availability varies — the doctor tells you if they
+  landed.
+- **Arch/Manjaro**: pacman path covered.
+- **Other distros**: the script exits with the manual package list instead of
+  guessing — install `gdb`, `pwndbg` (`pipx install pwndbg`), and `uv`, then
+  re-run.
+
+## macOS notes (Apple Silicon and Intel)
+
+- Installs via Homebrew: `python@3.12`, `uv`, `git`, `pipx`; `afl-fuzz` /
+  `binwalk` only with the matching opt-in flags.
+- No gdb, no pwndbg, no pwninit — deliberate, not missing. The server runs
+  with `PAO_DEBUGGER_BACKEND=lldb` (`auto` already prefers gdb and falls back
+  to lldb, but pinning lldb skips the failed gdb probe).
+- Ghidra headless runs fine on macOS with Temurin/OpenJDK 21; the script uses
+  the same pinned 12.1.2 release as Docker.
+- QEMU targets work under emulation but slowly; kernel (syzkaller sidecar)
+  and glibc-heap depth assume a Linux kernel — use Docker for those.

@@ -164,5 +164,33 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def classify_pa_regions(
+        session_id: str,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Flag PartitionAlloc-like super pages (shape heuristic, no freelist walk).
+
+        Lists anonymous writable non-executable regions >= 1 MiB shaped like
+        PartitionAlloc super pages, with 2 MiB alignment/size/marker confidence
+        and slot-size hints. The encoded freelist is never decoded here.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.classify_pa_regions(
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]

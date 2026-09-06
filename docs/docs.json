@@ -61,7 +61,8 @@
 					"guides/attach-to-running-process",
 					"guides/interactive-exploit-loop",
 					"guides/multi-session-workflows",
-					"guides/build-and-helper-processes"
+					"guides/build-and-helper-processes",
+					"guides/native-setup"
 				]
 			},
 			{

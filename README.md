@@ -116,7 +116,7 @@ tool answers in the same envelope.
 
 ## Response API
 
-The current server contract exposes 199 MCP tools. Every tool returns the same
+The current server contract exposes 212 MCP tools. Every tool returns the same
 `api_version: "1.0"` envelope. Primary tool
 payloads spill to artifacts instead of being silently truncated. Small results stay
 inline. Safety-bounded capability probes report original byte counts and explicit
@@ -238,7 +238,7 @@ claude plugin marketplace add git@github.com:lavjre/pao-tools.git
 claude plugin install pao-tools@pao-tools
 ```
 
-After install, the `pao-tools` MCP server appears as a stdio server and its 199
+After install, the `pao-tools` MCP server appears as a stdio server and its 212
 tools (debugger sessions, heap analysis, ROP tooling, research sessions) are
 available to Claude Code. Runtime state is written under `<plugin-root>/runtime`
 (`PAO_RUNTIME_ROOT`) — a `runtime/` directory is created at install time and is
@@ -261,7 +261,18 @@ claude plugin validate .
 ## Local development
 
 Python 3.12 or newer is required. GDB and pwndbg must be available for debugger
-workflows.
+workflows (lldb covers Mach-O targets on macOS).
+
+Native setup without Docker (Linux/macOS) — see the
+[native setup guide](docs/guides/native-setup.mdx):
+
+```bash
+./scripts/setup-native.sh --yes        # --all adds Ghidra/pwninit/afl++/firmware tooling
+uv run paocli doctor                   # dependency check (required vs optional per OS)
+source .env.native
+```
+
+Then the usual loop:
 
 ```bash
 uv sync --extra dev
@@ -330,20 +341,20 @@ write IDA comments through `idc.set_cmt` via `py_eval`.
 
 ## Task profiles
 
-Listing all 199 tools costs ~28k tokens before any work happens. Set
+Listing all 212 tools costs ~28k tokens before any work happens. Set
 `PAO_PROFILE` to pay only for the mission (server logs the active profile
 at startup; default `full` keeps everything):
 
 | Profile | Tools | Scope |
 |---------|-------|-------|
-| `full` | 199 | Everything (default). |
-| `pwn` | 169 | Debugger, crash triage, heap, ROP, targets, exploit running. No IDA/Mach-O/kernel. |
-| `rev` | 126 | Static analysis, Ghidra + IDA, dynamic reading. No heap/ROP/crash/attack. |
-| `bounty` | 192 | Research, triage, fuzzing, reporting. Omits write-primitive/driver modules (scoping only). |
-| `chrome` | 154 | Browser/JIT: debugger, crash, JIT regions, decompilers. No heap/ROP/attack. |
-| `kernel` | 165 | Oops triage, SLUB, QEMU targets. No userland heap/drivers. |
-| `firmware` | 84 | Static-only reversing. No live target at all. |
-| `ctf` | 169 | Alias of `pwn` with the time-boxed CTF workflow skill. |
+| `full` | 212 | Everything (default). |
+| `pwn` | 180 | Debugger, crash triage, heap, ROP, targets, exploit running. No IDA/Mach-O/kernel. |
+| `rev` | 128 | Static analysis, Ghidra + IDA, dynamic reading. No heap/ROP/crash/attack. |
+| `bounty` | 202 | Research, triage, fuzzing, reporting. Omits write-primitive/driver modules (scoping only). |
+| `chrome` | 159 | Browser/JIT: debugger, crash, JIT regions, decompilers. No heap/ROP/attack. |
+| `kernel` | 170 | Oops triage, SLUB, QEMU targets. No userland heap/drivers. |
+| `firmware` | 86 | Static-only reversing. No live target at all. |
+| `ctf` | 180 | Alias of `pwn` with the time-boxed CTF workflow skill. |
 
 Each profile ships a workflow skill under `skills/` (`pwn-exploit-dev`,
 `reverse-engineering`, `bounty-hunting`, `chrome-exploitation`,
@@ -363,8 +374,17 @@ builds deterministic file-input corpora (zeros/cyclic/bitflips) and
 `run_fuzz_batch` feeds them to the target under GDB with signature-digest
 crash dedup; novel crashes link straight into a research session as crash
 evidence (`link_evidence_batch` attaches a whole batch in one write).
-`generate_bounty_report` renders a triager-ready finding (summary,
+Coverage campaigns go through `run_afl_batch` (AFL++/libFuzzer, bounded,
+honest `unavailable` when the engine is missing) with `minimize_corpus`
+sha256 dedup; `paocli_link_evidence` drains a pipe session into research
+notes + `tool_result` evidence. `generate_bounty_report` renders a
+triager-ready finding (summary,
 PoC, root cause from supported hypotheses only, impact, remediation, gaps).
+`extract_firmware` carves images (unblob/binwalk when present, pure
+magic-scan always); `generate_syz_config` / `ingest_syz_crash` bridge the
+sidecar syzkaller loop; `classify_pa_regions` flags PartitionAlloc-like
+super pages without decoding freelists; `suggest_profile` (plus
+`PAO_PROFILE=auto` boot) recommends the cheapest profile per target.
 
 Remote binds are fail-closed: loopback needs nothing, anything else requires
 `PAO_ALLOW_REMOTE=1` plus a `PAO_MCP_TOKEN` bearer (per listener, `/healthz`

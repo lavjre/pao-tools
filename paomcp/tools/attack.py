@@ -77,5 +77,91 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def poison_fastbin_fd(
+        session_id: str,
+        victim_address: str,
+        target_address: str,
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Re-point a freed glibc fastbin chunk's fd (fastbin-dup setup).
+
+        Args:
+            session_id: Session to operate on.
+            victim_address: Freed fastbin chunk header (or user ptr with address_kind="user").
+            target_address: User pointer a later malloc should return.
+            address_kind: "chunk" (default) or "user".
+            dry_run: True computes the plan and writes nothing.
+            snapshot_before: Capture a pre-poison heap snapshot on apply.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.poison_fastbin_fd(
+                victim_address=victim_address,
+                target_address=target_address,
+                address_kind=address_kind,
+                dry_run=dry_run,
+                snapshot_before=snapshot_before,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def house_of_spirit_plan(
+        session_id: str,
+        fake_chunk_address: str,
+        fake_size: str = "0x40",
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        idempotency_key: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Stage a House-of-Spirit fake chunk header.
+
+        Args:
+            session_id: Session to operate on.
+            fake_chunk_address: Where the fake chunk header lives (or user ptr).
+            fake_size: Fake chunk size including header (>= 0x20).
+            address_kind: "chunk" (default) or "user".
+            dry_run: True computes header bytes and playbook, writes nothing.
+            snapshot_before: Capture a pre-stage heap snapshot on apply.
+        """
+        services = get_services(ctx)
+        session = resolve_debug_session(
+            services, session_id=session_id, create_if_missing=False
+        )
+        operation_id = current_operation_id()
+        result = await run_session_action(
+            session,
+            lambda: session.tools.heap.house_of_spirit_plan(
+                fake_chunk_address=fake_chunk_address,
+                fake_size=fake_size,
+                address_kind=address_kind,
+                dry_run=dry_run,
+                snapshot_before=snapshot_before,
+                cancellation_check=lambda: services.operation_registry.raise_if_cancelled(
+                    operation_id
+                ),
+            ),
+        )
+        result["session_id"] = session.session_id
+        return result
+
 
 __all__ = ["register"]

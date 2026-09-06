@@ -20,8 +20,12 @@ phase builds those readers.
 
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, cast
 
 from paomcp.tools.backends.foundation import (
     LiveInferiorGuard,
@@ -49,6 +53,68 @@ from paomcp.tools.backends.heap import (
 
 JEMALLOC_EXTENT_SCHEMA = "pao.jemalloc-extent.v1"
 JEMALLOC_EXTENT_LIST_SCHEMA = "pao.jemalloc-extent-list.v1"
+JEMALLOC_CORRUPTION_SCHEMA = "pao.jemalloc-corruption.v1"
+JEMALLOC_UAF_SCHEMA = "pao.jemalloc-uaf.v1"
+
+_JEMALLOC_KNOWN_STATES = frozenset({"active", "inactive", "dirty", "muzzy", "retained"})
+_JEMALLOC_FREED_STATES = frozenset({"inactive", "dirty", "muzzy", "retained"})
+
+
+def _extent_range(extent: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    try:
+        base = extent.get("extent_address")
+        size = extent.get("size")
+        if base is None or size is None:
+            return None
+        base_int = int(base)
+        size_int = int(size)
+        if size_int <= 0:
+            return None
+        return (base_int, base_int + size_int)
+    except (TypeError, ValueError):
+        return None
+
+
+def _check_extent_overlaps(extents: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ranged: List[Tuple[int, int, int]] = []
+    for idx, ext in enumerate(extents):
+        rng = _extent_range(ext)
+        if rng is not None:
+            ranged.append((rng[0], rng[1], idx))
+    ranged.sort()
+    issues: List[Dict[str, Any]] = []
+    for i in range(1, len(ranged)):
+        prev_start, prev_end, prev_idx = ranged[i - 1]
+        cur_start, cur_end, cur_idx = ranged[i]
+        if cur_start < prev_end:
+            issues.append(
+                {
+                    "check": "extent_overlap",
+                    "severity": "corrupted",
+                    "extent_a": extents[prev_idx].get("extent_address"),
+                    "extent_b": extents[cur_idx].get("extent_address"),
+                    "detail": f"extent {hex(int(extents[cur_idx].get('extent_address') or 0))} overlaps prior extent ending at {hex(prev_end)}",
+                }
+            )
+    return issues
+
+
+def _ledger_from_extents(extents: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    ledger: List[Dict[str, Any]] = []
+    for ext in extents:
+        addr = ext.get("extent_address")
+        if addr is None:
+            continue
+        ledger.append(
+            {
+                "chunk_address": int(addr),
+                "size": ext.get("size"),
+                "arena_address": None,
+                "location": {"kind": "jemalloc-extent", "state": ext.get("state")},
+            }
+        )
+    return ledger
+
 
 # pwndbg's jemalloc plugin prints a fixed compatibility warning on every
 # invocation; it is surfaced once per response instead of littering the
@@ -168,6 +234,64 @@ class JemallocAnalyzer:
             "version": classification.get("version"),
             "confidence": classification.get("confidence"),
         }
+
+    def _prepare_with_mappings(
+        self, cancellation_check: Optional[Callable[[], None]]
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any], Dict[str, Any]]:
+        self._require_live()
+        mappings, libcinfo, component_status = self.facade.discovery.collect_evidence(
+            cancellation_check
+        )
+        classification = self.facade.discovery.classify(mappings, libcinfo)
+        profile = self.facade.discovery.target_profile(mappings)
+        return classification, mappings, profile, component_status
+
+    def _collect_extents(
+        self,
+        classification: Dict[str, Any],
+        profile: Dict[str, Any],
+        component_status: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        result, text = self._command_result("jemalloc heap")
+        if "No extents found" in text:
+            return [], None
+        error = _first_error(text)
+        if error is not None:
+            return [], error
+        blocks = _parse_extent_blocks(text)
+        if not text.strip() or not blocks:
+            return [], (
+                "the jemalloc command produced no recognizable extent blocks; "
+                "the pwndbg jemalloc plugin may be missing or the format is unknown"
+            )
+        extents = [
+            _extent_from_keyvalues(block)
+            for block in blocks
+            if block.get("Extent Address") is not None
+        ]
+        return extents, None
+
+    def _read_bytes(self, address: int, byte_count: int) -> Tuple[bytes, Optional[str]]:
+        result = self.facade.gdb.read_memory_bytes(f"0x{address:x}", byte_count)
+        if not isinstance(result, dict) or not result.get("success"):
+            err = None
+            if isinstance(result, dict):
+                err = result.get("error")
+            return b"", str(err or "memory read failed")
+        contents = None
+        try:
+            from paomcp.tools.backends.debugger import DebuggerOperations
+
+            contents = DebuggerOperations._memory_contents(result)
+        except Exception:
+            contents = None
+        if contents is None:
+            return b"", "memory read returned no contents"
+        try:
+            raw = bytes.fromhex(str(contents))
+        except ValueError as exc:
+            return b"", f"invalid hex contents: {exc}"
+        return raw, None
 
     def _verify_family(
         self,
@@ -720,16 +844,112 @@ class JemallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
-        return self._unsupported(
+        guard = self._verify_family(
             "classify_heap_corruption",
-            HEAP_CORRUPTION_SCHEMA,
+            JEMALLOC_CORRUPTION_SCHEMA,
             classification=classification,
             profile=profile,
             component_status=component_status,
-            reason=(
-                "the glibc heap-corruption classifier is family-specific; "
-                "jemalloc corruption analysis is not in Phase 1"
-            ),
+        )
+        if guard is not None:
+            return guard
+        extents, error = self._collect_extents(
+            classification, profile, component_status
+        )
+        if error is not None:
+            return build_backend_response(
+                "classify_heap_corruption",
+                parsed={
+                    "schema": JEMALLOC_CORRUPTION_SCHEMA,
+                    "allocator": self._allocator(classification),
+                    "target_profile": profile,
+                    "supported": True,
+                    "verdict": "unresolvable",
+                    "reason": error,
+                    "checks": [],
+                    "component_status": component_status,
+                },
+                raw_responses=[],
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[_JEMALLOC_WARNING],
+            )
+        checks: List[Dict[str, Any]] = []
+        seen: Dict[int, int] = {}
+        for ext in extents:
+            addr = ext.get("extent_address")
+            size = ext.get("size")
+            state = ext.get("state")
+            if addr is None:
+                checks.append(
+                    {
+                        "check": "missing_address",
+                        "severity": "suspicious",
+                        "extent": ext,
+                    }
+                )
+                continue
+            addr_int = int(addr)
+            if addr_int in seen:
+                checks.append(
+                    {
+                        "check": "duplicate_extent",
+                        "severity": "corrupted",
+                        "extent_address": addr_int,
+                        "detail": "same extent address listed twice",
+                    }
+                )
+            seen[addr_int] = seen.get(addr_int, 0) + 1
+            if not isinstance(size, int) or size <= 0:
+                checks.append(
+                    {
+                        "check": "bad_size",
+                        "severity": "corrupted",
+                        "extent_address": addr_int,
+                        "size": size,
+                    }
+                )
+            if addr_int % 0x1000 != 0:
+                checks.append(
+                    {
+                        "check": "misaligned_extent",
+                        "severity": "suspicious",
+                        "extent_address": addr_int,
+                    }
+                )
+            if state is not None and state not in _JEMALLOC_KNOWN_STATES:
+                checks.append(
+                    {
+                        "check": "unknown_state",
+                        "severity": "suspicious",
+                        "extent_address": addr_int,
+                        "state": state,
+                    }
+                )
+        checks.extend(_check_extent_overlaps(extents))
+        if any(c.get("severity") == "corrupted" for c in checks):
+            verdict = "corrupted"
+        elif checks:
+            verdict = "suspicious"
+        else:
+            verdict = "valid"
+        return build_backend_response(
+            "classify_heap_corruption",
+            parsed={
+                "schema": JEMALLOC_CORRUPTION_SCHEMA,
+                "allocator": self._allocator(classification),
+                "target_profile": profile,
+                "supported": True,
+                "verdict": verdict,
+                "extent_count": len(extents),
+                "checks": checks,
+                "failed_checks": [c["check"] for c in checks],
+                "component_status": component_status,
+            },
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=[_JEMALLOC_WARNING],
         )
 
     def validate_free(
@@ -788,19 +1008,139 @@ class JemallocAnalyzer:
         max_chunks: int = 512,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        classification, profile, component_status = self._prepare_context(
-            cancellation_check
+        classification, mappings, profile, component_status = (
+            self._prepare_with_mappings(cancellation_check)
         )
-        return self._unsupported(
+        guard = self._verify_family(
             "detect_uaf",
-            UAF_SCAN_SCHEMA,
+            JEMALLOC_UAF_SCHEMA,
             classification=classification,
             profile=profile,
             component_status=component_status,
-            reason=(
-                "the UAF scan targets glibc freed-chunk bins; not implemented "
-                "for jemalloc"
-            ),
+        )
+        if guard is not None:
+            return guard
+        extents, error = self._collect_extents(
+            classification, profile, component_status
+        )
+        if error is not None:
+            return build_backend_response(
+                "detect_uaf",
+                parsed={
+                    "schema": JEMALLOC_UAF_SCHEMA,
+                    "allocator": self._allocator(classification),
+                    "target_profile": profile,
+                    "supported": True,
+                    "verdict": "unresolvable",
+                    "reason": error,
+                    "candidates": [],
+                    "component_status": component_status,
+                },
+                raw_responses=[],
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[_JEMALLOC_WARNING],
+            )
+        freed: List[Tuple[int, int]] = []
+        for ext in extents[: max(0, max_chunks)]:
+            state = ext.get("state")
+            rng = _extent_range(ext)
+            if rng is None:
+                continue
+            if state in _JEMALLOC_FREED_STATES:
+                freed.append(rng)
+        if not freed:
+            return build_backend_response(
+                "detect_uaf",
+                parsed={
+                    "schema": JEMALLOC_UAF_SCHEMA,
+                    "allocator": self._allocator(classification),
+                    "target_profile": profile,
+                    "supported": True,
+                    "verdict": "clean",
+                    "scanned_mappings": 0,
+                    "scanned_bytes": 0,
+                    "freed_extent_count": 0,
+                    "candidates": [],
+                    "component_status": component_status,
+                },
+                raw_responses=[],
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[_JEMALLOC_WARNING],
+            )
+        freed.sort()
+        ptr_size = int(profile.get("pointer_bits") or 64) // 8
+        byteorder = cast(Literal["little", "big"], profile.get("byteorder") or "little")
+        cands: List[Dict[str, Any]] = []
+        scanned_mappings = 0
+        scanned_bytes = 0
+        writable = [m for m in mappings if m.get("writable") and m.get("readable")]
+        for mp in writable[: max(0, max_mappings)]:
+            if cancellation_check is not None:
+                cancellation_check()
+            try:
+                start = int(str(mp.get("start")), 16)
+                end = int(str(mp.get("end")), 16)
+            except (TypeError, ValueError):
+                continue
+            size = max(0, end - start)
+            if size <= 0:
+                continue
+            budget_left = max_bytes - scanned_bytes
+            if budget_left <= 0:
+                break
+            want = min(size, budget_left, 65536)
+            raw, _ = self._read_bytes(start, want)
+            if not raw:
+                continue
+            scanned_mappings += 1
+            scanned_bytes += len(raw)
+            for off in range(0, len(raw) - ptr_size + 1, ptr_size):
+                chunk = raw[off : off + ptr_size]
+                if len(chunk) < ptr_size:
+                    break
+                try:
+                    val = int.from_bytes(chunk, byteorder)
+                except Exception:
+                    continue
+                for fstart, fend in freed:
+                    if fstart <= val < fend:
+                        cands.append(
+                            {
+                                "pointer_location": start + off,
+                                "pointer_value": val,
+                                "freed_range": [fstart, fend],
+                            }
+                        )
+                        if len(cands) >= 128:
+                            break
+                    if len(cands) >= 128:
+                        break
+                if len(cands) >= 128:
+                    break
+            if len(cands) >= 128:
+                break
+        verdict = "suspicious" if cands else "clean"
+        return build_backend_response(
+            "detect_uaf",
+            parsed={
+                "schema": JEMALLOC_UAF_SCHEMA,
+                "allocator": self._allocator(classification),
+                "target_profile": profile,
+                "supported": True,
+                "verdict": verdict,
+                "scanned_mappings": scanned_mappings,
+                "scanned_bytes": scanned_bytes,
+                "freed_extent_count": len(freed),
+                "candidates": cands,
+                "candidate_count": len(cands),
+                "component_status": component_status,
+            },
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=[_JEMALLOC_WARNING],
         )
 
     def capture_heap_snapshot(
@@ -816,16 +1156,95 @@ class JemallocAnalyzer:
         classification, profile, component_status = self._prepare_context(
             cancellation_check
         )
-        return self._unsupported(
+        guard = self._verify_family(
             "capture_heap_snapshot",
             HEAP_SNAPSHOT_SCHEMA,
             classification=classification,
             profile=profile,
             component_status=component_status,
-            reason=(
-                "snapshot capture is glibc bin-history based; not implemented "
-                "for jemalloc"
-            ),
+        )
+        if guard is not None:
+            return guard
+        deadline = time.monotonic() + float(timeout_seconds or 300.0)
+        extents, error = self._collect_extents(
+            classification, profile, component_status
+        )
+        if error is not None:
+            return build_backend_response(
+                "capture_heap_snapshot",
+                parsed={
+                    "schema": HEAP_SNAPSHOT_SCHEMA,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": error,
+                    "allocator": self._allocator(classification),
+                    "target_profile": profile,
+                    "component_status": component_status,
+                },
+                raw_responses=[],
+                state=self.facade.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=[_JEMALLOC_WARNING],
+            )
+        if time.monotonic() > deadline:
+            raise TimeoutError("jemalloc snapshot exceeded its time budget")
+        ledger_full = _ledger_from_extents(extents)
+        truncated = len(ledger_full) > max_ledger_entries
+        ledger = ledger_full[:max_ledger_entries]
+        payload: Dict[str, Any] = {
+            "schema": HEAP_SNAPSHOT_SCHEMA,
+            "snapshot_id": uuid.uuid4().hex[:16],
+            "name": name,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.facade.session_id,
+            "inferior": {
+                "pid": self.facade.gdb.get_inferior_pid(),
+                "epoch": self.facade.gdb.get_inferior_epoch(),
+            },
+            "allocator": {
+                "family": classification.get("family"),
+                "variant": classification.get("variant"),
+                "version": classification.get("version"),
+                "confidence": classification.get("confidence"),
+                "safe_linking": classification.get("safe_linking"),
+            },
+            "target_profile": profile,
+            "supported": True,
+            "verdict": "captured",
+            "arenas": [],
+            "chunk_ledger": ledger,
+            "tcache_summary": None,
+            "jemalloc_extents": extents[:max_ledger_entries],
+            "component_status": component_status,
+            "summary": {
+                "chunk_count": len(ledger),
+                "arena_count": 0,
+                "extent_count": len(extents),
+                "ledger_truncated": truncated,
+            },
+        }
+        try:
+            history = getattr(self.facade, "history", None)
+            if history is not None and hasattr(history, "_remember"):
+                entry = history._remember(name=name, payload=payload)
+                stored = history._clone(entry)
+                return build_backend_response(
+                    "capture_heap_snapshot",
+                    parsed=stored,
+                    raw_responses=[],
+                    state=self.facade.gdb.get_state(),
+                    parser_version=PARSER_VERSION,
+                    warnings=[_JEMALLOC_WARNING],
+                )
+        except Exception:
+            pass
+        return build_backend_response(
+            "capture_heap_snapshot",
+            parsed=payload,
+            raw_responses=[],
+            state=self.facade.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=[_JEMALLOC_WARNING],
         )
 
 
@@ -842,4 +1261,6 @@ __all__ = [
     "JemallocAnalyzer",
     "JEMALLOC_EXTENT_SCHEMA",
     "JEMALLOC_EXTENT_LIST_SCHEMA",
+    "JEMALLOC_CORRUPTION_SCHEMA",
+    "JEMALLOC_UAF_SCHEMA",
 ]

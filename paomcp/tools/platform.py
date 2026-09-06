@@ -110,3 +110,35 @@ def register(mcp: FastMCP) -> None:
         if resolved_session_id is not None:
             result["session_id"] = resolved_session_id
         return result
+
+    @mcp.tool()
+    @catch_errors()
+    async def suggest_profile(
+        filename: str = "",
+        mappings_hint: str = "",
+        goal: str = "",
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Recommend a task profile (PAO_PROFILE) from target hints.
+
+        Args:
+            filename: Target filename or path fragment.
+            mappings_hint: Pasted mapping/file markers.
+            goal: Mission goal text (pwn/rev/bounty/ctf/kernel/firmware/chrome).
+        """
+        from paomcp.tools.profiles import (
+            PROFILE_DESCRIPTIONS,
+            suggest_profile_for_target,
+        )
+
+        _ = ctx
+        rec = suggest_profile_for_target(
+            filename=filename, mappings_hint=mappings_hint, goal=goal
+        )
+        return {
+            "success": True,
+            "profile": rec["profile"],
+            "reason": rec["reason"],
+            "description": PROFILE_DESCRIPTIONS[rec["profile"]],
+            "usage": f"PAO_PROFILE={rec['profile']}",
+        }

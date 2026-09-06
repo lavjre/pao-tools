@@ -20,7 +20,8 @@ RUN dpkg --add-architecture i386 && \
       curl wget git vim nano file tmux sudo unzip xz-utils ca-certificates \
       build-essential gcc g++ clang make cmake bison flex gcc-multilib \
       gdb gdbserver gdb-multiarch lldb strace ltrace patchelf elfutils libc6-dbg \
-      qemu-system-x86 qemu-user qemu-user-binfmt \
+      qemu-system-x86 qemu-user qemu-user-binfmt afl++ binwalk squashfs-tools \
+      mtd-utils e2fsprogs cpio device-tree-compiler python3-lzo liblzo2-dev \
       python3 python3-pip python3-venv python3-dev python3-setuptools python3-poetry \
       ruby ruby-dev \
       openjdk-21-jdk-headless \
@@ -145,7 +146,7 @@ RUN uv sync --locked
 # runtime volume must not mask an updated helper environment after image upgrade.
 RUN uv venv "${PAO_PYTHON_VENV}" && \
     uv pip install --python "${PAO_PYTHON_VENV}" \
-      requests numpy ipython hexdump click pwntools ropper
+      requests numpy ipython hexdump click pwntools ropper unblob
 
 ENV PROD=true
 

@@ -57,6 +57,8 @@ from paomcp.tools.backends.heap import (
 from paomcp.tools.backends.inspection import PwndbgInspection
 
 ATTACK_TCACHE_POISON_SCHEMA = "pao.attack.tcache-poison.v1"
+ATTACK_FASTBIN_POISON_SCHEMA = "pao.attack.fastbin-poison.v1"
+ATTACK_HOUSE_OF_SPIRIT_SCHEMA = "pao.attack.house-of-spirit.v1"
 
 
 class GlibcAttackHelper:
@@ -550,6 +552,449 @@ class GlibcAttackHelper:
             warnings=warnings or None,
         )
 
+    def poison_fastbin_fd(
+        self,
+        *,
+        victim_address: str,
+        target_address: str,
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        max_chunks_per_bin: int = 128,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Re-point a freed glibc fastbin chunk's fd (fastbin-dup setup).
+
+        ``victim_address`` is the chunk header of a freed fastbin chunk (see
+        ``inspect_fastbins`` chain entries). ``target_address`` is the user
+        pointer a later same-size malloc should return. Safe-linking
+        (glibc >= 2.32 PROTECT_PTR) is encoded here; unknown state refuses
+        instead of guessing. Dry-run by default.
+        """
+        request = "poison_fastbin_fd"
+        classification, mappings, profile, component_status = self._prepare_context(
+            cancellation_check
+        )
+        allocator = self._allocator_summary(classification)
+        if classification.get("family") != "glibc":
+            return self._unsupported_response(
+                request,
+                ATTACK_FASTBIN_POISON_SCHEMA,
+                classification,
+                profile,
+                component_status,
+            )
+        pointer_bits = int(profile.get("pointer_bits") or 64)
+        byteorder = cast(Literal["little", "big"], profile.get("byteorder") or "little")
+        size_sz = pointer_bits // 8
+        victim = parse_int(victim_address)
+        target = parse_int(target_address)
+        if victim is None:
+            raise ValueError(f"invalid victim_address: {victim_address!r}")
+        if target is None:
+            raise ValueError(f"invalid target_address: {target_address!r}")
+        victim = self.glibc._chunk_from_user(victim, address_kind, size_sz)
+        target_chunk = target - 2 * size_sz
+        safe_linking = classification.get("safe_linking")
+        safe_linking_enabled = safe_linking == "enabled"
+        if safe_linking not in ("enabled", "disabled"):
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": (
+                        f"safe-linking state is {safe_linking!r}; refusing to write "
+                        "a fastbin fd without knowing PROTECT_PTR encoding"
+                    ),
+                    "component_status": component_status,
+                    "target_address": target,
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        fastbins = self.bins.inspect_fastbins(
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+        fb_parsed = fastbins.get("parsed") or {}
+        if fb_parsed.get("verdict") != "parsed":
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": f"fastbin inspection returned verdict={fb_parsed.get('verdict')!r}",
+                    "component_status": component_status,
+                    "target_address": target,
+                },
+                raw_responses=[fastbins],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        victim_bin = None
+        victim_entry = None
+        for bin_entry in fb_parsed.get("fastbins") or fb_parsed.get("bins") or []:
+            for entry in bin_entry.get("chain") or []:
+                if entry.get("chunk_address") == victim:
+                    victim_bin = bin_entry
+                    victim_entry = entry
+                    break
+            if victim_entry is not None:
+                break
+        if victim_entry is None:
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "victim_not_in_fastbin",
+                    "reason": (
+                        f"chunk {hex(victim)} is not linked into any fastbin; "
+                        "free it or pick a chunk from inspect_fastbins"
+                    ),
+                    "component_status": component_status,
+                    "victim_chunk_address": victim,
+                },
+                raw_responses=[fastbins],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        assert victim_bin is not None  # set iff victim_entry was found
+        victim_user = int(victim_entry.get("user_address", victim + 2 * size_sz))
+        bin_index = int(victim_bin.get("index", 0))
+        chain_position = int(victim_entry.get("index", 0))
+        fd_raw = victim_entry.get("next_raw", victim_entry.get("fd_raw"))
+        if fd_raw is None:
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": "victim's fd slot could not be read",
+                    "component_status": component_status,
+                    "victim_chunk_address": victim,
+                },
+                raw_responses=[fastbins],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        fd_raw = int(fd_raw)
+        encoded_fd = (
+            encode_safe_linked(target_chunk, victim_user)
+            if safe_linking_enabled
+            else target_chunk
+        )
+        encoded_hex = encoded_fd.to_bytes(size_sz, byteorder).hex()
+        if fd_raw == encoded_fd:
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "component_status": component_status,
+                    "supported": True,
+                    "verdict": "already_applied",
+                    "victim_chunk_address": victim,
+                    "victim_user_address": victim_user,
+                    "target_address": target,
+                    "target_chunk_address": target_chunk,
+                    "safe_linking_enabled": safe_linking_enabled,
+                    "encoded_fd_hex": encoded_hex,
+                    "snapshot_id": None,
+                    "verify": None,
+                    "revert": None,
+                },
+                raw_responses=[fastbins],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        warnings: List[str] = []
+        target_mapping = mapping_for(target, mappings)
+        if target_mapping is None:
+            warnings.append(f"target {hex(target)} is not inside any mapping")
+        elif not target_mapping.get("writable"):
+            warnings.append("target mapping is not writable")
+        if target_chunk % (2 * size_sz) != 0:
+            warnings.append(f"target chunk {hex(target_chunk)} misaligned")
+        write_plan = {
+            "address": hex(victim),
+            "chunk_offset": 2 * size_sz,
+            "byte_count": size_sz,
+            "data_hex": encoded_hex,
+            "write_target_address": hex(victim_user),
+        }
+        base_parsed: Dict[str, Any] = {
+            "schema": ATTACK_FASTBIN_POISON_SCHEMA,
+            "allocator": allocator,
+            "target_profile": profile,
+            "component_status": component_status,
+            "supported": True,
+            "victim_chunk_address": victim,
+            "victim_user_address": victim_user,
+            "victim_bin_index": bin_index,
+            "victim_chain_position": chain_position,
+            "target_address": target,
+            "target_chunk_address": target_chunk,
+            "safe_linking_enabled": safe_linking_enabled,
+            "encoded_fd_hex": encoded_hex,
+            "original_fd_raw_hex": hex(fd_raw),
+            "target_mapping": target_mapping,
+            "follow_up": self._follow_up(chain_position, None, target),
+        }
+        if dry_run:
+            return build_backend_response(
+                request,
+                parsed={
+                    **base_parsed,
+                    "verdict": "dry_run",
+                    "snapshot_id": None,
+                    "verify": None,
+                    "revert": None,
+                    "write_plan": write_plan,
+                    "note": "dry run -- nothing written; pass dry_run=false to apply",
+                },
+                raw_responses=[fastbins],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+        raw_responses: List[Dict[str, Any]] = [fastbins]
+        snapshot_id: Optional[str] = None
+        if snapshot_before:
+            snapshot = self.history.capture_heap_snapshot(
+                name=f"pre-fastbin-poison-{hex(victim)}",
+                max_chunks_per_bin=max_chunks_per_bin,
+                cancellation_check=cancellation_check,
+            )
+            raw_responses.append(snapshot)
+            snapshot_id = (snapshot.get("parsed") or {}).get("snapshot_id")
+        writer = (
+            self.patch_recorder if self.patch_recorder is not None else self.debugger
+        )
+        write_result = writer.write_memory(
+            address=hex(victim_user),
+            data_hex=encoded_hex,
+            verify=True,
+            allow_unsafe=False,
+        )
+        raw_responses.append(write_result)
+        if not write_result.get("success"):
+            return build_backend_response(
+                request,
+                parsed={
+                    **base_parsed,
+                    "verdict": "write_failed",
+                    "reason": write_result.get("error"),
+                    "snapshot_id": snapshot_id,
+                    "verify": None,
+                    "revert": None,
+                },
+                raw_responses=raw_responses,
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+        write_parsed = write_result.get("parsed") or {}
+        return build_backend_response(
+            request,
+            parsed={
+                **base_parsed,
+                "verdict": "applied",
+                "snapshot_id": snapshot_id,
+                "verify": {"writer_verified": bool(write_parsed.get("verified"))},
+                "revert": {
+                    "original_hex": write_parsed.get("original_hex"),
+                    "address": hex(victim_user),
+                    "revertible": bool(write_parsed.get("revertible")),
+                },
+                "write_plan": write_plan,
+            },
+            raw_responses=raw_responses,
+            state=self.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings or None,
+        )
+
+    def house_of_spirit_plan(
+        self,
+        *,
+        fake_chunk_address: str,
+        fake_size: str = "0x40",
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Plan (and optionally stage) a House-of-Spirit fake chunk.
+
+        Writes a fake ``malloc_chunk`` header (prev_size=0, size=fake_size with
+        PREV_INUSE) at ``fake_chunk_address`` so a later ``free(fake_user)``
+        drops it into a fastbin/tcache bin. Does not call free itself; the
+        playbook steps are returned for the operator to drive.
+        """
+        request = "house_of_spirit_plan"
+        classification, mappings, profile, component_status = self._prepare_context(
+            cancellation_check
+        )
+        allocator = self._allocator_summary(classification)
+        if classification.get("family") != "glibc":
+            return self._unsupported_response(
+                request,
+                ATTACK_HOUSE_OF_SPIRIT_SCHEMA,
+                classification,
+                profile,
+                component_status,
+            )
+        pointer_bits = int(profile.get("pointer_bits") or 64)
+        byteorder = cast(Literal["little", "big"], profile.get("byteorder") or "little")
+        size_sz = pointer_bits // 8
+        fake_chunk = parse_int(fake_chunk_address)
+        fake_sz = parse_int(fake_size)
+        if fake_chunk is None:
+            raise ValueError(f"invalid fake_chunk_address: {fake_chunk_address!r}")
+        if fake_sz is None or fake_sz < 0x20:
+            raise ValueError(f"fake_size must be >= 0x20, got {fake_size!r}")
+        if address_kind == "user":
+            fake_chunk = fake_chunk - 2 * size_sz
+        fake_user = fake_chunk + 2 * size_sz
+        if fake_sz % (2 * size_sz) != 0:
+            return build_backend_response(
+                request,
+                parsed={
+                    "schema": ATTACK_HOUSE_OF_SPIRIT_SCHEMA,
+                    "allocator": allocator,
+                    "target_profile": profile,
+                    "supported": False,
+                    "verdict": "bad_size",
+                    "reason": f"fake_size {hex(fake_sz)} must be {2 * size_sz}-byte aligned",
+                    "component_status": component_status,
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+            )
+        size_with_flags = fake_sz | 0x1
+        header_hex = (0).to_bytes(size_sz, byteorder).hex() + size_with_flags.to_bytes(
+            size_sz, byteorder
+        ).hex()
+        warnings: List[str] = []
+        fake_mapping = mapping_for(fake_chunk, mappings)
+        if fake_mapping is None:
+            warnings.append(f"fake chunk {hex(fake_chunk)} is not inside any mapping")
+        elif not fake_mapping.get("writable"):
+            warnings.append("fake chunk mapping is not writable")
+        write_plan = {
+            "address": hex(fake_chunk),
+            "chunk_offset": 0,
+            "byte_count": 2 * size_sz,
+            "data_hex": header_hex,
+            "write_target_address": hex(fake_chunk),
+        }
+        playbook = [
+            f"write fake header at {hex(fake_chunk)} (prev_size=0x0, size={hex(size_with_flags)})",
+            f"free({hex(fake_user)}) from the target to enqueue it",
+            f"malloc({hex(fake_sz - 2 * size_sz)}) twice; 2nd returns {hex(fake_user)}",
+        ]
+        base_parsed: Dict[str, Any] = {
+            "schema": ATTACK_HOUSE_OF_SPIRIT_SCHEMA,
+            "allocator": allocator,
+            "target_profile": profile,
+            "component_status": component_status,
+            "supported": True,
+            "fake_chunk_address": fake_chunk,
+            "fake_user_address": fake_user,
+            "fake_size": fake_sz,
+            "header_hex": header_hex,
+            "fake_mapping": fake_mapping,
+            "playbook": playbook,
+        }
+        if dry_run:
+            return build_backend_response(
+                request,
+                parsed={
+                    **base_parsed,
+                    "verdict": "dry_run",
+                    "snapshot_id": None,
+                    "verify": None,
+                    "revert": None,
+                    "write_plan": write_plan,
+                    "note": "dry run -- header not written; pass dry_run=false to stage it",
+                },
+                raw_responses=[],
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+        raw_responses: List[Dict[str, Any]] = []
+        snapshot_id: Optional[str] = None
+        if snapshot_before:
+            snapshot = self.history.capture_heap_snapshot(
+                name=f"pre-spirit-{hex(fake_chunk)}",
+                cancellation_check=cancellation_check,
+            )
+            raw_responses.append(snapshot)
+            snapshot_id = (snapshot.get("parsed") or {}).get("snapshot_id")
+        writer = (
+            self.patch_recorder if self.patch_recorder is not None else self.debugger
+        )
+        write_result = writer.write_memory(
+            address=hex(fake_chunk),
+            data_hex=header_hex,
+            verify=True,
+            allow_unsafe=False,
+        )
+        raw_responses.append(write_result)
+        if not write_result.get("success"):
+            return build_backend_response(
+                request,
+                parsed={
+                    **base_parsed,
+                    "verdict": "write_failed",
+                    "reason": write_result.get("error"),
+                    "snapshot_id": snapshot_id,
+                    "verify": None,
+                    "revert": None,
+                },
+                raw_responses=raw_responses,
+                state=self.gdb.get_state(),
+                parser_version=PARSER_VERSION,
+                warnings=warnings or None,
+            )
+        write_parsed = write_result.get("parsed") or {}
+        return build_backend_response(
+            request,
+            parsed={
+                **base_parsed,
+                "verdict": "staged",
+                "snapshot_id": snapshot_id,
+                "verify": {"writer_verified": bool(write_parsed.get("verified"))},
+                "revert": {
+                    "original_hex": write_parsed.get("original_hex"),
+                    "address": hex(fake_chunk),
+                    "revertible": bool(write_parsed.get("revertible")),
+                },
+                "write_plan": write_plan,
+            },
+            raw_responses=raw_responses,
+            state=self.gdb.get_state(),
+            parser_version=PARSER_VERSION,
+            warnings=warnings or None,
+        )
+
     @staticmethod
     def _follow_up(
         chain_position: int, size_class: Optional[int], target: int
@@ -569,4 +1014,6 @@ class GlibcAttackHelper:
 __all__ = [
     "GlibcAttackHelper",
     "ATTACK_TCACHE_POISON_SCHEMA",
+    "ATTACK_FASTBIN_POISON_SCHEMA",
+    "ATTACK_HOUSE_OF_SPIRIT_SCHEMA",
 ]

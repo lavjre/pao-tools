@@ -275,6 +275,16 @@ class HeapTools:
             discovery=self.discovery,
         )
 
+        from .alloc_trace import AllocTraceManager  # noqa: PLC0415 (same cycle rule)
+
+        self.alloc_trace = AllocTraceManager(
+            gdb,
+            inspection,
+            debugger,
+            session_id,
+            discovery=self.discovery,
+        )
+
     # How long a detected family stays cached on this facade.  Short on
     # purpose: the components re-classify per call anyway, so this only avoids
     # a second full classification when consecutive dispatched calls land
@@ -557,6 +567,134 @@ class HeapTools:
             cancellation_check=cancellation_check,
         )
 
+    def _attack_or_throwaway(self) -> Any:
+        attack = getattr(self, "attack", None)
+        if attack is not None:
+            return attack
+        from .attack_helpers import GlibcAttackHelper  # noqa: PLC0415
+
+        return GlibcAttackHelper(
+            self.discovery.gdb,
+            self.discovery.inspection,
+            self.discovery.debugger,
+            self.session_id,
+            discovery=self.discovery,
+            glibc=self.glibc,
+            bins=self.bins,
+            history=self.history,
+            patch_recorder=self._patch_recorder,
+        )
+
+    def poison_fastbin_fd(
+        self,
+        *,
+        victim_address: str,
+        target_address: str,
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        max_chunks_per_bin: int = 128,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Re-point a freed fastbin chunk's ``fd`` (dry-run by default)."""
+        gate = self._gdb_gate("poison_fastbin_fd")
+        if gate is not None:
+            return gate
+        return self._attack_or_throwaway().poison_fastbin_fd(
+            victim_address=victim_address,
+            target_address=target_address,
+            address_kind=address_kind,
+            dry_run=dry_run,
+            snapshot_before=snapshot_before,
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
+        )
+
+    def house_of_spirit_plan(
+        self,
+        *,
+        fake_chunk_address: str,
+        fake_size: str = "0x40",
+        address_kind: str = "chunk",
+        dry_run: bool = True,
+        snapshot_before: bool = True,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Stage a House-of-Spirit fake chunk header (dry-run by default)."""
+        gate = self._gdb_gate("house_of_spirit_plan")
+        if gate is not None:
+            return gate
+        return self._attack_or_throwaway().house_of_spirit_plan(
+            fake_chunk_address=fake_chunk_address,
+            fake_size=fake_size,
+            address_kind=address_kind,
+            dry_run=dry_run,
+            snapshot_before=snapshot_before,
+            cancellation_check=cancellation_check,
+        )
+
+    def _alloc_tracer(self) -> Any:
+        tracer = getattr(self, "alloc_trace", None)
+        if tracer is not None:
+            return tracer
+        from .alloc_trace import AllocTraceManager  # noqa: PLC0415
+
+        tracer = AllocTraceManager(
+            self.discovery.gdb,
+            self.discovery.inspection,
+            self.discovery.debugger,
+            self.session_id,
+            discovery=self.discovery,
+        )
+        self.alloc_trace = tracer
+        return tracer
+
+    def start_alloc_trace(
+        self,
+        *,
+        symbols: Optional[List[str]] = None,
+        max_events: int = 10_000,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        gate = self._gdb_gate("start_alloc_trace")
+        if gate is not None:
+            return gate
+        return self._alloc_tracer().start_alloc_trace(
+            symbols=symbols,
+            max_events=max_events,
+            cancellation_check=cancellation_check,
+        )
+
+    def list_alloc_events(
+        self,
+        *,
+        trace_id: str,
+        limit: int = 100,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        gate = self._gdb_gate("list_alloc_events")
+        if gate is not None:
+            return gate
+        return self._alloc_tracer().list_alloc_events(
+            trace_id=trace_id,
+            limit=limit,
+            cancellation_check=cancellation_check,
+        )
+
+    def stop_alloc_trace(
+        self,
+        *,
+        trace_id: str,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        gate = self._gdb_gate("stop_alloc_trace")
+        if gate is not None:
+            return gate
+        return self._alloc_tracer().stop_alloc_trace(
+            trace_id=trace_id,
+            cancellation_check=cancellation_check,
+        )
+
     # ---- kernel SLUB (dedicated self-gated surface) --------------
     def inspect_slub_cache(
         self,
@@ -776,6 +914,19 @@ class HeapTools:
         if gate is not None:
             return gate
         return self._regions_tracker().disarm_region_watch(watch_id=watch_id)
+
+    def classify_pa_regions(
+        self,
+        *,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Flag PartitionAlloc-like super pages (no freelist walk)."""
+        gate = self._gdb_gate("classify_pa_regions")
+        if gate is not None:
+            return gate
+        return self._regions_tracker().classify_pa_regions(
+            cancellation_check=cancellation_check
+        )
 
     # ---- heap corruption classifier ------------------------------
     def classify_heap_corruption(

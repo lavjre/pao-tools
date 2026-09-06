@@ -71,10 +71,17 @@ class TestAnalyzerForFamily:
         assert isinstance(analyzer, GlibcAnalyzer)
         assert analyzer.family == "glibc"
 
-    @pytest.mark.parametrize("family", ["musl", "scudo", "unknown", None])
+    @pytest.mark.parametrize("family", ["musl", "unknown", None])
     def test_non_glibc_families_resolve_to_unsupported(self, family):
         analyzer = analyzer_for_family(family, facade=None)
         assert isinstance(analyzer, UnsupportedAnalyzer)
+
+    def test_scudo_resolves_to_scudo_analyzer(self):
+        from paomcp.tools.backends.scudo import ScudoAnalyzer
+
+        analyzer = analyzer_for_family("scudo", facade=None)
+        assert isinstance(analyzer, ScudoAnalyzer)
+        assert analyzer.family == "scudo"
 
     def test_jemalloc_resolves_to_jemalloc_analyzer(self):
         from paomcp.tools.backends.jemalloc import JemallocAnalyzer
@@ -95,7 +102,11 @@ class TestAnalyzerForFamily:
         unsupported = analyzer_for_family("musl", facade=None)
         jemalloc = analyzer_for_family("jemalloc", facade=None)
         libmalloc = analyzer_for_family("libmalloc", facade=None)
-        for analyzer in (glibc, unsupported, jemalloc, libmalloc):
+        from paomcp.tools.backends.scudo import ScudoAnalyzer
+
+        scudo = analyzer_for_family("scudo", facade=None)
+        assert isinstance(scudo, ScudoAnalyzer)
+        for analyzer in (glibc, unsupported, jemalloc, libmalloc, scudo):
             assert isinstance(analyzer, AllocatorAnalyzer), type(analyzer)
             for name in ANALYZER_METHODS:
                 assert callable(getattr(analyzer, name)), name

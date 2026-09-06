@@ -116,5 +116,80 @@ def register(mcp: FastMCP) -> None:
         result["session_id"] = session.session_id
         return result
 
+    @mcp.tool()
+    @catch_errors()
+    async def generate_syz_config(
+        kernel_src: str,
+        image_path: str,
+        ssh_key_path: str,
+        workdir: str,
+        kernel_obj: Optional[str] = None,
+        syzkaller_path: str = "/syzkaller",
+        target_arch: str = "amd64",
+        qemu_args: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Render a syz-manager.cfg for sidecar syzkaller runs (pure, no VM boot).
+
+        Args:
+            kernel_src: Kernel source checkout path.
+            image_path: Bootable QEMU image path.
+            ssh_key_path: Syzkaller SSH key path.
+            workdir: Syzkaller workdir path.
+            kernel_obj: Kernel build obj dir (default kernel_src).
+            syzkaller_path: Syzkaller checkout path.
+            target_arch: Syz target arch (default amd64).
+            qemu_args: Extra QEMU args (host-escape flags rejected).
+        """
+        from paomcp.tools.backends.syzkaller import generate_syz_config as _gen
+        from paomcp.tools.common import run_blocking as _blocking
+
+        _ = ctx
+
+        def _run() -> Dict[str, Any]:
+            return _gen(
+                kernel_src=kernel_src,
+                kernel_obj=kernel_obj,
+                image_path=image_path,
+                ssh_key_path=ssh_key_path,
+                workdir=workdir,
+                syzkaller_path=syzkaller_path,
+                target_arch=target_arch,
+                qemu_args=qemu_args,
+            )
+
+        return await _blocking(_run)
+
+    @mcp.tool()
+    @catch_errors()
+    async def ingest_syz_crash(
+        log_text: Optional[str] = None,
+        log_path: Optional[str] = None,
+        ctx: Context = CurrentContext(),
+    ) -> Dict[str, Any]:
+        """Triage a syzkaller crash log via the kernel-oops pipeline (no debugger needed).
+
+        Args:
+            log_text: Crash log text (exactly one of log_text / log_path).
+            log_path: Crash log file under the configured workspace.
+        """
+        from paomcp.tools.backends.syzkaller import ingest_syz_crash as _ingest
+        from paomcp.tools.common import get_services as _services
+        from paomcp.tools.common import run_blocking as _blocking
+
+        services = _services(ctx)
+        resolved_log = None
+        if log_path is not None:
+            from paomcp.utils.paths import resolve_workspace_file as _resolve_file
+
+            resolved_log = _resolve_file(
+                log_path, services.runtime_paths.workspace_root, kind="log_path"
+            )
+
+        def _run() -> Dict[str, Any]:
+            return _ingest(log_text=log_text, log_path=resolved_log)
+
+        return await _blocking(_run)
+
 
 __all__ = ["register"]
