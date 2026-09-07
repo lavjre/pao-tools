@@ -62,7 +62,8 @@ _RIP_PATTERN = re.compile(
 )
 _RIP_BARE_PATTERN = re.compile(r"RIP:\s*[0-9a-fA-F]{4}:\[<([0-9a-fA-F]+)\>\]")
 _CALL_TRACE_PATTERN = re.compile(
-    r"^\s*(?:\[\s*\d+\.\d+\]\s*)?([A-Za-z_][\w.]*)\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+",
+    r"^\s*(?:\[\s*\d+\.\d+\]\s*)?(?:\?\s*)?(?:<[^>\n]*>\s*)?"
+    r"([A-Za-z_][\w.]*)\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+",
     re.MULTILINE,
 )
 _CPU_PATTERN = re.compile(r"CPU:\s*(\d+)\s+PID:\s*(\d+)\s+Comm:\s*(\S+)")
@@ -147,11 +148,15 @@ def analyze_kernel_oops(log_text: str) -> Dict[str, Any]:
     rip_symbol: Optional[str] = None
     rip_offset: Optional[str] = None
     rip_match = _RIP_PATTERN.search(log_text)
+    rip_bare_address: Optional[str] = None
     if rip_match:
         rip_symbol, rip_offset = rip_match.group(1), rip_match.group(2).lower()
     else:
+        # Bare [<addr>] form carries the KASLR slide, not a symbol offset:
+        # storing it as "offset" would split one bug's fingerprint across
+        # boots. Keep it under its own name for forensics instead.
         bare = _RIP_BARE_PATTERN.search(log_text)
-        rip_offset = bare.group(1).lower() if bare else None
+        rip_bare_address = bare.group(1).lower() if bare else None
     trace = _call_trace(log_text)
     cpu_match = _CPU_PATTERN.search(log_text)
     taint_match = _TAINT_PATTERN.search(log_text)
@@ -165,6 +170,7 @@ def analyze_kernel_oops(log_text: str) -> Dict[str, Any]:
         "kind_evidence": kind_evidence,
         "fault_address": fault_address,
         "rip": {"symbol": rip_symbol, "offset": rip_offset},
+        "rip_bare_address": rip_bare_address,
         "call_trace": trace,
         "frame_count": len(trace),
         "cpu": (

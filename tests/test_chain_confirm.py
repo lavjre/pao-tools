@@ -22,9 +22,10 @@ async def test_confirm_chain_tool_is_published() -> None:
     assert properties["restore"]["default"] is True
 
 
-_WRITE_QWORD = re.compile(
-    r"set \{unsigned long long\}(0x[0-9a-fA-F]+|\d+) = (0x[0-9a-fA-F]+|\d+)"
+_WRITE_SLOT = re.compile(
+    r"set \{(unsigned long long|unsigned int)\}(0x[0-9a-fA-F]+|\d+) = (0x[0-9a-fA-F]+|\d+)"
 )
+_WRITE_QWORD = _WRITE_SLOT
 _SET_REG = re.compile(r"set \$(\w+) = (0x[0-9a-fA-F]+|\d+)")
 
 
@@ -63,6 +64,7 @@ class FakeGdb:
             dict(registers) if registers else {"rip": rip, "rsp": rsp}
         )
         self.mem: Dict[int, int] = {}
+        self.write_widths: List[int] = []
         self.program = program or []
         self.write_ok = write_ok
         self.step_ok = step_ok
@@ -78,10 +80,12 @@ class FakeGdb:
 
     def execute_command(self, command: str) -> Dict[str, Any]:
         self.commands.append(command)
-        match = _WRITE_QWORD.match(command)
+        match = _WRITE_SLOT.match(command)
         if match:
-            address = _parse(match.group(1))
-            value = _parse(match.group(2))
+            width = 4 if match.group(1) == "unsigned int" else 8
+            address = _parse(match.group(2))
+            value = _parse(match.group(3))
+            self.write_widths.append(width)
             if not self.write_ok:
                 return {
                     "success": False,
@@ -102,6 +106,20 @@ class FakeGdb:
         return {"success": True, "responses": []}
 
     def evaluate_expression(self, expression: str) -> Dict[str, Any]:
+        if expression.startswith("*("):
+            # Scratch readability probe: readable unless the test says otherwise.
+            if getattr(self, "probe_ok", True):
+                return {
+                    "success": True,
+                    "responses": [
+                        {
+                            "type": "result",
+                            "message": "done",
+                            "payload": {"value": "0x0"},
+                        }
+                    ],
+                }
+            return {"success": False, "responses": []}
         name = expression.lstrip("$")
         if name in self.regs:
             return {
@@ -324,5 +342,26 @@ class TestArguments:
         assert result["parsed"]["alignment_expected"] == "none"
         assert gdb.mem[0x600000] == 0x401000
         assert gdb.mem[0x600004] == 0x401234
+        assert set(gdb.write_widths) == {4}
         assert any(cmd.startswith("set $eip") for cmd in gdb.commands)
         assert any(cmd.startswith("set $esp") for cmd in gdb.commands)
+
+    def test_sp_starts_past_entry_slot(self) -> None:
+        gdb = FakeGdb()
+        ChainConfirmer(gdb).confirm(chain=[0x401000, 0x401234])
+        esp_sets = [
+            _parse(cmd.split(" = ")[1])
+            for cmd in gdb.commands
+            if cmd.startswith("set $rsp = ")
+        ]
+        assert esp_sets, "expected an rsp assignment"
+        # Armed past chain[0] (ret pops chain[1]); restored to snapshot after.
+        assert esp_sets[0] == 0x7FFFFFFDE00 + 8
+        assert esp_sets[-1] == 0x7FFFFFFDE00
+
+    def test_unreadable_scratch_fails_fast(self) -> None:
+        gdb = FakeGdb()
+        gdb.probe_ok = False
+        result = ChainConfirmer(gdb).confirm(chain=[0x401000, 0x401234])
+        assert result["parsed"]["verdict"] == "write_failed"
+        assert gdb.mem == {}

@@ -436,10 +436,18 @@ class KernelSlab:
             "type_count": btf.type_count,
         }
 
-    def _read_unsigned(self, buf: bytes, offset: int, width: int) -> int:
-        return int.from_bytes(buf[offset : offset + width], self._byteorder)
+    def _read_unsigned(
+        self, buf: bytes, offset: int, width: int, byteorder: _Byteorder
+    ) -> int:
+        return int.from_bytes(buf[offset : offset + width], byteorder)
 
-    def _read_member(self, buf: bytes, member: BtfMember, pointer_bits: int) -> int:
+    def _read_member(
+        self,
+        buf: bytes,
+        member: BtfMember,
+        pointer_bits: int,
+        byteorder: _Byteorder,
+    ) -> int:
         """Extract a member value from a struct buffer, bitfield-aware.
 
         Bitfields (``slab.inuse/objects/frozen`` live in the ``counters``
@@ -453,9 +461,7 @@ class KernelSlab:
                 f"member {member.name!r} at byte {byte_offset} overruns the "
                 f"{len(buf)}-byte buffer"
             )
-        word = int.from_bytes(
-            buf[byte_offset : byte_offset + word_bytes], self._byteorder
-        )
+        word = int.from_bytes(buf[byte_offset : byte_offset + word_bytes], byteorder)
         if not member.is_bitfield:
             return word
         shift = member.bit_offset % 8
@@ -471,7 +477,9 @@ class KernelSlab:
             end = len(raw)
         return raw[:end].decode("utf-8", errors="replace")
 
-    def _reader(self, pointer_bits: int) -> Callable[[int], Optional[int]]:
+    def _reader(
+        self, pointer_bits: int, byteorder: _Byteorder
+    ) -> Callable[[int], Optional[int]]:
         """A memory reader returning pointer-sized ints in target byte order."""
         size = pointer_bits // 8
 
@@ -479,7 +487,7 @@ class KernelSlab:
             raw, err = self._read_bytes(address, size)
             if err is not None or len(raw) < size:
                 return None
-            return int.from_bytes(raw, self._byteorder)
+            return int.from_bytes(raw, byteorder)
 
         return read
 
@@ -607,7 +615,7 @@ class KernelSlab:
         request = "inspect_slub_cache"
         if byteorder not in ("little", "big"):
             raise ValueError(f"byteorder must be 'little' or 'big', got {byteorder!r}")
-        self._byteorder = cast(_Byteorder, byteorder)
+        bo = cast(_Byteorder, byteorder)
         profile, component_status = self._prepare_context(cancellation_check)
         pointer_bits = int(profile.get("pointer_bits") or 64)
 
@@ -654,17 +662,17 @@ class KernelSlab:
                 btf=self._btf_info(btf, source),
             )
 
-        name_ptr = self._read_unsigned(raw, offsets["name"], pointer_bits // 8)
+        name_ptr = self._read_unsigned(raw, offsets["name"], pointer_bits // 8, bo)
         # kmem_cache scalars are u32; random (unsigned long) is pointer-sized.
-        object_size = self._read_unsigned(raw, offsets["object_size"], 4)
-        size = self._read_unsigned(raw, offsets["size"], 4)
-        freepointer_offset = self._read_unsigned(raw, offsets["offset"], 4)
-        oo_x = self._read_unsigned(raw, offsets["oo"], 4)
-        order = oo_x >> 16
+        object_size = self._read_unsigned(raw, offsets["object_size"], 4, bo)
+        size = self._read_unsigned(raw, offsets["size"], 4, bo)
+        freepointer_offset = self._read_unsigned(raw, offsets["offset"], 4, bo)
+        oo_x = self._read_unsigned(raw, offsets["oo"], 4, bo)
+        cache_order = oo_x >> 16
         objects_per_slab = oo_x & 0xFFFF
-        slab_bytes = page_size << order
+        slab_bytes = page_size << cache_order
         random = (
-            self._read_unsigned(raw, offsets["random"], pointer_bits // 8)
+            self._read_unsigned(raw, offsets["random"], pointer_bits // 8, bo)
             if "random" in offsets
             else 0
         )
@@ -692,7 +700,7 @@ class KernelSlab:
                     "freepointer_offset": freepointer_offset,
                     "random": random,
                     "hardened": hardened,
-                    "order": order,
+                    "order": cache_order,
                     "objects_per_slab": objects_per_slab,
                     "slab_bytes": slab_bytes,
                 },
@@ -729,7 +737,7 @@ class KernelSlab:
         request = "decode_slub_freelist"
         if byteorder not in ("little", "big"):
             raise ValueError(f"byteorder must be 'little' or 'big', got {byteorder!r}")
-        self._byteorder = cast(_Byteorder, byteorder)
+        bo = cast(_Byteorder, byteorder)
         profile, component_status = self._prepare_context(cancellation_check)
         pointer_bits = int(profile.get("pointer_bits") or 64)
 
@@ -805,13 +813,17 @@ class KernelSlab:
             )
 
         # -- cache fields ---------------------------------------------
-        freepointer_offset = self._read_unsigned(cache_raw, cache_offsets["offset"], 4)
-        oo_x = self._read_unsigned(cache_raw, cache_offsets["oo"], 4)
+        freepointer_offset = self._read_unsigned(
+            cache_raw, cache_offsets["offset"], 4, bo
+        )
+        oo_x = self._read_unsigned(cache_raw, cache_offsets["oo"], 4, bo)
         order = oo_x >> 16
         objects_per_slab = oo_x & 0xFFFF
         slab_bytes = page_size << order
         random = (
-            self._read_unsigned(cache_raw, cache_offsets["random"], pointer_bits // 8)
+            self._read_unsigned(
+                cache_raw, cache_offsets["random"], pointer_bits // 8, bo
+            )
             if "random" in cache_offsets
             else 0
         )
@@ -821,7 +833,7 @@ class KernelSlab:
         freelist_offset = int(slab_header["freelist"])
         head_raw = int.from_bytes(
             slab_raw[freelist_offset : freelist_offset + pointer_bits // 8],
-            self._byteorder,
+            bo,
         )
         head_store_addr = slab_addr + freelist_offset
         header_source = str(slab_header["_struct"])
@@ -831,7 +843,7 @@ class KernelSlab:
             if member is None:
                 return None
             try:
-                return self._read_member(slab_raw, member, pointer_bits)
+                return self._read_member(slab_raw, member, pointer_bits, bo)
             except ValueError:
                 return None
 
@@ -870,7 +882,7 @@ class KernelSlab:
             slab_objects=objects_per_slab,
             max_objects=cap_objects,
             pointer_bits=pointer_bits,
-            reader=self._reader(pointer_bits),
+            reader=self._reader(pointer_bits, bo),
         )
 
         if chain is None:

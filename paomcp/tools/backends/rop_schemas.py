@@ -29,6 +29,7 @@ SIGRETURN_FRAME_SCHEMA = "pao.sigreturn-frame.v1"
 CHAIN_CONSTRAINTS_SCHEMA = "pao.chain-constraints.v1"
 CHAIN_VALIDATION_SCHEMA = "pao.chain-validation.v1"
 CHAIN_EXPORT_SCHEMA = "pao.chain-export.v1"
+CHAIN_CONFIRM_SCHEMA = "pao.chain-confirm.v1"
 CHAIN_EXPORT_FORMATS: Tuple[str, ...] = ("raw", "python", "pwntools")
 DEFAULT_ONE_GADGET_TIMEOUT_SEC = 30.0
 _SYSV_AMD64_ARG_REGS: Tuple[str, ...] = ("rdi", "rsi", "rdx", "rcx", "r8", "r9")
@@ -53,6 +54,7 @@ __all__ = [
     "CHAIN_CONSTRAINTS_SCHEMA",
     "CHAIN_VALIDATION_SCHEMA",
     "CHAIN_EXPORT_SCHEMA",
+    "CHAIN_CONFIRM_SCHEMA",
     "CHAIN_EXPORT_FORMATS",
     "DEFAULT_ONE_GADGET_TIMEOUT_SEC",
     "_SYSV_AMD64_ARG_REGS",

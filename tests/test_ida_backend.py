@@ -133,9 +133,11 @@ def test_publish_rejects_bad_address_and_empty():
     ida = IdaProMCP()
     bad = ida.publish_crash("nope", "SIGSEGV")
     assert bad["success"] is False
-    import pytest
 
-    with pytest.raises(ValueError, match="signal"):
-        ida.publish_crash(0x1000, "  ")
-    with pytest.raises(ValueError, match="text"):
-        ida.publish_note(0x1000, "  ")
+    # Empty inputs return typed envelopes like every other bridge failure.
+    empty_signal = ida.publish_crash(0x1000, "  ")
+    assert empty_signal["success"] is False
+    assert "signal" in str(empty_signal.get("error") or "")
+    empty_text = ida.publish_note(0x1000, "  ")
+    assert empty_text["success"] is False
+    assert "text" in str(empty_text.get("error") or "")

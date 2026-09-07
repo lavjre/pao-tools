@@ -40,6 +40,8 @@ from paomcp.tools.backends.targets_base import (
     TargetKind,
     TargetState,
     resolve_infra_executable,
+    start_output_drains,
+    validate_target_env,
 )
 from paomcp.tools.backends.targets_local import (
     LocalProcessProvider,
@@ -154,7 +156,7 @@ class GdbserverProvider:
             argv.insert(0, resolve_infra_executable(self._executable, what="gdbserver"))
             handle._set_state(TargetState.STARTING)
             env_full = dict(os.environ)
-            env_full.update(spec.env or {})
+            env_full.update(validate_target_env(spec.env))
             try:
                 handle.process = subprocess.Popen(
                     argv,
@@ -165,6 +167,7 @@ class GdbserverProvider:
                     env=env_full,
                     start_new_session=True,
                 )
+                start_output_drains(handle)
                 handle.host = host
                 handle.port = port
                 handle.started_at = datetime.now(timezone.utc).isoformat()

@@ -114,10 +114,12 @@ class DebuggerOperations:
             )
         self.max_memory_write_bytes = configured_write_limit
         self._register_names: Optional[List[str]] = None
+        self._register_names_epoch: Optional[int] = None
 
     def clear_register_cache(self) -> None:
         """Clear architecture-specific register metadata after changing files."""
         self._register_names = None
+        self._register_names_epoch = None
 
     def snapshot_deadline(self) -> float:
         """Return the monotonic deadline for one compound snapshot operation."""
@@ -455,7 +457,17 @@ class DebuggerOperations:
     def _load_register_names(
         self, refresh: bool = False, deadline: Optional[float] = None
     ) -> Dict[str, Any]:
-        if self._register_names is not None and not refresh:
+        # Register layout follows the inferior: a new exec/attach/run bumps
+        # the epoch, so a cached table from a previous epoch is stale.
+        try:
+            epoch = self.gdb.get_inferior_epoch()
+        except Exception:
+            epoch = None
+        if (
+            self._register_names is not None
+            and not refresh
+            and (epoch is None or epoch == self._register_names_epoch)
+        ):
             return {"success": True, "names": self._register_names, "responses": []}
         result = self.gdb.execute_mi_command(
             "-data-list-register-names",
@@ -465,6 +477,7 @@ class DebuggerOperations:
         names = payload.get("register-names", [])
         if result.get("success") and isinstance(names, list):
             self._register_names = [str(name) for name in names]
+            self._register_names_epoch = epoch
         return {
             "success": bool(result.get("success")),
             "names": self._register_names or [],
@@ -536,6 +549,8 @@ class DebuggerOperations:
 
     def evaluate_expression(self, expression: str) -> Dict[str, Any]:
         expression = self._validate_expression(expression, kind="GDB expression")
+        # Safe by construction: SAFE_EXPRESSION_PATTERN rejects `"` and `\`,
+        # so the validated expression cannot break out of the MI quoting.
         command = f'-data-evaluate-expression "{expression}"'
         result = self.gdb.execute_mi_command(command, timeout_sec=self.timeout_seconds)
         payload = self._first_payload(result)

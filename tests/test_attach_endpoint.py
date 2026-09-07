@@ -30,12 +30,20 @@ class FakePwndbgTools:
         return result, []
 
 
+class FakeGdb:
+    def get_inferior_pid(self):
+        return None
+
+
 class FakeSession:
     def __init__(self, session_id: str, tools: FakePwndbgTools):
         self.session_id = session_id
         self.tools = tools
         self.lock = threading.RLock()
         self.state = type("State", (), {"pid": None})()
+        self.closing = False
+        self.closed = False
+        self.gdb = FakeGdb()
 
 
 class FakeRegistry:
@@ -103,6 +111,38 @@ async def test_attach_endpoint_skips_after_when_attach_fails():
 
     assert response.successful is False
     assert "should_not_run" not in response.result
+
+
+@pytest.mark.asyncio
+async def test_attach_endpoint_rejects_reserved_pid():
+    tools = FakePwndbgTools(attach_success=True)
+    session = FakeSession("chal-a", tools)
+    services = FakeServices(FakeRegistry(session=session))
+
+    # model_construct bypasses the pydantic gt=1 gate so the backend
+    # validate_attach_pid guard is what gets exercised here.
+    body = AttachRequest.model_construct(pid=1, session_id="chal-a")
+    response = await run_attach_request(body, services)
+    assert response.successful is False
+    assert tools.calls == []
+
+
+@pytest.mark.asyncio
+async def test_attach_endpoint_blocks_host_shell_commands():
+    tools = FakePwndbgTools(attach_success=True)
+    session = FakeSession("chal-a", tools)
+    services = FakeServices(FakeRegistry(session=session))
+
+    body = AttachRequest(
+        pre=["shell id", "info registers"],
+        pid=1337,
+        session_id="chal-a",
+    )
+    response = await run_attach_request(body, services)
+    assert response.successful is True
+    assert response.result["shell id"]["success"] is False
+    assert "info registers" in response.result
+    assert ("execute", "shell id") not in tools.calls
 
 
 @pytest.mark.asyncio

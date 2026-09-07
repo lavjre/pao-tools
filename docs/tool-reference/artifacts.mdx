@@ -7,6 +7,12 @@ Artifact delivery keeps oversized output out of a single MCP message without
 truncating it. The server stores the full payload under `PAO_RUNTIME_ROOT/artifacts`
 and returns metadata containing an `artifact_id`, byte size, and SHA-256 digest.
 
+<Warning>
+  Session-owned artifacts require the exact same `session_id`; unscoped
+  artifacts are readable by any caller in this single-user, single-trust-domain
+  server. Do not use pao-tools as multi-tenant storage.
+</Warning>
+
 ## Tools
 
 | Tool | Arguments | Result |

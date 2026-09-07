@@ -38,19 +38,42 @@ MAX_CARVED_FILES = 256
 MAX_STRINGS = 512
 
 _MAGIC: Tuple[Tuple[str, bytes, str], ...] = (
-    ("elf32-le", b"\x7fELF\x01\x01\x01", "ELF 32-bit LE"),
-    ("elf64-le", b"\x7fELF\x02\x01\x01", "ELF 64-bit LE"),
+    # ELF matched on \x7fELF + class only: OSABI varies (0x00 SysV, 0x03
+    # Linux) and must not zero the elf_count. Class/endianness refined below.
+    ("elf", b"\x7fELF", "ELF"),
     ("squashfs", b"hsqs", "SquashFS LE"),
     ("squashfs-be", b"sqsh", "SquashFS BE"),
     ("jffs2", b"\x85\x19", "JFFS2"),
     ("ubi", b"UBI#", "UBI"),
     ("gzip", b"\x1f\x8b\x08", "gzip"),
+    ("zlib", b"\x78\x9c", "zlib"),
+    ("zip", b"PK\x03\x04", "ZIP"),
     ("lzma", b"\x5d\x00\x00", "lzma"),
     ("uimage", b"\x27\x05\x19\x56", "uImage"),
     ("trx", b"HDR0", "TRX"),
+    ("cramfs", b"Compressed ROMFS", "CramFS"),
+    ("ubifs", b"UBI#", "UBI/UBIFS"),
     ("cpio", b"070701", "cpio newc"),
     ("dtb", b"\xd0\x0d\xfe\xed", "device-tree"),
+    ("android-boot", b"ANDROID!", "Android bootimg"),
+    ("fit", b"\xd0\x0d\xfe\xed", "FIT/device-tree"),
 )
+
+
+def _refine_elf(data: bytes, offset: int) -> Dict[str, Any]:
+    """Refine a generic ELF hit with class/endianness when bytes exist."""
+    if offset + 6 <= len(data):
+        ei_class = data[offset + 4]
+        ei_data = data[offset + 5]
+        if ei_class in (1, 2) and ei_data in (1, 2):
+            bits = "32-bit" if ei_class == 1 else "64-bit"
+            endian = "LE" if ei_data == 1 else "BE"
+            return {
+                "kind": f"elf{32 if ei_class == 1 else 64}-{endian.lower()}",
+                "description": f"ELF {bits} {endian}",
+            }
+    return {"kind": "elf", "description": "ELF (header truncated)"}
+
 
 _STRING_RE = re.compile(rb"[\x20-\x7e]{6,}")
 
@@ -66,14 +89,22 @@ def _sha256(path: str) -> str:
 def carve_buffer(
     data: bytes, *, max_files: int = MAX_CARVED_FILES
 ) -> List[Dict[str, Any]]:
-    """Scan bytes for known magics; returns offset/type/description hits."""
+    """Scan bytes for known magics; returns offset/type/description hits.
+
+    Same-offset duplicates (one magic is a prefix family of another) keep
+    the first table entry only. ``size_hint`` is the byte distance to the
+    next hit -- a carve bound, not a parsed size.
+    """
     hits: List[Dict[str, Any]] = []
     for kind, magic, description in _MAGIC:
         start = 0
-        while len(hits) < max_files:
+        while len(hits) < max_files * 2:
             idx = data.find(magic, start)
             if idx < 0:
                 break
+            if kind == "elf":
+                refined = _refine_elf(data, idx)
+                kind, description = refined["kind"], refined["description"]
             hits.append(
                 {
                     "kind": kind,
@@ -83,8 +114,20 @@ def carve_buffer(
                 }
             )
             start = idx + max(1, len(magic))
-    hits.sort(key=lambda h: int(h["offset"]))
-    return hits[:max_files]
+    hits.sort(key=lambda h: (int(h["offset"]), str(h["kind"])))
+    deduped: List[Dict[str, Any]] = []
+    seen_offsets = set()
+    for hit in hits:
+        if hit["offset"] in seen_offsets:
+            continue
+        seen_offsets.add(hit["offset"])
+        deduped.append(hit)
+        if len(deduped) >= max_files:
+            break
+    for position, hit in enumerate(deduped):
+        if position + 1 < len(deduped):
+            hit["size_hint"] = int(deduped[position + 1]["offset"]) - int(hit["offset"])
+    return deduped
 
 
 def extract_strings(data: bytes, *, max_strings: int = MAX_STRINGS) -> List[str]:
@@ -142,6 +185,22 @@ def _try_binwalk(
     return {"ok": proc.returncode == 0, "exit_code": proc.returncode, "files": count}
 
 
+def _enforce_expanded_budget(output_dir: str, cap_bytes: int) -> None:
+    """Fail closed when an extractor expanded past the zip-bomb budget."""
+    total = 0
+    for root, _dirs, files in os.walk(output_dir):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+            if total > cap_bytes:
+                raise ValueError(
+                    f"extracted output exceeds the {cap_bytes}-byte budget; "
+                    "refusing to inventory a suspected zip-bomb"
+                )
+
+
 def extract_firmware(
     *,
     image_path: str,
@@ -165,22 +224,61 @@ def extract_firmware(
         )
     os.makedirs(output_dir, exist_ok=True)
     started = time.monotonic()
+    deadline = started + timeout_seconds
+
+    def _budget_left() -> float:
+        return max(1.0, deadline - time.monotonic())
+
+    def _poll_cancel() -> None:
+        if cancellation_check is not None:
+            cancellation_check()
+
     method = "carve-only"
     external: Optional[Dict[str, Any]] = None
-    unblob_res = _try_unblob(image_path, os.path.join(output_dir, "unblob"), 300)
-    if unblob_res is not None:
-        external = {"tool": "unblob", **unblob_res}
-        method = "unblob" if unblob_res.get("ok") else "unblob-failed-carve-only"
-    elif _try_binwalk is not None:
-        binwalk_res = _try_binwalk(image_path, os.path.join(output_dir, "binwalk"), 300)
-        if binwalk_res is not None:
-            external = {"tool": "binwalk", **binwalk_res}
-            method = "binwalk" if binwalk_res.get("ok") else "binwalk-failed-carve-only"
+    # Fallback chain: unblob -> binwalk -> carve-only. A *failed* run falls
+    # through to the next stage (previously `elif` skipped binwalk whenever
+    # unblob merely existed but failed).
+    for tool_name, runner, subdir in (
+        ("unblob", _try_unblob, "unblob"),
+        ("binwalk", _try_binwalk, "binwalk"),
+    ):
+        _poll_cancel()
+        try:
+            result = runner(
+                image_path, os.path.join(output_dir, subdir), int(_budget_left())
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            result = {"ok": False, "error": str(exc)}
+        if result is None:
+            continue  # tool not installed; try the next stage
+        external = {"tool": tool_name, **result}
+        if result.get("ok"):
+            method = tool_name
+            break
+        method = f"{tool_name}-failed-carve-only"
+    _poll_cancel()
+    _enforce_expanded_budget(output_dir, MAX_EXPANDED_BYTES)
     with open(image_path, "rb") as handle:
         head = handle.read(min(size, 64 * 1024 * 1024))
+        tail = b""
+        tail_base = 0
+        if size > len(head):
+            tail_window = min(size - len(head), 16 * 1024 * 1024)
+            handle.seek(size - tail_window)
+            tail = handle.read(tail_window)
+            tail_base = size - tail_window
+    _poll_cancel()
     carved = carve_buffer(head)
+    if tail:
+        for hit in carve_buffer(tail):
+            hit["offset"] = int(hit["offset"]) + tail_base
+            if len(carved) < MAX_CARVED_FILES and all(
+                h["offset"] != hit["offset"] for h in carved
+            ):
+                carved.append(hit)
+        carved.sort(key=lambda h: (int(h["offset"]), str(h["kind"])))
     strings = extract_strings(head[: 4 * 1024 * 1024])
-    elfs = [h for h in carved if h["kind"].startswith("elf")]
+    elfs = [h for h in carved if str(h["kind"]).startswith("elf")]
     return build_backend_response(
         "extract_firmware",
         parsed={

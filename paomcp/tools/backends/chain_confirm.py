@@ -11,10 +11,15 @@ process startup cost; re-confirming after tweaking one gadget is just another
 in-memory step loop.
 
 The execution model mirrors a real overflow payload: ``chain[0]`` is loaded
-into ``$pc`` and ``$sp`` points at ``chain[0]``, so the first gadget executes
-normally and every ``ret`` / ``pop ... ; ret`` consumes the next value the
-same way it would on the actual stack.  A single-element chain whose entry
-*is* the target (a one-gadget) is reported as ``reached_target`` immediately.
+into ``$pc`` and ``$sp`` points at ``chain[1]`` (``buffer + ptr``), so the
+first gadget executes normally and its closing ``ret`` pops ``chain[1]``
+exactly like the overwritten return address would on the actual stack.
+A single-element chain whose entry *is* the target (a one-gadget) is
+reported as ``reached_target`` immediately.
+
+The scratch region's *contents* are clobbered by design (the chain is
+written there); only ``$pc``/``$sp`` are restored. Prefer passing an
+explicit ``stack_address`` over letting the live stack serve as scratch.
 
 Verdicts:
 
@@ -37,8 +42,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from paomcp.tools.backends.foundation import build_backend_response, parse_int
-
-CHAIN_CONFIRM_SCHEMA = "pao.chain-confirm.v1"
+from paomcp.tools.backends.rop_schemas import CHAIN_CONFIRM_SCHEMA
 
 MAX_CHAIN_SLOTS = 1024
 MAX_CONFIRM_STEPS = 512
@@ -108,14 +112,32 @@ class ChainConfirmer:
         result = self.gdb.execute_command(f"set {name} = {value}")
         return bool(result.get("success"))
 
-    def _write_qword(self, address: int, value: int) -> Optional[str]:
-        """Write one pointer-width value; return an error string or ``None``."""
-        result = self.gdb.execute_command(
-            f"set {{unsigned long long}}{address} = {value}"
-        )
+    def _write_slot(
+        self, address: int, value: int, pointer_bytes: int
+    ) -> Optional[str]:
+        """Write one pointer-width value; return an error string or ``None``.
+
+        Width-aware: 4-byte targets get ``unsigned int`` so an i386 write
+        cannot spill into the neighboring slot the way a blind qword would.
+        """
+        cast = "unsigned int" if pointer_bytes == 4 else "unsigned long long"
+        result = self.gdb.execute_command(f"set {{{cast}}}{address} = {value}")
         if result.get("success"):
             return None
         return _error_message(result)
+
+    def _write_qword(self, address: int, value: int) -> Optional[str]:
+        """Write one 8-byte value; kept for backward compatibility."""
+        return self._write_slot(address, value, 8)
+
+    def _probe_readable(self, address: int) -> Optional[str]:
+        """One cheap dereference probe; error string or ``None`` when readable."""
+        if self._eval_int(f"*(unsigned char *){address:#x}") is not None:
+            return None
+        return (
+            f"scratch base {address:#x} is not readable; pick a writable "
+            "stack_address inside a mapped region"
+        )
 
     # ------------------------------------------------------------------
     # Public operation
@@ -227,9 +249,23 @@ class ChainConfirmer:
             buffer_address = snapshot_sp
         end_address = buffer_address + len(values) * pointer_bytes
 
+        # --- writability probe before touching the scratch region -------
+        probe_error = self._probe_readable(buffer_address)
+        if probe_error is not None:
+            return _response(
+                "write_failed",
+                message=probe_error,
+                extra={
+                    "buffer_address": buffer_address,
+                    "scratch_end": end_address,
+                },
+            )
+
         # --- write chain onto the scratch region -----------------------
         for index, value in enumerate(values):
-            error = self._write_qword(buffer_address + index * pointer_bytes, value)
+            error = self._write_slot(
+                buffer_address + index * pointer_bytes, value, pointer_bytes
+            )
             if error is not None:
                 return _response(
                     "write_failed",
@@ -245,8 +281,10 @@ class ChainConfirmer:
                 )
 
         # --- arm pc/sp ------------------------------------------------
+        # $sp starts past chain[0]: the first gadget's closing ret pops
+        # chain[1], mirroring the overwritten return address slot.
         if not self._set_reg(f"${pc}", values[0]) or not self._set_reg(
-            f"${sp}", buffer_address
+            f"${sp}", buffer_address + pointer_bytes
         ):
             return _response(
                 "setup_failed",
@@ -296,11 +334,15 @@ class ChainConfirmer:
             else:
                 verdict = "steps_exhausted"
 
-        # --- restore so the session is untouched ------------------------
+        # --- restore pc/sp (attempted whenever asked) -------------------
+        # A crashed/exited inferior may refuse the writes; the boolean says
+        # what happened. Stack *contents* at the scratch region are not
+        # restored by design (see module docstring).
         restored = False
-        if restore and self.gdb.get_state() == "stopped":
-            restored = self._set_reg(f"${pc}", snapshot_pc) and self._set_reg(
-                f"${sp}", snapshot_sp
+        if restore:
+            restored = bool(
+                self._set_reg(f"${pc}", snapshot_pc)
+                and self._set_reg(f"${sp}", snapshot_sp)
             )
 
         # --- assemble the final payload ---------------------------------
@@ -323,6 +365,11 @@ class ChainConfirmer:
                 "target_reached": verdict == "reached_target",
                 "stack_aligned": stack_aligned,
                 "restored": restored,
+                "scratch_clobbered": True,
+                "scratch_note": (
+                    "chain bytes were written over the scratch region; "
+                    "$pc/$sp restoration does not undo that"
+                ),
                 "trace": trace[-TRACE_LIMIT:],
             },
             message=step_error,

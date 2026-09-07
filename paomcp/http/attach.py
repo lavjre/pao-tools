@@ -6,10 +6,25 @@ from fastapi import FastAPI
 
 from paomcp.http.models import AttachRequest, AttachResponse
 from paomcp.services import AppServices
-from paomcp.tools.common import resolve_debug_session
+from paomcp.tools.backends.foundation import validate_attach_pid
+from paomcp.tools.common import resolve_debug_session, run_session_locked
 from paomcp.utils.paths import resolve_workspace_path
 
 logger = logging.getLogger(__name__)
+
+# GDB escapes that run host shell commands. pre/after are debugger-command
+# automation by design (loopback sidecar), but host-shell execution is never
+# part of that contract and is rejected per command instead of executed.
+_BLOCKED_ATTACH_COMMAND_PREFIXES = ("shell", "!")
+
+
+def _attach_command_blocked(command: str) -> bool:
+    text = (command or "").strip().lower()
+    if not text:
+        return False
+    if text == "shell" or text.startswith("shell ") or text.startswith("shell\t"):
+        return True
+    return text.startswith("!")
 
 
 def _resolve_session(body: AttachRequest, services: AppServices):
@@ -36,8 +51,34 @@ async def run_attach_request(
             result={},
         )
 
+    try:
+        validated_pid = validate_attach_pid(body.pid)
+    except ValueError as exc:
+        return AttachResponse(
+            successful=False,
+            attach={
+                "success": False,
+                "error": str(exc),
+                "pid": body.pid,
+                "session_id": body.session_id,
+            },
+            result={},
+        )
+
     tools = session.tools
     command_results: Dict[str, Any] = {}
+
+    def _guarded_execute(cmd: str) -> Dict[str, Any]:
+        if _attach_command_blocked(cmd):
+            return {
+                "success": False,
+                "error": (
+                    f"refusing host-shell escape in attach command {cmd!r}: "
+                    "pre/after run debugger commands only"
+                ),
+                "type": "AttachCommandBlockedError",
+            }
+        return tools.execute(cmd)
 
     def _run_attach_sequence() -> Tuple[bool, Optional[Dict[str, Any]], Dict[str, Any]]:
         if body.where:
@@ -58,7 +99,7 @@ async def run_attach_request(
         for cmd in body.pre or []:
             try:
                 logger.info("[attach] pre: %s", cmd)
-                res = tools.execute(cmd)
+                res = _guarded_execute(cmd)
                 logger.info("[attach] pre command result: %s", res)
                 command_results[cmd] = res
             except Exception as e:
@@ -67,12 +108,12 @@ async def run_attach_request(
 
         attach_info: Optional[Dict[str, Any]] = None
         try:
-            logger.info("[attach] attaching to pid=%s", body.pid)
-            attach_result, _ = tools.attach(body.pid)
+            logger.info("[attach] attaching to pid=%s", validated_pid)
+            attach_result, _ = tools.attach(validated_pid)
             logger.info("[attach] attach result: %s", attach_result)
             attach_success = bool(attach_result.get("success"))
             if attach_success:
-                session.state.pid = body.pid
+                session.state.pid = validated_pid
             attach_info = {
                 "command": attach_result.get("command"),
                 "success": attach_success,
@@ -81,18 +122,18 @@ async def run_attach_request(
                 "session_id": session.session_id,
             }
         except Exception:
-            logger.exception("Error attaching to pid %s", body.pid)
+            logger.exception("Error attaching to pid %s", validated_pid)
             attach_success = False
             attach_info = {
                 "success": False,
-                "error": f"failed to attach to pid {body.pid}",
+                "error": f"failed to attach to pid {validated_pid}",
             }
 
         if attach_success:
             for cmd in body.after or []:
                 try:
                     logger.info("[attach] after: %s", cmd)
-                    res = tools.execute(cmd)
+                    res = _guarded_execute(cmd)
                     logger.info("[attach] after command result: %s", res)
                     command_results[cmd] = res
                 except Exception as e:
@@ -104,8 +145,10 @@ async def run_attach_request(
     def _run_with_session_lock() -> (
         Tuple[bool, Optional[Dict[str, Any]], Dict[str, Any]]
     ):
-        with session.lock:
-            return _run_attach_sequence()
+        # run_session_locked adds the closing/closed/destroyed guards a raw
+        # lock skips: a concurrent close can no longer leave this driving a
+        # dead gdb pipe.
+        return run_session_locked(session, _run_attach_sequence, sync_pid=False)
 
     attach_success, attach_info, command_results = await asyncio.to_thread(
         _run_with_session_lock

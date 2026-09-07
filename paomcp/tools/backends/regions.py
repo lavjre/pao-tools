@@ -51,6 +51,9 @@ MAX_REPORTED_RANGES = 64
 # Region normalization constants.
 _PERMISSION_CHARS = frozenset("rwxps-")
 
+# Kernel-mapped special regions: executable but never JIT spray space.
+_NON_JIT_SPECIAL = frozenset({"[vdso]", "[vsyscall]", "[vvar]", "[vectors]"})
+
 
 def _permission_flags(
     permissions: Any,
@@ -142,6 +145,7 @@ class JitRegionTracker:
         if warn:
             warnings.append(warn)
         anonymous = cls._is_anonymous(item.get("file"))
+        file_display = "" if item.get("file") is None else str(item.get("file")).strip()
         return {
             "start": start,
             "end": end,
@@ -150,7 +154,11 @@ class JitRegionTracker:
             "executable": flags["executable"],
             "writable": flags["writable"],
             "anonymous": anonymous,
-            "jit_candidate": flags["executable"] and anonymous,
+            "jit_candidate": bool(
+                flags["executable"]
+                and anonymous
+                and file_display not in _NON_JIT_SPECIAL
+            ),
             "rwx": flags["writable"] and flags["executable"],
         }
 
@@ -490,6 +498,10 @@ class JitRegionTracker:
                 )
                 continue
             ranges = self._changed_ranges(baseline, current)
+            # Rebaseline to the observed bytes so the next check reports
+            # only *new* writes instead of staying changed forever.
+            watch["sha256"] = digest
+            watch["snapshot"] = current
             reports.append(
                 {
                     **self._public_watch(watch),
@@ -498,6 +510,7 @@ class JitRegionTracker:
                     "changed_ranges": ranges,
                     "changed_range_count": len(ranges),
                     "changed_bytes": sum(e - s for s, e in ranges),
+                    "rebaselined": True,
                 }
             )
         return build_backend_response(
@@ -560,7 +573,7 @@ def classify_pa_candidates(
         size = end - start
         if size < _PA_MIN_SIZE:
             continue
-        perms = str(mp.get("permissions") or "")
+        perms = str(mp.get("permissions") or "").lower()
         writable = bool(mp.get("writable")) or (len(perms) > 1 and perms[1] == "w")
         executable = bool(mp.get("executable")) or (len(perms) > 2 and perms[2] == "x")
         if not writable or executable:
@@ -581,7 +594,7 @@ def classify_pa_candidates(
                 "start": start,
                 "end": end,
                 "size": size,
-                "super_pages": size // _PA_SUPER_PAGE,
+                "super_pages": max(1, (size + _PA_SUPER_PAGE - 1) // _PA_SUPER_PAGE),
                 "aligned_2mib": aligned,
                 "file": fname,
                 "confidence": confidence,

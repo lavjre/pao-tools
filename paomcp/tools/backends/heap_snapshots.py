@@ -622,7 +622,8 @@ class HeapHistory:
             _check_deadline()
 
         tcache_response = self.bins.inspect_tcache(
-            cancellation_check=cancellation_check
+            max_chunks_per_bin=max_chunks_per_bin,
+            cancellation_check=cancellation_check,
         )
         tcache_parsed = tcache_response.get("parsed", {}) or {}
         for w in tcache_response.get("warnings") or []:

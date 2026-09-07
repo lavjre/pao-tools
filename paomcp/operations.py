@@ -300,7 +300,10 @@ class OperationRegistry:
         """Mark an operation terminal and preserve its normalized error summary."""
         with self._lock:
             record = self._require_locked(operation_id)
-            if session_id is not None:
+            # Owner is fixed at creation: a backend response must never
+            # reassign an operation to a foreign session. Only fill in when
+            # the record was created unscoped.
+            if session_id is not None and record.session_id is None:
                 record.session_id = session_id
             if record.cancellation_requested or error_code == "OPERATION_CANCELLED":
                 record.state = "cancelled"

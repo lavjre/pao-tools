@@ -64,6 +64,7 @@ DEFAULT_MAX_TIMELINE_EVENTS_PER_SESSION = 2000
 HYPOTHESIS_STATES: Tuple[str, ...] = (
     "proposed",
     "supported",
+    "confirmed",
     "rejected",
     "unknown",
 )
@@ -647,6 +648,10 @@ class ResearchRegistry:
     # ------------------------------------------------------------------
     # Notes
     # ------------------------------------------------------------------
+    # One note may not bloat the session store / bundle manifest: callers
+    # with more text split it across notes or attach an artifact instead.
+    MAX_NOTE_CHARS = 128 * 1024
+
     def add_note(
         self,
         *,
@@ -657,6 +662,12 @@ class ResearchRegistry:
     ) -> ResearchNote:
         if not isinstance(body, str) or not body.strip():
             raise ResearchError("note body must be a non-empty string")
+        if len(body) > self.MAX_NOTE_CHARS:
+            raise ResearchError(
+                f"note body is {len(body)} chars, exceeding the "
+                f"{self.MAX_NOTE_CHARS}-char cap; split it or attach an "
+                "artifact and reference it"
+            )
         session = self.get_session(session_id)
         with session._lock:
             if len(session.notes) >= self._max_notes:
@@ -731,11 +742,13 @@ class ResearchRegistry:
             summary = description or f"linked {kind} '{ref.strip()}'"
             self._append_event_locked(
                 session,
-                kind=(
-                    "crash"
-                    if kind == "crash"
-                    else "artifact" if kind == "artifact" else "other"
-                ),
+                kind={
+                    "crash": "crash",
+                    "artifact": "artifact",
+                    "heap_snapshot": "snapshot",
+                    "note": "note",
+                    "tool_result": "tool_call",
+                }.get(kind, "other"),
                 summary=summary[:120],
                 ref=ref.strip(),
                 hypothesis_id=hypothesis_id,
@@ -782,19 +795,27 @@ class ResearchRegistry:
                     f"batch of {len(entries)} would exceed the "
                     f"{self._max_evidence} evidence cap"
                 )
-            linked: List[ResearchEvidence] = []
-            for item in entries:
+            # Validate every foreign key up front: the batch is all-or-nothing
+            # and a mid-loop raise must never leave half the items linked.
+            for position, item in enumerate(entries):
                 hypothesis_id = item.get("hypothesis_id")
                 if (
                     hypothesis_id is not None
                     and hypothesis_id not in session.hypotheses
                 ):
                     raise ResearchError(
-                        f"hypothesis '{hypothesis_id}' not found in session"
+                        f"item {position}: hypothesis '{hypothesis_id}' not "
+                        "found in session"
                     )
                 note_id = item.get("note_id")
                 if note_id is not None and note_id not in session.notes:
-                    raise ResearchError(f"note '{note_id}' not found in session")
+                    raise ResearchError(
+                        f"item {position}: note '{note_id}' not found in session"
+                    )
+            linked: List[ResearchEvidence] = []
+            for item in entries:
+                hypothesis_id = item.get("hypothesis_id")
+                note_id = item.get("note_id")
                 evidence = ResearchEvidence(
                     evidence_id=uuid.uuid4().hex[:12],
                     kind=item["kind"],

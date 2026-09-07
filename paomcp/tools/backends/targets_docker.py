@@ -55,6 +55,11 @@ def _default_docker_runner(argv: List[str], timeout_sec: float) -> Tuple[int, st
     return completed.returncode, completed.stdout, completed.stderr
 
 
+# Blocked = host-impact only (privilege, namespaces, mounts, devices,
+# runtimes). Constraining flags (--memory, --pids-limit, --ulimit, --user,
+# --name, --hostname, --workdir, --entrypoint) stay allowed: they narrow
+# what the container can do, and the provider already owns --name/-w via
+# its own fields. Blocking limits would push callers away from them.
 BLOCKED_DOCKER_PREFIXES = (
     "--privileged",
     "--pid",
@@ -71,6 +76,8 @@ BLOCKED_DOCKER_PREFIXES = (
     "--cap-drop",
     "--security-opt",
     "--cgroupns",
+    "--cgroup-parent",
+    "--userns",
     "--gpus",
     "--runtime",
     "-v",
@@ -81,13 +88,19 @@ BLOCKED_DOCKER_PREFIXES = (
 
 
 def _docker_flag_name(entry: str) -> str:
-    """Normalize one extra arg to its flag name (``--cap-add=x`` -> ``--cap-add``)."""
+    """Normalize one extra arg to its flag name (``--cap-add=x`` -> ``--cap-add``).
+
+    Whitespace splits first so ``--mount type=bind,src=/`` normalizes to
+    ``--mount`` (not ``--mount type``); only ``=`` then separates the value.
+    ``:`` is deliberately not a separator: ``-v/src:/dst`` must keep its
+    ``-v`` head instead of being sliced into a bare ``-v/src`` miss.
+    """
     text = entry.strip().lower()
-    for separator in ("=", ":"):
-        head, sep, _ = text.partition(separator)
-        if sep and head.startswith("-"):
-            return head
-    return text.split()[0] if text else ""
+    first = text.split()[0] if text else ""
+    head, sep, _ = first.partition("=")
+    if sep and head.startswith("-"):
+        return head
+    return first
 
 
 def validate_docker_extra_args(extra_args) -> None:
@@ -145,6 +158,11 @@ class DockerProvider:
             spec = handle.spec
             if not spec.docker_image:
                 raise TargetError("docker spec requires 'docker_image'")
+            if spec.docker_image.strip().startswith("-"):
+                raise TargetError(
+                    f"docker_image must be an image name, got flag-like "
+                    f"{spec.docker_image!r}"
+                )
             container_name = spec.name or f"pao-target-{handle.target_id}"
             handle._set_state(TargetState.STARTING)
             argv: List[str] = [

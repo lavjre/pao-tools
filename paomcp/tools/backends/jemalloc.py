@@ -1,4 +1,4 @@
-"""jemalloc extent/rtree inspection (Phase 1: extent/rtree core only).
+"""jemalloc extent/rtree inspection (Phase 2: + corruption/UAF/snapshot).
 
 Runs pwndbg's ``jemalloc`` command surface (``heap``, ``find-extent``,
 ``extent-info``) on the gdb backend and parses the printed text into the
@@ -7,15 +7,15 @@ target at runtime (``rtree_levels`` + struct types via GDB expressions, with
 a 48-bit fallback geometry), so it needs a jemalloc inferior with usable
 type/symbol information and is officially tested against jemalloc 5.3.0.
 
-Scope (user-confirmed): extent/rtree core only.  ``inspect_chunk`` and
-``validate_chunk`` wrap ``find-extent`` (pointer -> allocation lookup),
-``list_arenas`` wraps ``jemalloc heap`` (extent inventory; jemalloc arenas
-are not exposed by the plugin, so this reports the tracked extents), and
-``inspect_arena`` wraps ``extent-info`` when given an extent address.  The
-remaining eight facade methods -- fastbins (jemalloc has none), tcache/bin
-walking, corruption/free/technique/UAF analysis, and glibc-shaped snapshot
-capture -- return an honest typed ``unsupported`` verdict until a later
-phase builds those readers.
+Scope: ``inspect_chunk`` and ``validate_chunk`` wrap ``find-extent``
+(pointer -> allocation lookup), ``list_arenas`` wraps ``jemalloc heap``
+(extent inventory; jemalloc arenas are not exposed by the plugin, so this
+reports the tracked extents), ``inspect_arena`` wraps ``extent-info`` when
+given an extent address, and ``classify_heap_corruption`` /
+``detect_uaf`` / ``capture_heap_snapshot`` work over the extent inventory
+(overlap/duplicate/size checks, freed-state pointer scan, extent ledger).
+Still ``unsupported``: fastbins (jemalloc has none), tcache/bin walking,
+free validation, and House-of-* technique analysis.
 """
 
 from __future__ import annotations
@@ -753,6 +753,23 @@ class JemallocAnalyzer:
                 warnings=[_JEMALLOC_WARNING],
             )
         values = _parse_key_values(text)
+        if not values:
+            return self._extent_response(
+                command,
+                schema=JEMALLOC_EXTENT_SCHEMA,
+                classification=classification,
+                profile=profile,
+                component_status=component_status,
+                address=target,
+                address_kind="extent",
+                verdict="unresolvable",
+                extent=None,
+                text=text,
+                raw_responses=raw,
+                reason=(
+                    "extent-info produced no recognizable fields; nothing " "was parsed"
+                ),
+            )
         extent = _extent_from_keyvalues(values)
         parsed = {
             "schema": JEMALLOC_EXTENT_SCHEMA,
@@ -1008,6 +1025,18 @@ class JemallocAnalyzer:
         max_chunks: int = 512,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        if max_bytes <= 0 or max_bytes > 64 * 1024 * 1024:
+            raise ValueError(
+                f"max_bytes must be between 1 and 64MiB, got {max_bytes!r}"
+            )
+        if max_mappings <= 0 or max_mappings > 64:
+            raise ValueError(
+                f"max_mappings must be between 1 and 64, got {max_mappings!r}"
+            )
+        if max_chunks <= 0 or max_chunks > 8192:
+            raise ValueError(
+                f"max_chunks must be between 1 and 8192, got {max_chunks!r}"
+            )
         classification, mappings, profile, component_status = (
             self._prepare_with_mappings(cancellation_check)
         )

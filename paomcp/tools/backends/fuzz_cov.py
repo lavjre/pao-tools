@@ -49,7 +49,9 @@ def minimize_corpus(
         raise ValueError(f"max_files must be 1-{MAX_CORPUS_FILES}")
     seen: Dict[str, Mapping[str, Any]] = {}
     for item in inputs:
-        blob = item.get("data_hex") or item.get("data") or b""
+        # ``generate_fuzz_inputs`` emits ``hex``; accept ``data_hex``/``data``
+        # spellings too so hand-built corpora minimize identically.
+        blob = item.get("hex") or item.get("data_hex") or item.get("data") or b""
         if isinstance(blob, str):
             try:
                 raw = bytes.fromhex(blob)
@@ -86,7 +88,7 @@ def _raw_len(item: Mapping[str, Any]) -> int:
 
 
 def _to_raw(item: Mapping[str, Any]) -> bytes:
-    blob = item.get("data_hex") or item.get("data") or b""
+    blob = item.get("hex") or item.get("data_hex") or item.get("data") or b""
     if isinstance(blob, str):
         try:
             return bytes.fromhex(blob)
@@ -142,6 +144,20 @@ def run_coverage_batch(
                     "verdict": "unavailable",
                     "reason": "afl-fuzz not found on PATH",
                     "hint": _engine_hint(engine),
+                    "campaign_id": campaign_id,
+                },
+                raw_responses=[],
+                state="idle",
+                parser_version=PARSER_VERSION,
+            )
+        if engine == "afl" and exe is None:
+            return build_backend_response(
+                "run_afl_batch",
+                parsed={
+                    "schema": AFL_BATCH_SCHEMA,
+                    "supported": False,
+                    "verdict": "unresolvable",
+                    "reason": f"target not found: {target_path}",
                     "campaign_id": campaign_id,
                 },
                 raw_responses=[],
@@ -205,21 +221,22 @@ def run_coverage_batch(
             str(mem_mb),
             "-V",
             str(time_seconds),
-            "--",
-            binary,
         ]
+        cmd.extend(list(extra_args or []))
+        cmd += ["--", binary]
     else:
         cmd = [
             str(binary),
             "-max_total_time=%d" % int(time_seconds),
             "-rss_limit_mb=%d" % int(mem_mb),
             "-print_final_stats=1",
+            "-artifact_prefix=%s/" % output_dir,
             corpus_dir,
         ]
         cmd.extend(list(extra_args or []))
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=time_seconds + 60
+        child = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
     except FileNotFoundError:
         return build_backend_response(
@@ -236,13 +253,49 @@ def run_coverage_batch(
             state="idle",
             parser_version=PARSER_VERSION,
         )
-    except subprocess.TimeoutExpired:
+    cancelled = False
+    try:
+        deadline = time.monotonic() + time_seconds + 60
+        while child.poll() is None:
+            if cancellation_check is not None:
+                try:
+                    cancellation_check()
+                except Exception:
+                    cancelled = True
+                    child.kill()
+                    break
+            if time.monotonic() > deadline:
+                child.kill()
+                break
+            time.sleep(0.5)
+        stdout, stderr = child.communicate(timeout=30)
+        return_code = child.returncode
+    except Exception as exc:
+        try:
+            child.kill()
+        except OSError:
+            pass
         return build_backend_response(
             "run_afl_batch",
             parsed={
                 "schema": AFL_BATCH_SCHEMA,
                 "supported": True,
-                "verdict": "timeout",
+                "verdict": "cancelled" if cancelled else "timeout",
+                "campaign_id": campaign_id,
+                "engine": engine,
+                "reason": str(exc),
+            },
+            raw_responses=[],
+            state="idle",
+            parser_version=PARSER_VERSION,
+        )
+    if cancelled:
+        return build_backend_response(
+            "run_afl_batch",
+            parsed={
+                "schema": AFL_BATCH_SCHEMA,
+                "supported": True,
+                "verdict": "cancelled",
                 "campaign_id": campaign_id,
                 "engine": engine,
             },
@@ -250,13 +303,7 @@ def run_coverage_batch(
             state="idle",
             parser_version=PARSER_VERSION,
         )
-    crash_dir = os.path.join(output_dir, "crashes" if engine == "afl" else "crash-")
-    found: List[str] = []
-    if os.path.isdir(crash_dir):
-        for name in sorted(os.listdir(crash_dir))[:MAX_CRASHES_REPORTED]:
-            if name.startswith("README"):
-                continue
-            found.append(os.path.join(crash_dir, name))
+    found = _collect_crashes(engine, output_dir)
     return build_backend_response(
         "run_afl_batch",
         parsed={
@@ -266,7 +313,13 @@ def run_coverage_batch(
             "campaign_id": campaign_id,
             "engine": engine,
             "elapsed_seconds": round(time.monotonic() - started, 3),
-            "exit_code": proc.returncode,
+            "exit_code": return_code,
+            "exit_note": (
+                "non-zero fuzzer exits are findings context, not failures; "
+                "check crashes[] and the fuzzer log"
+                if return_code not in (0, None)
+                else None
+            ),
             "crash_count": len(found),
             "crashes": found,
             "next": "triage each crash path with run_until_crash, then link_evidence_batch",
@@ -275,6 +328,42 @@ def run_coverage_batch(
         state="idle",
         parser_version=PARSER_VERSION,
     )
+
+
+_LIBFUZZER_CRASH_PREFIXES = ("crash-", "oom-", "timeout-", "leak-")
+
+
+def _collect_crashes(engine: str, output_dir: str) -> List[str]:
+    """Find crash artifacts where each engine really writes them."""
+    found: List[str] = []
+    if engine == "afl":
+        # afl++ writes <out>/default/crashes (also accept legacy <out>/crashes).
+        candidates = [
+            os.path.join(output_dir, "default", "crashes"),
+            os.path.join(output_dir, "crashes"),
+        ]
+        for crash_dir in candidates:
+            if not os.path.isdir(crash_dir):
+                continue
+            for name in sorted(os.listdir(crash_dir)):
+                if name.startswith("README"):
+                    continue
+                found.append(os.path.join(crash_dir, name))
+                if len(found) >= MAX_CRASHES_REPORTED:
+                    return found[:MAX_CRASHES_REPORTED]
+        return found[:MAX_CRASHES_REPORTED]
+    try:
+        names = sorted(os.listdir(output_dir))
+    except OSError:
+        return []
+    for name in names:
+        if name.startswith(_LIBFUZZER_CRASH_PREFIXES):
+            full = os.path.join(output_dir, name)
+            if os.path.isfile(full):
+                found.append(full)
+                if len(found) >= MAX_CRASHES_REPORTED:
+                    break
+    return found
 
 
 __all__ = [

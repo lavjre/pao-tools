@@ -92,27 +92,41 @@ class TestFirmwareCarve:
 
 
 class TestSyzkaller:
-    def test_config_renders(self):
-        result = generate_syz_config(
-            kernel_src="/k/src",
-            image_path="/img/bull.img",
-            ssh_key_path="/k/key",
-            workdir="/syz/work",
-        )
+    def _paths(self, tmp_path):
+        kernel_src = tmp_path / "src"
+        kernel_src.mkdir()
+        image = tmp_path / "bull.img"
+        image.write_bytes(b"fake-image")
+        key = tmp_path / "key"
+        key.write_bytes(b"fake-key")
+        work = tmp_path / "work"
+        work.mkdir()
+        return {
+            "kernel_src": str(kernel_src),
+            "image_path": str(image),
+            "ssh_key_path": str(key),
+            "workdir": str(work),
+        }
+
+    def test_config_renders(self, tmp_path):
+        result = generate_syz_config(**self._paths(tmp_path))
         parsed = result["parsed"]
         assert parsed["verdict"] == "rendered"
         assert parsed["config"]["target"] == "linux/amd64"
         assert "syz-manager" in parsed["next"]
 
-    def test_config_rejects_host_escape(self):
+    def test_config_rejects_host_escape(self, tmp_path):
         with pytest.raises(ValueError):
             generate_syz_config(
-                kernel_src="/k/src",
-                image_path="/img/b.img",
-                ssh_key_path="/k/key",
-                workdir="/syz/w",
-                qemu_args="-virtfs local,path=/",
+                **self._paths(tmp_path), qemu_args="-virtfs local,path=/"
             )
+
+    def test_config_rejects_bad_arch_and_missing_paths(self, tmp_path):
+        paths = self._paths(tmp_path)
+        with pytest.raises(ValueError):
+            generate_syz_config(**{**paths, "target_arch": "mips"})
+        with pytest.raises(ValueError):
+            generate_syz_config(**{**paths, "image_path": str(tmp_path / "nope")})
 
     def test_ingest_null_deref(self):
         from tests.test_kernel_oops import NULL_DEREF
@@ -121,6 +135,12 @@ class TestSyzkaller:
         parsed = result["parsed"]
         assert parsed["fault_kind"] == "null_deref"
         assert parsed["fingerprint"]
+        assert parsed["frames"] == ["kmem_cache_alloc", "vuln_ioctl"]
+
+    def test_ingest_propagates_triage_failure(self):
+        result = ingest_syz_crash(log_text="   ")
+        assert result["parsed"]["verdict"] == "unresolvable"
+        assert result["parsed"]["supported"] is False
 
 
 class TestPaLite:

@@ -28,6 +28,8 @@ from paomcp.tools.backends.heap_technique_context import (
     _iter_tcache_chunks,
     _not_present,
     _pointer_location,
+    chunk_header_len,
+    size_field_from_header,
 )
 
 
@@ -117,11 +119,14 @@ def _detect_house_of_einherjar(ctx: TechniqueContext, read: ReadFn) -> Dict[str,
         physical_prev = addr - prev_size
         if physical_prev <= 0:
             continue
-        header, err = read(physical_prev, 16)
-        if err is not None or len(header) < 16:
+        header_len = chunk_header_len(ctx.size_sz)
+        header, err = read(physical_prev, header_len)
+        if err is not None or len(header) < header_len:
             # Cannot read the real predecessor -- no evidence, stay silent.
             continue
-        actual_prev_size = int.from_bytes(header[8:16], ctx.byteorder) & ~SIZE_BITS_MASK
+        actual_prev_size = (
+            size_field_from_header(header, ctx.size_sz, ctx.byteorder) & ~SIZE_BITS_MASK
+        )
         if actual_prev_size != prev_size:
             mismatches.append(
                 {
@@ -490,10 +495,11 @@ def _detect_overlapping_chunks(ctx: TechniqueContext, read: ReadFn) -> Dict[str,
         prev_addr = addr - prev_size
         if prev_addr <= 0:
             continue
-        header, err = read(prev_addr, 16)
-        if err is not None or len(header) < 16:
+        header_len = chunk_header_len(ctx.size_sz)
+        header, err = read(prev_addr, header_len)
+        if err is not None or len(header) < header_len:
             continue
-        prev_size_field = int.from_bytes(header[8:16], ctx.byteorder)
+        prev_size_field = size_field_from_header(header, ctx.size_sz, ctx.byteorder)
         prev_real_size = prev_size_field & ~SIZE_BITS_MASK
         prev_prev_inuse = bool(prev_size_field & PREV_INUSE)
         if prev_real_size == prev_size and prev_prev_inuse is False:

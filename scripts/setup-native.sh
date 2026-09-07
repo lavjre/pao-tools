@@ -65,8 +65,11 @@ install_linux() {
       [ "$WITH_FUZZ" -eq 1 ] && $SUDO pacman -S --noconfirm --needed afl++ || true ;;
     *) echo "unsupported linux distro ($ID): install gdb/pwndbg/uv manually, then re-run." >&2; exit 1 ;;
   esac
+  PWNDBG_PIN="2026.02.18"
   if ! command -v pwndbg >/dev/null 2>&1; then
-    pipx install pwndbg || python3 -m pip install --user pwndbg
+    pipx install "pwndbg==${PWNDBG_PIN}" || pipx install pwndbg \
+      || python3 -m pip install --user "pwndbg==${PWNDBG_PIN}" \
+      || python3 -m pip install --user pwndbg
   fi
 }
 

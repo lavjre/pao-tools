@@ -50,6 +50,19 @@ Use the `paocli` family when you want an interactive exploit driver that stays a
 - `paocli_stop` kills the driver bound to a session
 - `list_paocli_sessions` lists all active drivers
 
+## Research evidence fuse
+
+```json
+{"tool":"paocli_link_evidence","arguments":{"session_id":"chal-a","research_session_id":"case-1","label":"heap-spray","max_chars":8000}}
+```
+
+- drains pipe output + structured events without killing the driver
+- stores a capped research note (`max_chars` 1–32768) and links a
+  `tool_result` evidence entry (`paocli:<session_id>`)
+- response carries `output_truncated` plus `pipe_stats` (queued/dropped
+  bytes and events, malformed control-line count) so a capped note is
+  never mistaken for complete output
+
 ## Behavior notes
 
 - one `paocli` driver per debug session

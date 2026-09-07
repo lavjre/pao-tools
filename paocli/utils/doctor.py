@@ -137,11 +137,16 @@ _CHECKS: List[Dict[str, Any]] = [
 ]
 
 
+_WINDOWS_REQUIRED = frozenset({"python3 (>=3.12)", "uv", "git"})
+
+
 def detect_os(platform: Optional[str] = None) -> str:
-    """Return ``linux`` or ``macos`` for a ``sys.platform`` value."""
+    """Return ``linux``, ``macos`` or ``windows`` for a ``sys.platform`` value."""
     value = (platform if platform is not None else sys.platform).lower()
     if value.startswith("darwin"):
         return "macos"
+    if value.startswith("win"):
+        return "windows"
     return "linux"
 
 
@@ -168,20 +173,37 @@ def check_one(
     elif kind == "env_or_binary":
         env_key = str(spec.get("env_key") or "")
         configured = (env.get(env_key) or "").strip()
-        if configured and os.path.isfile(configured):
+        if configured and os.path.isfile(configured) and os.access(configured, os.X_OK):
             return {
                 "name": spec.get("name"),
                 "ok": True,
                 "required": bool(spec.get(f"required_{os_name}")),
                 "detail": f"{env_key}={configured}",
             }
+        if configured:
+            return {
+                "name": spec.get("name"),
+                "ok": False,
+                "required": bool(spec.get(f"required_{os_name}")),
+                "detail": f"{env_key}={configured} (not an executable file)",
+                "hint": str(spec.get(f"hint_{os_name}") or ""),
+            }
         found = which_fn(str(spec.get("target")))
         ok = found is not None
         detail = found or f"neither {env_key} nor PATH provides it"
     else:  # pragma: no cover - defensive, spec table is closed
         ok, detail = False, "unknown check kind"
-    required = bool(spec.get(f"required_{os_name}"))
-    hint = str(spec.get(f"hint_{os_name}") or spec.get("hint_linux") or "")
+    if os_name == "windows":
+        # Native Windows cannot debug: only the portable tools are required,
+        # everything else points at WSL2/Docker.
+        required = str(spec.get("name")) in _WINDOWS_REQUIRED
+        hint = (
+            str(spec.get(f"hint_{os_name}") or "")
+            or "Windows: run under WSL2 or Docker; native debugging needs Linux"
+        )
+    else:
+        required = bool(spec.get(f"required_{os_name}"))
+        hint = str(spec.get(f"hint_{os_name}") or spec.get("hint_linux") or "")
     return {
         "name": spec.get("name"),
         "ok": bool(ok),

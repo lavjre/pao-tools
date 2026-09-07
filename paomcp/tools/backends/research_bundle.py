@@ -244,6 +244,25 @@ class ResearchBundle:
                     }
                 )
                 continue
+            # Pre-check the recorded size against the bundle budget *before*
+            # reading: a huge artifact must be skipped, not loaded into RAM
+            # first and rejected afterwards.
+            running_total = sum(len(blob) for blob in blob_by_sha.values())
+            if running_total + metadata.size_bytes > self._max_bundle_bytes:
+                warnings.append(
+                    f"artifact '{evidence.ref}' ({metadata.size_bytes} bytes) "
+                    "over_budget: would exceed the bundle byte cap; dropped "
+                    "from bundle without reading"
+                )
+                index_entries.append(
+                    {
+                        "evidence_id": evidence.evidence_id,
+                        "artifact_id": evidence.ref,
+                        "resolved": False,
+                        "reason": "over_budget",
+                    }
+                )
+                continue
             data_path = self._artifact_store._data_path(evidence.ref)
             try:
                 with open(data_path, "rb") as handle:

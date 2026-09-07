@@ -65,6 +65,145 @@ def resolve_infra_executable(name: str, *, what: str) -> str:
     return found
 
 
+# Spec env vars that hijack the spawned process itself (loader / runtime
+# search paths). They apply to our own gdbserver/qemu children as much as
+# to the inferior, so they are rejected outright instead of merged: an
+# operator needing a shim inside a *local* inferior can stage it via
+# run_command, never via the supervised spawn path.
+BLOCKED_TARGET_ENV = frozenset(
+    {
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "LD_CONFIG",
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "RUBYLIB",
+        "PERL5LIB",
+        "NODE_PATH",
+    }
+)
+
+# Bytes retained per drained stream; enough for triage, bounded against a
+# chattering inferior filling the runtime volume via handle metadata.
+TARGET_DRAIN_CAP_BYTES = 1 << 20
+
+
+def validate_target_env(env: Optional[Mapping[str, Any]]) -> Dict[str, str]:
+    """Reject loader-hijack variables in a target spec env mapping."""
+    merged: Dict[str, str] = {}
+    for key, value in dict(env or {}).items():
+        name = str(key)
+        if name.upper() in BLOCKED_TARGET_ENV:
+            raise TargetError(
+                f"spec env blocks '{name}': loader/runtime search paths "
+                "cannot be set on supervised spawns"
+            )
+        merged[name] = str(value)
+    return merged
+
+
+def drain_stream_to_buffer(
+    stream: Any, store: List[bytes], cap_bytes: int = TARGET_DRAIN_CAP_BYTES
+) -> None:
+    """Drain one pipe to a bounded tail buffer (daemon-thread entry)."""
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            store.append(chunk)
+            while sum(map(len, store)) > cap_bytes:
+                store.pop(0)
+    except (ValueError, OSError):
+        pass
+
+
+def start_output_drains(handle: TargetHandle) -> None:
+    """Attach bounded drain threads to a freshly spawned handle.process.
+
+    Raw byte tails live on a private ``handle._drain_tails`` attribute (never
+    in ``metadata`` so ``to_dict`` stays JSON-safe); :func:`reap_output_drains`
+    collapses them to capped text on stop.
+    """
+    process = handle.process
+    if process is None:
+        return
+    tails: Dict[str, List[bytes]] = {"stdout": [], "stderr": []}
+    threads: List[threading.Thread] = []
+    for attr, key in (("stdout", "stdout"), ("stderr", "stderr")):
+        stream = getattr(process, attr, None)
+        if stream is None:
+            continue
+        thread = threading.Thread(
+            target=drain_stream_to_buffer,
+            args=(stream, tails[key]),
+            name=f"pao-target-drain-{handle.target_id}-{key}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+    handle._drain_tails = tails  # type: ignore[attr-defined]
+    handle._drain_threads = threads  # type: ignore[attr-defined]
+
+
+def reap_output_drains(handle: TargetHandle, *, keep_chars: int = 8192) -> None:
+    """Join drain threads and publish a capped text tail into metadata."""
+    tails = getattr(handle, "_drain_tails", None)
+    threads = getattr(handle, "_drain_threads", None) or []
+    for thread in threads:
+        thread.join(timeout=2.0)
+    if not isinstance(tails, dict):
+        return
+    text: Dict[str, str] = {}
+    for key in ("stdout", "stderr"):
+        raw = b"".join(tails.get(key, []))[-TARGET_DRAIN_CAP_BYTES:]
+        text[key] = raw.decode("utf-8", errors="replace")[-keep_chars:]
+    handle.metadata["output_tail"] = text
+
+
+_killpg = getattr(os, "killpg", None)
+_getpgid = getattr(os, "getpgid", None)
+_SIGKILL = getattr(signal, "SIGKILL", signal.SIGTERM)
+
+
+def kill_process_tree(process: subprocess.Popen) -> None:
+    """Terminate a supervised process *and* its children.
+
+    All target spawns use ``start_new_session=True``, so the child PID is
+    the process-group leader on POSIX: ``killpg`` reaps forked grandchildren
+    that a bare ``terminate()`` would orphan. Windows falls back to
+    ``taskkill /T`` for the same tree semantics. (``getattr`` lookups keep
+    this importable/type-clean on platforms without ``killpg``.)
+    """
+    try:
+        if os.name == "posix" and _killpg is not None and _getpgid is not None:
+            try:
+                _killpg(_getpgid(process.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                process.wait(timeout=5.0)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                _killpg(_getpgid(process.pid), _SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        else:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=15.0,
+            )
+    finally:
+        try:
+            process.kill()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
 PARSER_VERSION = "1"
 TARGET_CREATE_SCHEMA = "pao.target-create.v1"
 TARGET_LIST_SCHEMA = "pao.target-list.v1"

@@ -66,7 +66,10 @@ from paomcp.tools.backends.heap_snapshots import (
 
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 from paomcp.tools.backends.heap_technique_catalog import technique_hints_for
-from paomcp.tools.backends.heap_technique_context import resolve_top_chunk
+from paomcp.tools.backends.heap_technique_context import (
+    budgeted_read,
+    resolve_top_chunk,
+)
 
 # ----------------------------------------------------------------------
 # glibc malloc_chunk parsing
@@ -492,7 +495,7 @@ class GlibcHeapCorruption:
             mappings=_mappings,
             profile=profile,
             top_chunk=top_chunk,
-            read=self.bins._read_bytes,
+            read=budgeted_read(self.bins._read_bytes),
         )
 
         return build_backend_response(

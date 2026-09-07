@@ -48,7 +48,11 @@ class CommandsAliasedGroup(click.Group):
         self._used_commands = []
         # get all commands
         cmd_folder = os.path.join(_PAOCLI_DIR_NAME, "commands")
-        for filename in os.listdir(cmd_folder):
+        try:
+            entries = os.listdir(cmd_folder)
+        except OSError:
+            entries = []
+        for filename in entries:
             if filename.endswith(".py") and filename.startswith("cmd_"):
                 self._all_commands.append(filename[4:-3])
         if len(self._all_commands) == 0:
@@ -79,22 +83,37 @@ class CommandsAliasedGroup(click.Group):
         return tuple(self._used_commands)
 
     def get_command(self, ctx, cmd_name):
+        # Exact match first: `d` must not explode into debug+doctor.
+        if cmd_name in self._used_commands:
+            return self._load_command(ctx, cmd_name)
         matches = [x for x in self._used_commands if x.startswith(cmd_name)]
         if not matches:
             return None
         elif len(matches) == 1:
-            try:
-                mod = __import__(
-                    "paocli.commands.cmd_{}".format(matches[0]), None, None, ["cli"]
-                )
-            except ImportError:
-                raise
-            return mod.cli
+            return self._load_command(ctx, matches[0])
         else:
             ctx.fail(
                 "\033[31mpaocli --> Too many matches: %s\033[0m"
                 % ", ".join(sorted(matches))
             )
+
+    @staticmethod
+    def _load_command(ctx, name):
+        # One broken cmd_*.py must not kill the whole CLI: surface the
+        # import error only when that command is actually invoked.
+        try:
+            mod = __import__("paocli.commands.cmd_{}".format(name), None, None, ["cli"])
+        except ImportError as exc:
+            import click as _click
+
+            @_click.command(name=name)
+            def _broken():
+                ctx.abort(
+                    "paocli --> Command '{}' failed to load: {}".format(name, exc)
+                )
+
+            return _broken
+        return mod.cli
 
 
 class Environment:

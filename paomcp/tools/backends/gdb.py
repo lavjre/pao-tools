@@ -619,7 +619,9 @@ class GdbController:
 
         drained = self.drain_async(timeout_sec=timeout_sec)
         responses.extend(drained.get("responses", []))
-        success = (not error_found) and drained.get("success", True)
+        # An empty drain reports success with no lines; the only honest
+        # signal is the inferior actually being stopped afterwards.
+        success = (not error_found) and self._state == "stopped"
         return {"responses": responses, "success": success, "state": self._state}
 
     def get_context(self, context_type: str) -> Dict[str, Any]:
@@ -639,10 +641,13 @@ class GdbController:
         result = self.execute_mi_command(
             f"-file-exec-and-symbols {self.quote_mi_argument(filepath)}"
         )
-        # Change working directory for relative paths during debugging
-        dirname = os.path.dirname(filepath) or "."
-        self.execute_mi_command(f"-environment-cd {self.quote_mi_argument(dirname)}")
         if result["success"]:
+            # Change working directory for relative paths during debugging.
+            # Only on success: a failed load must not side-effect the cwd.
+            dirname = os.path.dirname(filepath) or "."
+            self.execute_mi_command(
+                f"-environment-cd {self.quote_mi_argument(dirname)}"
+            )
             self._clear_stop_records()
             self._state = "stopped"
         # Ensure returned state reflects any updates
@@ -667,9 +672,16 @@ class GdbController:
         if result["success"]:
             self._inferior_pid = pid
             self._state = "stopped"
+            # A new inferior owns a new epoch: clear stale stop records now
+            # instead of waiting for the async thread-group-started notify.
+            self._clear_stop_records()
+            self._ensure_stop_tracking()
+            self._inferior_epoch += 1
         result["state"] = self._state
         result["pid"] = self._inferior_pid
 
+        if not result["success"]:
+            return result, []
         context = []
         context.append(self.get_context("backtrace"))
         context.append(self.get_context("heap"))

@@ -177,9 +177,8 @@ class LibcIdentifier:
             )
             bases.setdefault(base, []).append(name)
         consistent = len(bases) == 1 and len(matched) >= 2
-        insufficient = len(matched) == 1 and not bases or len(matched) < 2 and matched
-        # Recompute insufficient cleanly: one match at most and every
-        # matched base agrees (trivially -- there's only one).
+        # One match at most and every matched base agrees (trivially --
+        # there is only one).
         insufficient = len(matched) == 1
         inconsistent = len(bases) > 1
         base_value: Optional[int]
@@ -328,7 +327,7 @@ class LibcIdentifier:
     # ------------------------------------------------------------------
     # one_gadget
     # ------------------------------------------------------------------
-    _OFFSET_LINE = re.compile(r"^(0x[0-9a-fA-F]+)\s+(.*)$")
+    _OFFSET_LINE = re.compile(r"^\s*(0x[0-9a-fA-F]+)\s+(.*)$")
 
     @classmethod
     def parse_one_gadget_output(cls, text: str) -> List[Dict[str, Any]]:

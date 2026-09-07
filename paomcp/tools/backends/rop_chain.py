@@ -961,6 +961,10 @@ class ChainValidator:
                 f"unsupported export format {format!r}; expected one of "
                 f"{CHAIN_EXPORT_FORMATS}"
             )
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name):
+            raise ChainValidatorError(
+                f"variable_name must be a plain identifier, got {variable_name!r}"
+            )
         canonical_arch = self._builder._canonical_arch(arch)
         try:
             pointer_bytes = self._builder._pointer_bytes(canonical_arch)

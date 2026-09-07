@@ -30,6 +30,11 @@ _BTF_TYPE = "<III"
 _BTF_MEMBER = "<III"
 _BTF_TYPE_SIZE = 12
 _BTF_MEMBER_SIZE = 12
+# A vlen above this is not a real type (the kernel caps BTF_MAX_VLEN far
+# lower in practice); reject instead of letting one record skip the rest
+# of the section and desync every later type id.
+MAX_BTF_VLEN = 8192
+MAX_BTF_TYPES = 1 << 20
 
 # info bit packing.
 _BTF_INFO_KIND_MASK = 0x1F << 24
@@ -229,10 +234,17 @@ class BtfFile:
                 )
             name_off, info, size_or_type = unpack_from(_BTF_TYPE, data, pos)
             type_id += 1
+            if type_id > MAX_BTF_TYPES:
+                raise BtfError("BTF type count exceeds the parse cap")
             kind = (info & _BTF_INFO_KIND_MASK) >> _BTF_INFO_KIND_SHIFT
             vlen = info & _BTF_INFO_VLEN_MASK
             kind_flag = bool(info & _BTF_KIND_FLAG)
             name = cls._resolve_name(strings, name_off)
+            if vlen > MAX_BTF_VLEN:
+                raise BtfError(
+                    f"BTF vlen {vlen} at type id {type_id} exceeds the "
+                    f"{MAX_BTF_VLEN} cap"
+                )
 
             if kind in _STRUCT_LIKE_KINDS:
                 members = cls._parse_members(
@@ -262,6 +274,10 @@ class BtfFile:
                     name=name,
                     size_bytes=size_or_type,
                     vlen=vlen,
+                )
+            if pos + _BTF_TYPE_SIZE + extra > type_end:
+                raise BtfError(
+                    f"BTF type id {type_id} (vlen {vlen}) overruns the type section"
                 )
             types.append(type_record)
             pos += _BTF_TYPE_SIZE + extra

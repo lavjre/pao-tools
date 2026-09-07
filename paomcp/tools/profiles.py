@@ -220,10 +220,19 @@ def suggest_profile_for_target(
     ``pwn``; default -> ``full``. Every result carries a one-line reason.
     """
     blob = f"{filename}\n{mappings_hint}\n{goal}".lower()
-    if any(
-        k in blob
-        for k in ("firmware", ".bin", "squashfs", "uboot", "openwrt", "uimage", "trx")
-    ):
+    firmware_strong = (
+        "firmware",
+        "squashfs",
+        "uboot",
+        "openwrt",
+        "uimage",
+        "trx",
+        "cramfs",
+        "ubifs",
+    )
+    # ".bin" alone is too generic (firmware, raw dumps, misc blobs) to
+    # trigger on, so it is deliberately not a marker.
+    if any(k in blob for k in firmware_strong):
         return {"profile": "firmware", "reason": "firmware blob markers matched"}
     if any(
         k in blob

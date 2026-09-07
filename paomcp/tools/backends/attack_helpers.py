@@ -156,6 +156,79 @@ class GlibcAttackHelper:
             warnings=None,
         )
 
+    def _capture_pre_snapshot(
+        self,
+        *,
+        request: str,
+        schema: str,
+        snapshot_name: str,
+        base_parsed: Dict[str, Any],
+        seed_responses: List[Dict[str, Any]],
+        max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_TCACHE_BIN,
+        cancellation_check: Optional[Callable[[], None]] = None,
+    ) -> Tuple[Optional[str], List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Capture the named pre-apply snapshot; hard-fail pass-through.
+
+        Returns ``(snapshot_id, raw_responses, error_response)``. When the
+        snapshot cannot be captured, ``error_response`` is a ready
+        ``snapshot_failed`` envelope and the caller must return it *without
+        writing*: an apply without its structural ledger plus revert anchor
+        is not an apply.
+        """
+        raw_responses = list(seed_responses)
+        try:
+            snapshot = self.history.capture_heap_snapshot(
+                name=snapshot_name,
+                max_chunks_per_bin=max_chunks_per_bin,
+                cancellation_check=cancellation_check,
+            )
+        except Exception as exc:
+            return (
+                None,
+                raw_responses,
+                build_backend_response(
+                    request,
+                    parsed={
+                        **base_parsed,
+                        "verdict": "snapshot_failed",
+                        "reason": f"pre-apply snapshot raised {type(exc).__name__}: {exc}",
+                        "snapshot_id": None,
+                        "verify": None,
+                        "revert": None,
+                    },
+                    raw_responses=raw_responses,
+                    state=self.gdb.get_state(),
+                    parser_version=PARSER_VERSION,
+                ),
+            )
+        raw_responses.append(snapshot)
+        snap_parsed = snapshot.get("parsed") or {}
+        snapshot_id = snap_parsed.get("snapshot_id")
+        if snapshot_id is None:
+            return (
+                None,
+                raw_responses,
+                build_backend_response(
+                    request,
+                    parsed={
+                        **base_parsed,
+                        "verdict": "snapshot_failed",
+                        "reason": (
+                            "pre-apply snapshot could not be captured "
+                            f"(verdict={snap_parsed.get('verdict')!r}); refusing "
+                            "to write without the revert anchor"
+                        ),
+                        "snapshot_id": None,
+                        "verify": None,
+                        "revert": None,
+                    },
+                    raw_responses=raw_responses,
+                    state=self.gdb.get_state(),
+                    parser_version=PARSER_VERSION,
+                ),
+            )
+        return snapshot_id, raw_responses, None
+
     # ------------------------------------------------------------------
     # tcache-poisoning
     # ------------------------------------------------------------------
@@ -451,22 +524,20 @@ class GlibcAttackHelper:
             )
 
         # -- apply -----------------------------------------------------
-        raw_responses: List[Dict[str, Any]] = [tcache]
         snapshot_id: Optional[str] = None
+        raw_responses: List[Dict[str, Any]] = [tcache]
         if snapshot_before:
-            snapshot = self.history.capture_heap_snapshot(
-                name=f"pre-poison-{hex(victim)}",
+            snapshot_id, raw_responses, snapshot_error = self._capture_pre_snapshot(
+                request=request,
+                schema=ATTACK_TCACHE_POISON_SCHEMA,
+                snapshot_name=f"pre-poison-{hex(victim)}",
+                base_parsed=base_parsed,
+                seed_responses=[tcache],
                 max_chunks_per_bin=max_chunks_per_bin,
                 cancellation_check=cancellation_check,
             )
-            raw_responses.append(snapshot)
-            snap_parsed = snapshot.get("parsed") or {}
-            snapshot_id = snap_parsed.get("snapshot_id")
-            if snapshot_id is None:
-                warnings.append(
-                    "named pre-poison snapshot could not be captured "
-                    f"(verdict={snap_parsed.get('verdict')!r})"
-                )
+            if snapshot_error is not None:
+                return snapshot_error
 
         # Route through the patch-recording wrapper (``PwndbgTools.write_``
         # ``memory``) when one is wired, so the poison lands in the same
@@ -772,16 +843,20 @@ class GlibcAttackHelper:
                 parser_version=PARSER_VERSION,
                 warnings=warnings or None,
             )
-        raw_responses: List[Dict[str, Any]] = [fastbins]
         snapshot_id: Optional[str] = None
+        raw_responses: List[Dict[str, Any]] = [fastbins]
         if snapshot_before:
-            snapshot = self.history.capture_heap_snapshot(
-                name=f"pre-fastbin-poison-{hex(victim)}",
+            snapshot_id, raw_responses, snapshot_error = self._capture_pre_snapshot(
+                request=request,
+                schema=ATTACK_FASTBIN_POISON_SCHEMA,
+                snapshot_name=f"pre-fastbin-poison-{hex(victim)}",
+                base_parsed=base_parsed,
+                seed_responses=[fastbins],
                 max_chunks_per_bin=max_chunks_per_bin,
                 cancellation_check=cancellation_check,
             )
-            raw_responses.append(snapshot)
-            snapshot_id = (snapshot.get("parsed") or {}).get("snapshot_id")
+            if snapshot_error is not None:
+                return snapshot_error
         writer = (
             self.patch_recorder if self.patch_recorder is not None else self.debugger
         )
@@ -798,7 +873,8 @@ class GlibcAttackHelper:
                 parsed={
                     **base_parsed,
                     "verdict": "write_failed",
-                    "reason": write_result.get("error"),
+                    "reason": write_result.get("error")
+                    or (write_result.get("parsed") or {}).get("error"),
                     "snapshot_id": snapshot_id,
                     "verify": None,
                     "revert": None,
@@ -809,16 +885,39 @@ class GlibcAttackHelper:
                 warnings=warnings or None,
             )
         write_parsed = write_result.get("parsed") or {}
+        actual_hex = write_parsed.get("actual_hex")
+        if actual_hex is not None:
+            raw_after = int.from_bytes(bytes.fromhex(actual_hex), byteorder)
+            decoded_after = (
+                raw_after ^ (victim_user >> 12) if safe_linking_enabled else raw_after
+            )
+        else:
+            decoded_after = None
         return build_backend_response(
             request,
             parsed={
                 **base_parsed,
                 "verdict": "applied",
                 "snapshot_id": snapshot_id,
-                "verify": {"writer_verified": bool(write_parsed.get("verified"))},
+                "verify": {
+                    "writer_verified": bool(write_parsed.get("verified")),
+                    "actual_hex": actual_hex,
+                    "decoded_after": decoded_after,
+                    "semantic_match": decoded_after == target_chunk,
+                    "note": (
+                        "decoded_after is the PROTECT_PTR-decoded fd re-read "
+                        "after the write; semantic_match confirms it decodes "
+                        "to the target chunk"
+                    ),
+                },
                 "revert": {
                     "original_hex": write_parsed.get("original_hex"),
                     "address": hex(victim_user),
+                    "patch_id": write_parsed.get("patch_id"),
+                    "how": (
+                        "restore by writing original_hex back via the "
+                        "write_memory tool at this address"
+                    ),
                     "revertible": bool(write_parsed.get("revertible")),
                 },
                 "write_plan": write_plan,
@@ -939,15 +1038,19 @@ class GlibcAttackHelper:
                 parser_version=PARSER_VERSION,
                 warnings=warnings or None,
             )
-        raw_responses: List[Dict[str, Any]] = []
         snapshot_id: Optional[str] = None
+        raw_responses: List[Dict[str, Any]] = []
         if snapshot_before:
-            snapshot = self.history.capture_heap_snapshot(
-                name=f"pre-spirit-{hex(fake_chunk)}",
+            snapshot_id, raw_responses, snapshot_error = self._capture_pre_snapshot(
+                request=request,
+                schema=ATTACK_HOUSE_OF_SPIRIT_SCHEMA,
+                snapshot_name=f"pre-spirit-{hex(fake_chunk)}",
+                base_parsed=base_parsed,
+                seed_responses=[],
                 cancellation_check=cancellation_check,
             )
-            raw_responses.append(snapshot)
-            snapshot_id = (snapshot.get("parsed") or {}).get("snapshot_id")
+            if snapshot_error is not None:
+                return snapshot_error
         writer = (
             self.patch_recorder if self.patch_recorder is not None else self.debugger
         )
@@ -964,7 +1067,8 @@ class GlibcAttackHelper:
                 parsed={
                     **base_parsed,
                     "verdict": "write_failed",
-                    "reason": write_result.get("error"),
+                    "reason": write_result.get("error")
+                    or (write_result.get("parsed") or {}).get("error"),
                     "snapshot_id": snapshot_id,
                     "verify": None,
                     "revert": None,
@@ -975,16 +1079,30 @@ class GlibcAttackHelper:
                 warnings=warnings or None,
             )
         write_parsed = write_result.get("parsed") or {}
+        staged_hex = write_parsed.get("actual_hex")
         return build_backend_response(
             request,
             parsed={
                 **base_parsed,
                 "verdict": "staged",
                 "snapshot_id": snapshot_id,
-                "verify": {"writer_verified": bool(write_parsed.get("verified"))},
+                "verify": {
+                    "writer_verified": bool(write_parsed.get("verified")),
+                    "actual_hex": staged_hex,
+                    "semantic_match": staged_hex == header_hex,
+                    "note": (
+                        "semantic_match confirms the re-read header bytes "
+                        "equal the staged fake header"
+                    ),
+                },
                 "revert": {
                     "original_hex": write_parsed.get("original_hex"),
                     "address": hex(fake_chunk),
+                    "patch_id": write_parsed.get("patch_id"),
+                    "how": (
+                        "restore by writing original_hex back via the "
+                        "write_memory tool at this address"
+                    ),
                     "revertible": bool(write_parsed.get("revertible")),
                 },
                 "write_plan": write_plan,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Mapping, Optional
 
 from fastmcp import Context, FastMCP
@@ -32,6 +33,28 @@ _WORKSPACE_PATH_KEYS = (
 _QEMU_FILE_FLAGS = ("-drive", "-kernel", "-initrd")
 
 
+def _realpath_contained(path: str, *, workspace_root: str, kind: str) -> str:
+    """Re-check a resolved path after symlink resolution.
+
+    Lexical containment (``..``) is not enough: ``/workspace/link`` may
+    point at ``/etc``, so ``/workspace/link/passwd`` passes the lexical
+    check but opens outside. ``realpath`` resolves what exists (parents
+    included) and the containment test runs again on the result.
+    """
+    root_real = os.path.realpath(workspace_root)
+    path_real = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([path_real, root_real]) == root_real
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError(
+            f"{kind} resolves outside the configured workspace "
+            f"(symlink escape): '{path}'"
+        )
+    return path
+
+
 def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
     """Rewrite host-side target paths into the workspace namespace.
 
@@ -46,11 +69,14 @@ def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
         value = contained.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
             continue
-        contained[key] = resolve_workspace_path(
+        resolved = resolve_workspace_path(
             str(value),
             workspace_root=workspace_root,
             require_exists=False,
             kind=key,
+        )
+        contained[key] = _realpath_contained(
+            resolved, workspace_root=workspace_root, kind=key
         )
     extra = contained.get("qemu_extra_args")
     if isinstance(extra, str):
@@ -86,21 +112,26 @@ def _contain_qemu_file_operand(flag: str, value: str, *, workspace_root: str) ->
         for part in parts:
             name, sep, val = part.partition("=")
             if sep and name.strip().lower() == "file" and val.strip():
-                val = resolve_workspace_path(
+                resolved = resolve_workspace_path(
                     val.strip(),
                     workspace_root=workspace_root,
                     require_exists=False,
                     kind="qemu drive file",
                 )
-                rebuilt.append(f"{name}={val}")
+                rebuilt.append(
+                    f"{name}={_realpath_contained(resolved, workspace_root=workspace_root, kind='qemu drive file')}"
+                )
             else:
                 rebuilt.append(part)
         return ",".join(rebuilt)
-    return resolve_workspace_path(
+    resolved = resolve_workspace_path(
         value,
         workspace_root=workspace_root,
         require_exists=False,
         kind=f"qemu {flag} path",
+    )
+    return _realpath_contained(
+        resolved, workspace_root=workspace_root, kind=f"qemu {flag} path"
     )
 
 

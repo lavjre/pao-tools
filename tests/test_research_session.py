@@ -167,6 +167,7 @@ class TestHypotheses:
         assert set(HYPOTHESIS_STATES) == {
             "proposed",
             "supported",
+            "confirmed",
             "rejected",
             "unknown",
         }

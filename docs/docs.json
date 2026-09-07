@@ -98,7 +98,8 @@
 							"tool-reference/artifacts",
 							"tool-reference/python",
 							"tool-reference/repositories",
-							"tool-reference/decompiler"
+							"tool-reference/decompiler",
+							"tool-reference/generated-tools"
 						]
 					}
 				]

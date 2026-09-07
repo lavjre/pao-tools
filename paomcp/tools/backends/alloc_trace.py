@@ -101,27 +101,20 @@ class AllocTraceManager:
                 raise RuntimeError(f"at most {MAX_TRACES} concurrent alloc traces")
             trace_id = uuid.uuid4().hex[:12]
             bps: List[Dict[str, Any]] = []
+            failed: Optional[Dict[str, Any]] = None
             for sym in wanted:
-                created = self.debugger.create_breakpoint(location=sym)
+                try:
+                    created = self.debugger.create_breakpoint(location=sym)
+                except Exception as exc:
+                    created = {"success": False, "error": str(exc)}
                 if not created.get("success"):
                     for prev in bps:
                         try:
                             self.debugger.delete_breakpoint(int(prev["number"]))
                         except Exception:
                             pass
-                    return build_backend_response(
-                        f"start_alloc_trace {sym}",
-                        parsed={
-                            "schema": ALLOC_TRACE_START_SCHEMA,
-                            "supported": False,
-                            "verdict": "unresolvable",
-                            "reason": str(created.get("error") or "breakpoint failed"),
-                            "symbols": wanted,
-                        },
-                        raw_responses=[created],
-                        state=self.gdb.get_state(),
-                        parser_version=PARSER_VERSION,
-                    )
+                    failed = created
+                    break
                 record = (created.get("parsed") or {}).get("breakpoint") or {}
                 bps.append(
                     {
@@ -129,6 +122,20 @@ class AllocTraceManager:
                         "symbol": sym,
                         "last_hits": 0,
                     }
+                )
+            if failed is not None:
+                return build_backend_response(
+                    f"start_alloc_trace {sym}",
+                    parsed={
+                        "schema": ALLOC_TRACE_START_SCHEMA,
+                        "supported": False,
+                        "verdict": "unresolvable",
+                        "reason": str(failed.get("error") or "breakpoint failed"),
+                        "symbols": wanted,
+                    },
+                    raw_responses=[failed],
+                    state=self.gdb.get_state(),
+                    parser_version=PARSER_VERSION,
                 )
             trace = {
                 "trace_id": trace_id,
@@ -224,30 +231,49 @@ class AllocTraceManager:
         trace_id: str,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        self._require_live()
+        # No live-guard here on purpose: breakpoints are debugger-side, so a
+        # dead inferior must not make them unremovable.
         with self._lock:
             trace = self._traces.get(trace_id)
             if trace is None:
                 raise ValueError(f"unknown trace_id: {trace_id!r}")
             deleted: List[int] = []
+            orphaned: List[int] = []
             for bp in trace["breakpoints"]:
                 try:
                     res = self.debugger.delete_breakpoint(int(bp["number"]))
                     if res.get("success"):
                         deleted.append(int(bp["number"]))
+                    else:
+                        orphaned.append(int(bp["number"]))
                 except Exception:
-                    pass
+                    orphaned.append(int(bp["number"]))
             trace["stopped"] = True
+            if orphaned:
+                # Keep the trace so a later stop can retry the leftovers;
+                # dropping it would orphan live breakpoints silently.
+                trace["breakpoints"] = [
+                    bp for bp in trace["breakpoints"] if int(bp["number"]) in orphaned
+                ]
+                verdict = "partial"
+            else:
+                verdict = "stopped"
+                self._traces.pop(trace_id, None)
             summary = {
                 "schema": ALLOC_TRACE_STOP_SCHEMA,
                 "supported": True,
-                "verdict": "stopped",
+                "verdict": verdict,
                 "trace_id": trace_id,
                 "deleted_breakpoints": deleted,
+                "orphaned_breakpoints": orphaned,
                 "event_count": len(trace["events"]),
                 "symbols": trace["symbols"],
             }
-            self._traces.pop(trace_id, None)
+            if orphaned:
+                summary["reason"] = (
+                    "some breakpoints could not be deleted; retry "
+                    "stop_alloc_trace to finish cleanup"
+                )
         return build_backend_response(
             "stop_alloc_trace",
             parsed=summary,

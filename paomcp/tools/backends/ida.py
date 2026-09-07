@@ -53,8 +53,26 @@ def _with_debug_extension(url: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(query)))
 
 
+def _json_size(value: Any) -> int:
+    """Best-effort serialized size: dict key counts lie, bytes do not."""
+    try:
+        import json as _json
+
+        return len(_json.dumps(value, default=str).encode("utf-8"))
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    try:
+        return len(value)  # type: ignore[arg-type]
+    except TypeError:
+        return 0
+
+
 def _check_code_budget(value: Any, *, kind: str) -> None:
-    size = len(value) if isinstance(value, (str, bytes, list, dict)) else 0
+    size = _json_size(value)
     if size > MAX_IDA_CODE_BYTES:
         raise ValueError(
             f"IDA {kind} payload is {size} bytes, exceeding the "
@@ -138,6 +156,15 @@ def _clamp_timeout(value: Optional[float]) -> float:
     return min(fvalue, MAX_IDA_TIMEOUT_SEC)
 
 
+# Mutating bridge calls are quota-counted per database id: py_eval runs
+# arbitrary IDC/Python inside IDA and dbg_write patches a live process, so
+# an unbounded agent loop must hit a legible wall instead of marching on.
+# The bounds are generous (a workday of interactive use); the counters are
+# exposed in status() so the wall never surprises.
+IDA_MUTATING_METHODS = frozenset({"py_eval", "dbg_write"})
+MAX_IDA_MUTATING_CALLS_PER_DB = 1024
+
+
 class IdaProMCP:
     """Thin JSON-RPC client for a running ida-pro-mcp / idalib-mcp server."""
 
@@ -153,6 +180,39 @@ class IdaProMCP:
         self.model_schema_version = "1"
         self._session: Optional[requests.Session] = None
         self._session_lock = threading.Lock()
+        self._mutating_counts: Dict[str, int] = {}
+        self._mutating_lock = threading.Lock()
+
+    def _check_mutating_quota(
+        self, method: str, params: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Count one mutating call; return a rejection envelope past the cap."""
+        if method not in IDA_MUTATING_METHODS:
+            return None
+        database = str((params or {}).get("database") or "default")
+        with self._mutating_lock:
+            used = self._mutating_counts.get(database, 0)
+            if used >= MAX_IDA_MUTATING_CALLS_PER_DB:
+                return build_backend_response(
+                    f"ida/{method}",
+                    parsed=None,
+                    raw_responses=[],
+                    state="idle",
+                    success=False,
+                    error=(
+                        f"IDA mutating-call quota exhausted for database "
+                        f"'{database}' ({used}/{MAX_IDA_MUTATING_CALLS_PER_DB}); "
+                        "restart the server for a fresh budget"
+                    ),
+                    error_type="IdaQuotaError",
+                )
+            self._mutating_counts[database] = used + 1
+        return None
+
+    def mutating_usage(self) -> Dict[str, int]:
+        """Per-database mutating-call counts (also surfaced in status())."""
+        with self._mutating_lock:
+            return dict(self._mutating_counts)
 
     def _session_client(self) -> requests.Session:
         """Shared keep-alive session (one TCP/TLS handshake, not one per call)."""
@@ -197,6 +257,9 @@ class IdaProMCP:
                 error=f"IDA method '{method}' is not in the curated bridge subset",
                 error_type="ValueError",
             )
+        rejected = self._check_mutating_quota(method, params)
+        if rejected is not None:
+            return rejected
         payload = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -281,6 +344,11 @@ class IdaProMCP:
             "methods": sorted(PASSTHROUGH_METHODS),
             "probes": probes,
             "reasons": reasons,
+            "mutating_quota": {
+                "cap_per_db": MAX_IDA_MUTATING_CALLS_PER_DB,
+                "methods": sorted(IDA_MUTATING_METHODS),
+                "usage": self.mutating_usage(),
+            },
         }
 
     # Typed helpers (token-lean defaults, database-scoped like idalib-mcp).
@@ -577,7 +645,15 @@ class IdaProMCP:
     ) -> Dict[str, Any]:
         """Publish a debugger crash finding as an IDA comment (via py_eval)."""
         if not signal or not str(signal).strip():
-            raise ValueError("signal cannot be empty")
+            return build_backend_response(
+                "ida/publish_crash",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error="signal cannot be empty",
+                error_type="ValueError",
+            )
         try:
             ea = self._parse_address(address)
         except ValueError as exc:
@@ -622,7 +698,15 @@ class IdaProMCP:
     ) -> Dict[str, Any]:
         """Publish free text as an IDA comment at an address (via py_eval)."""
         if not text or not str(text).strip():
-            raise ValueError("text cannot be empty")
+            return build_backend_response(
+                "ida/publish_note",
+                parsed=None,
+                raw_responses=[],
+                state="idle",
+                success=False,
+                error="text cannot be empty",
+                error_type="ValueError",
+            )
         try:
             ea = self._parse_address(address)
         except ValueError as exc:

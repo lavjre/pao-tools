@@ -847,10 +847,10 @@ class GadgetIndex:
         if not bad_bytes:
             return False
         if pointer_bytes is None:
-            # Without a pointer width we cannot honestly check; be
-            # conservative and report False, and the caller receives a
-            # note explaining the arch was unresolved.
-            return False
+            # Without a pointer width we cannot honestly check: fail closed
+            # (treat as bad) so an unknown arch never passes a tainted
+            # address through the filter.
+            return True
         try:
             encoded = int(address).to_bytes(pointer_bytes, "little", signed=False)
         except OverflowError:
@@ -1017,6 +1017,7 @@ class GadgetIndex:
         analyzed, mnemonic_index, _ = self._load_analyzed(binary_path, arch, image_base)
         full_candidates: Optional[List[Dict[str, Any]]] = None
         results: List[Dict[str, Any]] = []
+        used_addresses: set = set()
         for step_index, (raw_step, pattern) in enumerate(zip(steps, compiled_steps)):
             match: Optional[Dict[str, Any]] = None
             if pattern is None:
@@ -1024,8 +1025,10 @@ class GadgetIndex:
                     full_candidates = self._filter_and_sort(
                         analyzed, normalized_bad_bytes, prefer_shortest
                     )
-                if full_candidates:
-                    match = full_candidates[0]
+                for gadget in full_candidates:
+                    if gadget["address"] not in used_addresses:
+                        match = gadget
+                        break
             else:
                 token = self._leading_mnemonic_for_anchor(raw_step)
                 if token is not None and token in mnemonic_index:
@@ -1041,9 +1044,13 @@ class GadgetIndex:
                         )
                     candidates = full_candidates
                 for gadget in candidates:
+                    if gadget["address"] in used_addresses:
+                        continue
                     if pattern.search(gadget["instruction_text"]):
                         match = gadget
                         break
+            if match is not None:
+                used_addresses.add(match["address"])
             results.append(
                 {
                     "step_index": step_index,

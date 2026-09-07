@@ -216,8 +216,9 @@ class TestBadByteFilter:
         )
 
     def test_missing_pointer_width_is_conservative(self) -> None:
-        # Without a pointer width we cannot honestly encode; report False.
-        assert not GadgetIndex._address_contains_bad_byte(0x0A, None, [0x0A])
+        # Without a pointer width we cannot honestly encode: fail closed so
+        # an unknown arch never passes a tainted address through the filter.
+        assert GadgetIndex._address_contains_bad_byte(0x0A, None, [0x0A])
 
     def test_normalizes_hex_strings(self) -> None:
         normalized = GadgetIndex._normalize_bad_bytes(["0x0a", "0x20", 0x0D])

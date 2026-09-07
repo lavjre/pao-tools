@@ -19,6 +19,8 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
+from pwnlib.util.cyclic import de_bruijn  # type: ignore[import-untyped]
+
 from paomcp.operations import OperationCancelledError
 from paomcp.tools.backends.foundation import build_backend_response
 
@@ -35,10 +37,15 @@ MAX_CONFIGURED_INPUT_LEN = 1024 * 1024
 MAX_TOTAL_CORPUS_BYTES = 256 * 1024 * 1024
 INPUT_STRATEGIES = ("zeros", "ones", "cyclic", "bitflip")
 
+# Must match find_cyclic_offset defaults (n=4, a-z) so offsets transfer
+# from fuzz inputs to triage without silent mismatch.
+_CYCLIC_ALPHABET = b"abcdefghijklmnopqrstuvwxyz"
+_CYCLIC_N = 4
 
-def _cyclic_byte(index: int) -> int:
-    alphabet = b"abcdefghijklmnopqrstuvwxyz"
-    return alphabet[index % len(alphabet)]
+
+def _cyclic_pattern(length: int) -> bytes:
+    """De Bruijn prefix shared with the crash-triage offset engine."""
+    return bytes(de_bruijn(_CYCLIC_ALPHABET, _CYCLIC_N))[:length]
 
 
 def generate_inputs(
@@ -71,7 +78,7 @@ def generate_inputs(
         elif strategy == "ones":
             data = b"\xff" * length
         elif strategy == "cyclic":
-            data = bytes(_cyclic_byte(i) for i in range(length))
+            data = _cyclic_pattern(length)
         else:  # bitflip
             base = bytearray(rng.choice(seeds))
             if len(base) < length:
@@ -209,8 +216,14 @@ class FuzzBatch:
                 digest = self._crash_digest(
                     tools, crash_id, parsed, cancellation_check=cancellation_check
                 )
+                if digest is None:
+                    # Snapshot failed: the crash is real but undedupable.
+                    # Report it under an unknown-novel bucket instead of
+                    # silently marking novel=false (a false "clean").
+                    digest = f"unknown:{record['signal']}:{input_path}"
+                    record["digest_unresolved"] = True
                 record["digest"] = digest
-                if digest is not None and digest not in seen_digests:
+                if digest not in seen_digests:
                     seen_digests[digest] = record
                     record["novel"] = True
                 else:

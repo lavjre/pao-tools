@@ -154,14 +154,17 @@ class CrashCompareMixin:
                 ),
             ),
             (
-                "top_frame",
+                # Full normalized stack (capped at 5 upstream): two crashes
+                # sharing only a libc top frame (raise/abort) but diverging
+                # below it are different families, not the same bug.
+                "stack_top5",
                 (
-                    left_frames[0]
+                    left_frames[:5]
                     if isinstance(left_frames, list) and left_frames
                     else None
                 ),
                 (
-                    right_frames[0]
+                    right_frames[:5]
                     if isinstance(right_frames, list) and right_frames
                     else None
                 ),

@@ -74,6 +74,7 @@ from paomcp.tools.backends.heap_technique_context import (
     _iter_fastbin_chunks,
     _iter_regular_chunks,
     _iter_tcache_chunks,
+    budgeted_read,
     resolve_top_chunk,
 )
 from paomcp.tools.backends.heap_technique_detectors import DETECTORS
@@ -217,6 +218,20 @@ class GlibcTechniqueAnalyzer:
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Run the detector registry over one live heap snapshot."""
+        if mmap_max_mappings <= 0 or mmap_max_mappings > 64:
+            raise ValueError(
+                "mmap_max_mappings must be between 1 and 64, "
+                f"got {mmap_max_mappings!r}"
+            )
+        if mmap_max_bytes <= 0 or mmap_max_bytes > 64 * 1024 * 1024:
+            raise ValueError(
+                f"mmap_max_bytes must be between 1 and 64MiB, got {mmap_max_bytes!r}"
+            )
+        if max_overlap_chunks <= 0 or max_overlap_chunks > 2048:
+            raise ValueError(
+                "max_overlap_chunks must be between 1 and 2048, "
+                f"got {max_overlap_chunks!r}"
+            )
         classification, mappings, profile, component_status = self._prepare_context(
             cancellation_check
         )
@@ -325,7 +340,7 @@ class GlibcTechniqueAnalyzer:
             max_overlap_chunks=max_overlap_chunks,
         )
 
-        read: ReadFn = self.bins._read_bytes
+        read: ReadFn = budgeted_read(self.bins._read_bytes)
         findings: List[Dict[str, Any]] = []
         for name in names:
             if cancellation_check is not None:
@@ -388,12 +403,18 @@ class GlibcTechniqueAnalyzer:
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
         """Scan for live pointers into the user ranges of freed chunks."""
-        if max_bytes <= 0:
-            raise ValueError(f"max_bytes must be positive, got {max_bytes!r}")
-        if max_mappings <= 0:
-            raise ValueError(f"max_mappings must be positive, got {max_mappings!r}")
-        if max_chunks <= 0:
-            raise ValueError(f"max_chunks must be positive, got {max_chunks!r}")
+        if max_bytes <= 0 or max_bytes > 64 * 1024 * 1024:
+            raise ValueError(
+                f"max_bytes must be between 1 and 64MiB, got {max_bytes!r}"
+            )
+        if max_mappings <= 0 or max_mappings > 64:
+            raise ValueError(
+                f"max_mappings must be between 1 and 64, got {max_mappings!r}"
+            )
+        if max_chunks <= 0 or max_chunks > 8192:
+            raise ValueError(
+                f"max_chunks must be between 1 and 8192, got {max_chunks!r}"
+            )
 
         classification, mappings, profile, component_status = self._prepare_context(
             cancellation_check

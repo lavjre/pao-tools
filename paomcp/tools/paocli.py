@@ -18,6 +18,30 @@ from paomcp.tools.common import (
     run_blocking,
 )
 
+# Staged exploit scripts accumulate one per paocli call; keep the newest
+# handful so a long session cannot fill the runtime volume.
+_MAX_KEPT_EXP_SCRIPTS = 16
+
+
+def _janitor_exp_scripts(runtime_dir: str) -> None:
+    """Delete all but the newest exp_*.py scripts in a runtime dir."""
+    try:
+        candidates = sorted(
+            (
+                os.path.join(runtime_dir, name)
+                for name in os.listdir(runtime_dir)
+                if name.startswith("exp_") and name.endswith(".py")
+            ),
+            key=lambda path: os.path.getmtime(path),
+        )
+    except OSError:
+        return
+    for stale in candidates[:-_MAX_KEPT_EXP_SCRIPTS]:
+        try:
+            os.unlink(stale)
+        except OSError:
+            pass
+
 
 def register(mcp: FastMCP) -> None:
     @mcp.tool()
@@ -55,32 +79,38 @@ def register(mcp: FastMCP) -> None:
 
         runtime_dir = session.runtime_dir
         os.makedirs(runtime_dir, exist_ok=True)
+        _janitor_exp_scripts(runtime_dir)
         script_path = os.path.join(runtime_dir, f"exp_{int(time.time() * 1000)}.py")
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(file)
 
+        # Spawn outside the session lock: Popen + interpreter startup is
+        # slow and must not stall sendinput/checkoutput on other threads.
+        cmd = ["uv", "run", script_path, "debug", resolved_binary]
+        if argument:
+            cmd.extend(shlex.split(argument))
+        pipe = PaoPipe(
+            command=cmd,
+            cwd=os.path.dirname(resolved_binary),
+            env={"PYTHONUNBUFFERED": "1"},
+        )
+        driver_pid = pipe.get_pid()
+
         replaced = False
-        driver_pid: Optional[int] = None
         old_pipe: Optional[PaoPipe] = None
         with services.paopipe_lock:
-            old_pipe = services.paopipe_sessions.get(session.session_id)
-            if old_pipe and old_pipe.is_alive():
+            old_pipe = services.paopipe_sessions.pop(session.session_id, None)
+            if old_pipe is not None:
                 replaced = True
-            services.paopipe_sessions.pop(session.session_id, None)
-
-            cmd = ["uv", "run", script_path, "debug", resolved_binary]
-            if argument:
-                cmd.extend(shlex.split(argument))
-            pipe = PaoPipe(
-                command=cmd,
-                cwd=os.path.dirname(resolved_binary),
-                env={"PYTHONUNBUFFERED": "1"},
-            )
             services.paopipe_sessions[session.session_id] = pipe
-            driver_pid = pipe.get_pid()
-            session.driver_pid = driver_pid
 
-        if old_pipe and old_pipe.is_alive():
+        # Drain the evicted driver before killing it so its unread output
+        # is reported instead of dropped with the pipe.
+        replaced_output = ""
+        replaced_events: List[Dict[str, Any]] = []
+        if old_pipe is not None:
+            replaced_output = old_pipe.release()
+            replaced_events = old_pipe.release_events()
             old_pipe.kill()
 
         def _collect_startup() -> Tuple[Dict[str, Any], str, Any]:
@@ -110,6 +140,9 @@ def register(mcp: FastMCP) -> None:
                 "alive": pipe.is_alive(),
                 "pid": driver_pid,
                 "replaced": replaced,
+                "replaced_output": replaced_output[-4000:],
+                "replaced_output_truncated": len(replaced_output) > 4000,
+                "replaced_event_count": len(replaced_events),
             },
         }
 
@@ -241,6 +274,10 @@ def register(mcp: FastMCP) -> None:
             label: Human tag for the note/evidence description.
             max_chars: Cap output chars stored in the note.
         """
+        # Upper bound matches the research note cap so the link below
+        # cannot fail on body size after draining the pipe.
+        if max_chars <= 0 or max_chars > 32768:
+            raise ValueError("max_chars must be between 1 and 32768")
         services = get_services(ctx)
         resolved_session_id, pipe = get_paopipe(services, session_id=session_id)
         with services.paopipe_lock:
@@ -249,7 +286,10 @@ def register(mcp: FastMCP) -> None:
             alive = pipe.is_alive()
             exit_code = pipe.get_exit_code()
             driver_pid = pipe.get_pid()
-        body = (output or "")[-max(512, max_chars) :]
+            pipe_stats = pipe.stats()
+        full_output = output or ""
+        truncated = len(full_output) > max_chars
+        body = full_output[-max_chars:]
         tag = (label or "paocli").strip() or "paocli"
 
         def _link() -> Dict[str, Any]:
@@ -278,8 +318,10 @@ def register(mcp: FastMCP) -> None:
             "research_session_id": research_session_id,
             "alive": alive,
             "exit_code": exit_code,
-            "output_chars": len(output or ""),
+            "output_chars": len(full_output),
+            "output_truncated": truncated,
             "event_count": len(events),
+            "pipe_stats": pipe_stats,
             **linked,
         }
 

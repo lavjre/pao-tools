@@ -12,12 +12,17 @@ import os
 from starlette.middleware import Middleware
 
 from paomcp.http.auth import BearerAuthMiddleware, check_remote_bind
-from paomcp.server import mcp
+from paomcp.server import create_mcp
 
 logger = logging.getLogger(__name__)
 
 _ASGI_HOST = os.environ.get("PAO_ASGI_HOST", "127.0.0.1")
+_ASGI_PROFILE = os.environ.get("PAO_PROFILE", "full")
 _token = check_remote_bind(_ASGI_HOST, what="ASGI app")
+logger.info("ASGI app tool profile: %s", _ASGI_PROFILE)
+# Built via the factory (not the import-time full global) so PAO_PROFILE
+# actually narrows the listed surface here, matching run_http/run_stdio.
+mcp = create_mcp(profile=_ASGI_PROFILE)
 _middleware = (
     [Middleware(BearerAuthMiddleware, token=_token)] if _token is not None else []
 )

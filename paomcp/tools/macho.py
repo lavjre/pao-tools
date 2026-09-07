@@ -16,7 +16,13 @@ from typing import Any, Dict, Optional
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
-from paomcp.tools.backends.macho import FatMachOError, MachOError, load_macho
+from paomcp.tools.backends.macho import (
+    FatMachOError,
+    MachOError,
+    load_macho,
+    parse_fat_macho,
+    parse_macho_slice,
+)
 from paomcp.tools.common import catch_errors, get_services, run_blocking
 from paomcp.utils.paths import resolve_workspace_file
 
@@ -26,8 +32,26 @@ def _macho_envelope(binary_path: str) -> Dict[str, Any]:
     try:
         macho = load_macho(binary_path)
     except FatMachOError as exc:
-        # A universal (fat) binary IS Mach-O -- report it as such, with the
-        # slice unparsed, rather than folding it into the not_macho verdict.
+        # A universal (fat) binary IS Mach-O: inventory the slices and
+        # parse the first one so callers get segments/dylibs/uuid instead
+        # of a bare recognized-but-unparsed verdict.
+        try:
+            with open(binary_path, "rb") as handle:
+                blob = handle.read()
+            slices = parse_fat_macho(blob)
+            first = parse_macho_slice(blob, 0) if slices else None
+        except (FatMachOError, MachOError, OSError) as inner:
+            return {
+                "success": True,
+                "command": "analyze_macho",
+                "parsed": {
+                    "binary_path": binary_path,
+                    "verdict": "fat_macho",
+                    "is_macho": True,
+                    "reason": f"{exc}; slice inventory failed: {inner}",
+                    "slice": None,
+                },
+            }
         return {
             "success": True,
             "command": "analyze_macho",
@@ -36,6 +60,39 @@ def _macho_envelope(binary_path: str) -> Dict[str, Any]:
                 "verdict": "fat_macho",
                 "is_macho": True,
                 "reason": str(exc),
+                "slice_count": len(slices),
+                "slices": [
+                    {
+                        "cpu_name": s.cpu_name,
+                        "cputype": s.cputype,
+                        "offset": s.offset,
+                        "size": s.size,
+                    }
+                    for s in slices
+                ],
+                "slice": (
+                    {
+                        "index": 0,
+                        "cpu_name": first.cpu_name,
+                        "filetype_name": first.filetype_name,
+                        "entry": first.entry,
+                        "uuid": first.uuid,
+                        "segments": [
+                            {
+                                "name": segment.name,
+                                "vmaddr": segment.vmaddr,
+                                "vmsize": segment.vmsize,
+                                "initprot": segment.initprot,
+                            }
+                            for segment in first.segments
+                        ],
+                        "dylibs": first.dylibs,
+                        "links_libsystem": first.links_libsystem,
+                        "links_libsystem_malloc": first.links_libsystem_malloc,
+                    }
+                    if first is not None
+                    else None
+                ),
             },
         }
     except MachOError as exc:
@@ -114,8 +171,8 @@ def register(mcp: FastMCP) -> None:
         whether ``libSystem.B.dylib`` / ``libsystem_malloc`` are linked),
         ``__TEXT``/``__DATA`` segments, and the build UUID.  Non-Mach-O input
         yields an honest ``not_macho`` verdict rather than an exception;
-        a universal (fat) image yields ``fat_macho`` (recognized, slice
-        unparsed).
+        a universal (fat) image yields ``fat_macho`` with a slice inventory
+        plus the parsed first slice.
         """
         services = get_services(ctx)
         resolved = resolve_workspace_file(

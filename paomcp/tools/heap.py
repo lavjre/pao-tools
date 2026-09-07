@@ -892,6 +892,7 @@ def register(mcp: FastMCP) -> None:
         session_id: str,
         symbols: Optional[List[str]] = None,
         max_events: int = 10000,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Start opt-in malloc/free call-count tracing (breakpoints, bounded).
@@ -957,6 +958,7 @@ def register(mcp: FastMCP) -> None:
     async def stop_alloc_trace(
         session_id: str,
         trace_id: str,
+        idempotency_key: Optional[str] = None,
         ctx: Context = CurrentContext(),
     ) -> Dict[str, Any]:
         """Stop an alloc trace and remove its breakpoints.

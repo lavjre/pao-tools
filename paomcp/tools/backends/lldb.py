@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LLDB_CLOSE_TIMEOUT_SEC = 2.0
 
+# Reader-side cap: a dumping inferior (e.g. `memory read` without bounds)
+# must not grow the line buffer without limit. popleft under the same lock
+# that guards _consumed so the index never points past the deque.
+_LINES_CAP = 100_000
+
 # Matches "(lldb) " / "(pwndbg-lldb) " style prompts.
 _PROMPT_PATTERN = re.compile(r"^\([^()\r\n]*\)\s*$")
 # lldb command echo prefix, e.g. "(lldb) process launch".
@@ -213,7 +218,18 @@ class LldbController:
         for raw_line in stream:
             text = raw_line.decode("utf-8", "replace").rstrip("\r\n")
             with self._lines_lock:
-                self._lines.append(text)
+                lines = self._lines
+                if not hasattr(lines, "append"):
+                    continue
+                lines.append(text)
+                overflow = len(lines) - _LINES_CAP
+                if overflow > 0:
+                    if isinstance(lines, deque):
+                        for _ in range(overflow):
+                            lines.popleft()
+                    else:
+                        del lines[:overflow]
+                    self._consumed = max(0, self._consumed - overflow)
 
     def _drain_new_lines(self) -> List[str]:
         """Return and consume all lines the reader has appended so far."""
@@ -465,6 +481,16 @@ class LldbController:
         return _shape_mi_result(command, translated, result)
 
     def drain_async(
+        self, timeout_sec: float = 0.0, max_rounds: int = 10
+    ) -> Dict[str, Any]:
+        # Shares _cmd_lock with _execute: a concurrent poll must not eat a
+        # command's output or stop markers mid-flight.
+        with self._cmd_lock:
+            return self._drain_async_locked(
+                timeout_sec=timeout_sec, max_rounds=max_rounds
+            )
+
+    def _drain_async_locked(
         self, timeout_sec: float = 0.0, max_rounds: int = 10
     ) -> Dict[str, Any]:
         responses: List[Dict[str, Any]] = []
@@ -748,7 +774,27 @@ class LldbController:
 
     def get_selected_frame_mi(self, timeout_sec: float = 7.0) -> Dict[str, Any]:
         result = self._execute("frame info", timeout_sec=timeout_sec)
-        result["payload"] = {"frame": {}}
+        frame: Optional[Dict[str, Any]] = None
+        for line in self._console_lines(result):
+            match = _FRAME_LINE_PATTERN.match(line.strip())
+            if match:
+                frame = {
+                    "level": match.group(1),
+                    "addr": f"0x{match.group(2)}",
+                    "func": match.group(3) or "",
+                    "args": [],
+                }
+                break
+        if frame is None:
+            result["success"] = False
+            result["error"] = (
+                "frame info produced no parseable frame; the inferior may "
+                "have no selected frame"
+            )
+            result["type"] = "LldbParseError"
+            result["payload"] = {"frame": None}
+        else:
+            result["payload"] = {"frame": frame}
         return result
 
     def set_breakpoint(
@@ -768,8 +814,38 @@ class LldbController:
             parts.append("--one-shot true")
         return self._execute(" ".join(parts))
 
+    _BP_HEADER_PATTERN = re.compile(r"^(\d+):\s+.*?(?:locations\s*=\s*(\d+))?\s*$")
+    _BP_HIT_PATTERN = re.compile(r"hit count\s*=\s*(\d+)")
+
     def list_breakpoints(self) -> Dict[str, Any]:
-        return self._execute("breakpoint list")
+        result = self._execute("breakpoint list")
+        table: List[Dict[str, Any]] = []
+        current: Optional[Dict[str, Any]] = None
+        for line in self._console_lines(result):
+            text = line.strip()
+            if text.lower().startswith("no breakpoints"):
+                current = None
+                continue
+            header = self._BP_HEADER_PATTERN.match(text)
+            if header:
+                current = {
+                    "number": header.group(1),
+                    "locations": int(header.group(2) or 0),
+                    "hit_count": 0,
+                    "exp": text,
+                }
+                table.append(current)
+                continue
+            if current is not None:
+                hit = self._BP_HIT_PATTERN.search(text)
+                if hit:
+                    current["hit_count"] += int(hit.group(1))
+        result["payload"] = {
+            "BreakpointTable": {"body": table},
+            "breakpoints": table,
+            "count": len(table),
+        }
+        return result
 
     def delete_breakpoint(self, number: int) -> Dict[str, Any]:
         return self._execute(f"breakpoint delete {number}")
@@ -999,8 +1075,21 @@ def _translate_mi_command(
     if token == "-stack-info-frame":
         return "frame info"
     if token == "-data-disassemble":
-        start = _unquote(rest) if rest else None
-        return f"disassemble {start}" if start else "disassemble"
+        # MI shape: -data-disassemble -s START -e END [-- MODE]. Preserve the
+        # range instead of gluing every token into one bogus address.
+        start: Optional[str] = None
+        end: Optional[str] = None
+        parts = rest.split()
+        for index, part in enumerate(parts):
+            if part == "-s" and index + 1 < len(parts):
+                start = _unquote(parts[index + 1])
+            elif part == "-e" and index + 1 < len(parts):
+                end = _unquote(parts[index + 1])
+        if start is not None and end is not None:
+            return f"disassemble -s {start} -e {end}"
+        if start is not None:
+            return f"disassemble -s {start} -c 10"
+        return "disassemble"
     if token.startswith("-gdb-set"):
         return None  # settings are applied during initialize; ignore stray sets
     if token.startswith("-gdb-show"):

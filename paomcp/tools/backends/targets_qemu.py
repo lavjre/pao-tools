@@ -36,6 +36,8 @@ from paomcp.tools.backends.targets_base import (
     TargetSpec,
     TargetState,
     resolve_infra_executable,
+    start_output_drains,
+    validate_target_env,
 )
 from paomcp.tools.backends.targets_gdbserver import (
     _attach_via_gdb_remote,
@@ -48,13 +50,18 @@ from paomcp.tools.backends.targets_local import (
 
 
 def _qemu_flag_name(entry: str) -> str:
-    """Normalize one extra arg to its flag name (``-netdev x`` -> ``-netdev``)."""
+    """Normalize one extra arg to its flag name (``-netdev x`` -> ``-netdev``).
+
+    Whitespace splits first so ``-virtfs local,path=/,...`` normalizes to
+    ``-virtfs`` (not ``-virtfs local,path``); only ``=`` then separates a
+    glued value (``-netdev=...``).
+    """
     text = entry.strip()
-    for separator in ("=",):
-        head, sep, _ = text.partition(separator)
-        if sep and head.startswith("-"):
-            return head.lower()
-    return text.split()[0].lower() if text else ""
+    first = text.split()[0] if text else ""
+    head, sep, _ = first.partition("=")
+    if sep and head.startswith("-"):
+        return head.lower()
+    return first.lower()
 
 
 BLOCKED_QEMU_FLAGS = frozenset(
@@ -64,6 +71,11 @@ BLOCKED_QEMU_FLAGS = frozenset(
         "-netdev",
         "-nic",
         "-net",
+        "-chardev",
+        "-monitor",
+        "-qmp",
+        "-incoming",
+        "-loadvm",
         "-daemonize",
         "-daemon",
     }
@@ -134,7 +146,7 @@ class QemuUserProvider:
             argv += ["-g", str(port), binary] + list(spec.argv or [])
             handle._set_state(TargetState.STARTING)
             env_full = dict(os.environ)
-            env_full.update(spec.env or {})
+            env_full.update(validate_target_env(spec.env))
             try:
                 handle.process = subprocess.Popen(
                     argv,
@@ -145,6 +157,7 @@ class QemuUserProvider:
                     env=env_full,
                     start_new_session=True,
                 )
+                start_output_drains(handle)
                 handle.host = host
                 handle.port = port
                 handle.metadata["run_argv"] = argv
@@ -288,7 +301,7 @@ class QemuSystemProvider:
             argv = self._build_argv(spec, host, port)
             handle._set_state(TargetState.STARTING)
             env_full = dict(os.environ)
-            env_full.update(spec.env or {})
+            env_full.update(validate_target_env(spec.env))
             try:
                 handle.process = subprocess.Popen(
                     argv,
@@ -299,6 +312,7 @@ class QemuSystemProvider:
                     env=env_full,
                     start_new_session=True,
                 )
+                start_output_drains(handle)
                 handle.host = host
                 handle.port = port
                 handle.metadata["run_argv"] = argv

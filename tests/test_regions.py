@@ -126,18 +126,27 @@ class TestScanJitRegions:
         assert parsed["supported"] is True
         assert parsed["component_status"] == {"mappings": True}
         regions = parsed["regions"]
-        assert len(regions) == 3
+        assert len(regions) == 2
         assert [r["size"] for r in regions] == sorted(
             (r["size"] for r in regions), reverse=True
         )
-        # [anon] rwxp (0x4000), anonymous "" r-xp (0x2000), [vdso] (0x1000)
+        # [anon] rwxp (0x4000), anonymous "" r-xp (0x2000). [vdso] is
+        # executable but kernel-mapped, never JIT spray space.
         assert regions[0]["permissions"] == "rwxp"
         assert regions[1]["anonymous"] is True
         assert regions[1]["permissions"] == "r-xp"
-        assert regions[2]["permissions"] == "r-xp"
-        assert parsed["summary"]["count"] == 3
-        assert parsed["summary"]["total_bytes"] == 0x4000 + 0x2000 + 0x1000
+        assert parsed["summary"]["count"] == 2
+        assert parsed["summary"]["total_bytes"] == 0x4000 + 0x2000
         assert parsed["summary"]["largest_region"] == regions[0]
+
+    def test_vdso_is_not_a_jit_candidate(self):
+        heap, _ = build_regions()
+        tracker = JitRegionTracker(heap)
+
+        regions, _raw, _warnings, _available = tracker._read_maps(None)
+        vdso = next(r for r in regions if r["start"] == 0x7FFF00000000)
+        assert vdso["executable"] is True
+        assert vdso["jit_candidate"] is False
 
     def test_per_region_flags(self):
         heap, _ = build_regions()
@@ -374,7 +383,7 @@ class TestFacadeRouting:
         parsed = heap.scan_jit_regions()["parsed"]
         assert parsed["schema"] == JIT_REGIONS_SCHEMA
         assert parsed["verdict"] == "listed"
-        assert parsed["summary"]["count"] == 3
+        assert parsed["summary"]["count"] == 2
 
     def test_facade_classify_memory_region_routes(self):
         heap, _ = build_regions()

@@ -27,7 +27,18 @@ class TestDetectOs:
 
     def test_linux_platforms(self):
         assert detect_os("linux") == "linux"
-        assert detect_os("win32") == "linux"
+        assert detect_os("win32") == "windows"
+
+    def test_windows_only_portable_checks_required(self):
+        report = run_doctor(
+            platform="win32",
+            which_fn=_which({"uv": "C:/uv.exe", "git": "C:/git.exe"}),
+            env=_env(),
+        )
+        assert report["os"] == "windows"
+        names = {c["name"]: c for c in report["checks"]}
+        assert names["gdb"]["required"] is False
+        assert names["pwndbg"]["required"] is False
 
 
 class TestRunDoctor:

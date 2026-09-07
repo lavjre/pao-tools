@@ -16,7 +16,18 @@ from __future__ import annotations
 
 import copy
 import logging
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 from paomcp.tools.backends.debugger import DebuggerOperations
 from paomcp.tools.backends.foundation import (
@@ -243,15 +254,18 @@ class MuslAnalyzer:
             "maplen": word >> 12,
         }
 
-    def _read_size_classes(self, classes_addr: Optional[int]) -> Optional[List[int]]:
+    def _read_size_classes(
+        self, classes_addr: Optional[int], byteorder: str = "little"
+    ) -> Optional[List[int]]:
         """Read the 48-entry stride table (units of 16 bytes)."""
         if classes_addr is None:
             return None
         raw, err = self._read_bytes(classes_addr, 2 * MUSL_SIZECLASS_COUNT)
         if err is not None or len(raw) < 2 * MUSL_SIZECLASS_COUNT:
             return None
+        order = byteorder if byteorder in ("little", "big") else "little"
         return [
-            int.from_bytes(raw[i * 2 : i * 2 + 2], "little")
+            int.from_bytes(raw[i * 2 : i * 2 + 2], order)  # type: ignore[arg-type]
             for i in range(MUSL_SIZECLASS_COUNT)
         ]
 
@@ -285,9 +299,10 @@ class MuslAnalyzer:
                 "Cannot parse musl chunks without a resolved pointer width; "
                 f"target_profile returned pointer_bits={pointer_bits!r}"
             )
-        byteorder = (
-            profile.get("byteorder")
-            if profile.get("byteorder") in ("little", "big")
+        raw_order = profile.get("byteorder")
+        byteorder: Literal["little", "big"] = (
+            cast(Literal["little", "big"], raw_order)
+            if raw_order in ("little", "big")
             else "little"
         )
         size_sz = pointer_bits // 8
@@ -319,10 +334,10 @@ class MuslAnalyzer:
                 target, None, checks, mappings, "unreadable header"
             )
         check("header_readable", True, 8)
-        offset = int.from_bytes(header[6:8], "little")
+        offset = int.from_bytes(header[6:8], byteorder)
         index = header[5] & 31
         if header[4]:
-            offset32 = int.from_bytes(header[0:4], "little")
+            offset32 = int.from_bytes(header[0:4], byteorder)
             if offset32 <= 0xFFFF:
                 check("wide_offset_sane", False, offset32)
                 return self._chunk_verdict(
@@ -338,7 +353,7 @@ class MuslAnalyzer:
             return self._chunk_verdict(
                 target, None, checks, mappings, "unreadable group"
             )
-        group_meta = int.from_bytes(group_meta_raw, "little")
+        group_meta = int.from_bytes(group_meta_raw, byteorder)
         check("group_meta_readable", True, f"{group_meta:#x}")
 
         meta_size = context["meta_size"]
@@ -350,7 +365,7 @@ class MuslAnalyzer:
             )
         check("meta_readable", True, meta_size)
         mem_off = context["mem_off"]
-        meta_mem = int.from_bytes(meta_raw[mem_off : mem_off + size_sz], "little")
+        meta_mem = int.from_bytes(meta_raw[mem_off : mem_off + size_sz], byteorder)
         if meta_mem != group_base:
             check(
                 "meta_mem_matches_group", False, [f"{meta_mem:#x}", f"{group_base:#x}"]
@@ -361,7 +376,7 @@ class MuslAnalyzer:
         check("meta_mem_matches_group", True, f"{group_base:#x}")
 
         bits_off = 3 * size_sz + 8
-        bits = int.from_bytes(meta_raw[bits_off : bits_off + 8], "little")
+        bits = int.from_bytes(meta_raw[bits_off : bits_off + 8], byteorder)
         fields = self._decode_meta_bits(bits, byteorder)
         last_idx, sizeclass, maplen = (
             fields["last_idx"],
@@ -375,8 +390,8 @@ class MuslAnalyzer:
             )
         check("index_in_range", True, [index, last_idx])
 
-        avail = int.from_bytes(meta_raw[3 * size_sz : 3 * size_sz + 4], "little")
-        freed = int.from_bytes(meta_raw[3 * size_sz + 4 : 3 * size_sz + 8], "little")
+        avail = int.from_bytes(meta_raw[3 * size_sz : 3 * size_sz + 4], byteorder)
+        freed = int.from_bytes(meta_raw[3 * size_sz + 4 : 3 * size_sz + 8], byteorder)
         bit = 1 << index
         if (avail & bit) and (freed & bit):
             check("masks_consistent", False, [f"{avail:#x}", f"{freed:#x}"])
@@ -388,7 +403,7 @@ class MuslAnalyzer:
         area_base = group_meta & -4096
         area_raw, area_err = self._read_bytes(area_base, 8)
         if area_err is None and len(area_raw) >= 8:
-            area_check = int.from_bytes(area_raw[:8], "little")
+            area_check = int.from_bytes(area_raw[:8], byteorder)
             if area_check != secret:
                 check("meta_area_secret", False, f"{area_check:#x}")
                 return self._chunk_verdict(
@@ -401,7 +416,7 @@ class MuslAnalyzer:
                 target, None, checks, mappings, "unreadable meta area"
             )
 
-        classes = self._read_size_classes(context["classes_addr"])
+        classes = self._read_size_classes(context["classes_addr"], byteorder)
         if sizeclass < MUSL_SIZECLASS_COUNT:
             if classes is None:
                 return self._unresolvable(
@@ -443,7 +458,7 @@ class MuslAnalyzer:
             if reserved >= 5:
                 tail, tail_err = self._read_bytes(end - 4, 4)
                 if tail_err is None and len(tail) == 4 and end - 5 >= target:
-                    reserved = int.from_bytes(tail, "little")
+                    reserved = int.from_bytes(tail, byteorder)
             if reserved <= end - target:
                 nominal = end - reserved - target
         state = "in_use"
@@ -528,6 +543,12 @@ class MuslAnalyzer:
             raise RuntimeError(f"unsupported pointer width {pointer_bits!r}")
         void_star = 8 if pointer_bits == 64 else 4
         expected_meta = 40 if pointer_bits == 64 else 28
+        raw_order = profile.get("byteorder")
+        byteorder: Literal["little", "big"] = (
+            cast(Literal["little", "big"], raw_order)
+            if raw_order in ("little", "big")
+            else "little"
+        )
         if missing or context.get("meta_size") != expected_meta:
             return self._unresolvable(
                 "list_musl_groups",
@@ -548,7 +569,7 @@ class MuslAnalyzer:
                 MUSL_GROUPS_SCHEMA,
                 "meta_area_head unreadable",
             )
-        head = int.from_bytes(area_head_raw, "little")
+        head = int.from_bytes(area_head_raw, byteorder)
         groups: List[Dict[str, Any]] = []
         areas = 0
         corrupted: Optional[str] = None
@@ -558,17 +579,19 @@ class MuslAnalyzer:
             if cancellation_check is not None:
                 cancellation_check()
             if areas >= max_areas or cursor in seen:
+                if cursor in seen and cursor != 0:
+                    corrupted = f"meta_area cycle at {cursor:#x}"
                 break
             seen.add(cursor)
             header, header_err = self._read_bytes(cursor, 16 + void_star)
             if header_err is not None or len(header) < 16 + void_star:
                 corrupted = f"unreadable meta_area at {cursor:#x}"
                 break
-            if int.from_bytes(header[:8], "little") != secret:
+            if int.from_bytes(header[:8], byteorder) != secret:
                 corrupted = f"meta_area secret mismatch at {cursor:#x}"
                 break
-            nxt = int.from_bytes(header[8 : 8 + void_star], "little")
-            nslots = int.from_bytes(header[8 + void_star : 12 + void_star], "little")
+            nxt = int.from_bytes(header[8 : 8 + void_star], byteorder)
+            nslots = int.from_bytes(header[8 + void_star : 12 + void_star], byteorder)
             if nslots <= 0 or nslots > 4096:
                 corrupted = f"implausible nslots {nslots} at {cursor:#x}"
                 break
@@ -584,13 +607,13 @@ class MuslAnalyzer:
                 if len(groups) >= max_groups:
                     break
                 slot = blob[i * meta_size : (i + 1) * meta_size]
-                mem = int.from_bytes(slot[2 * void_star : 3 * void_star], "little")
+                mem = int.from_bytes(slot[2 * void_star : 3 * void_star], byteorder)
                 if mem == 0:
                     continue
                 bits = int.from_bytes(
-                    slot[3 * void_star + 8 : 3 * void_star + 16], "little"
+                    slot[3 * void_star + 8 : 3 * void_star + 16], byteorder
                 )
-                fields = self._decode_meta_bits(bits, "little")
+                fields = self._decode_meta_bits(bits, byteorder)
                 groups.append(
                     {
                         "meta_address": cursor + 16 + void_star + i * meta_size,
@@ -600,10 +623,10 @@ class MuslAnalyzer:
                         "freeable": fields["freeable"],
                         "maplen": fields["maplen"],
                         "avail_mask": int.from_bytes(
-                            slot[3 * void_star : 3 * void_star + 4], "little"
+                            slot[3 * void_star : 3 * void_star + 4], byteorder
                         ),
                         "freed_mask": int.from_bytes(
-                            slot[3 * void_star + 4 : 3 * void_star + 8], "little"
+                            slot[3 * void_star + 4 : 3 * void_star + 8], byteorder
                         ),
                     }
                 )

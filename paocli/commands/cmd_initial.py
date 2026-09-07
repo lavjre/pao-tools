@@ -1,7 +1,14 @@
 import os
 import re
+import shlex
 import sys
 from subprocess import getstatusoutput
+
+
+def _q(path: str) -> str:
+    """Shell-quote one filesystem path (filenames may contain spaces)."""
+    return shlex.quote(str(path))
+
 
 import click
 from pwn import ELF, wget
@@ -79,9 +86,9 @@ def _detect_file(ctx, info):
         else:
             elffile = elffile or f_
     if libcfile:
-        getstatusoutput("chmod +x " + libcfile)
+        getstatusoutput("chmod +x " + _q(libcfile))
         ctx.vlog(_left_str("Detect libc file") + " --->    {}".format(libcfile))
-        status, output = getstatusoutput("./" + libcfile)
+        status, output = getstatusoutput("./" + _q(libcfile))
         if status == 0:
             if "musl" in output:
                 _make_template_exit()  # musl
@@ -91,13 +98,13 @@ def _detect_file(ctx, info):
             ctx.vlog(_left_str("Detect libc version") + " --->    {}".format(glibcinfo))
 
     if ldfile:
-        getstatusoutput("chmod +x " + ldfile)
+        getstatusoutput("chmod +x " + _q(ldfile))
         ctx.vlog(_left_str("Detect ld file") + " --->    {}".format(ldfile))
 
     if elffile:
-        getstatusoutput("chmod +x " + elffile)
+        getstatusoutput("chmod +x " + _q(elffile))
         ctx.vlog(_left_str("Detect binary file") + " --->    {}".format(elffile))
-        os.system("checksec --file " + elffile)
+        os.system("checksec --file " + _q(elffile))
 
     info.libcfile = libcfile
     info.ldfile = ldfile
@@ -119,7 +126,7 @@ def _download_and_patch(ctx, info):
     if not info.libcfile and not info.ldfile:
         _make_template_exit()
 
-    status, output = getstatusoutput("ldd " + info.elffile)
+    status, output = getstatusoutput("ldd " + _q(info.elffile))
     lddoutput = output
     if status != 0:
         ctx.verrlog("ldd error!")
@@ -161,7 +168,7 @@ def _download_and_patch(ctx, info):
         and info.sys_glibcinfo == info.glibcinfo
     ):
         if not info.ldfile and info.sys_ldfile:
-            getstatusoutput("cp -L {} .".format(info.sys_ldfile))
+            getstatusoutput("cp -L {} .".format(_q(info.sys_ldfile)))
             info.ldfile = os.path.split(info.sys_ldfile)[1]
             info.download = 0
 
@@ -180,13 +187,15 @@ def _download_and_patch(ctx, info):
         curfile = "./" + info.elffile
         if curlibc not in lddoutput or curld not in lddoutput:
             # backup
-            cmd = "cp {} {}.bk".format(curfile, curfile)
+            cmd = "cp {} {}.bk".format(_q(curfile), _q(curfile))
             getstatusoutput(cmd)
-            cmd = "patchelf --replace-needed libc.so.6 {} {}".format(curlibc, curfile)
+            cmd = "patchelf --replace-needed libc.so.6 {} {}".format(
+                _q(curlibc), _q(curfile)
+            )
             getstatusoutput(cmd)
             ctx.vlog(_left_str("Exec cmd") + " --->    {}".format(cmd))
 
-            cmd = "patchelf --set-interpreter {} {}".format(curld, curfile)
+            cmd = "patchelf --set-interpreter {} {}".format(_q(curld), _q(curfile))
             getstatusoutput(cmd)
             ctx.vlog(_left_str("Exec cmd") + " --->    {}".format(cmd))
 

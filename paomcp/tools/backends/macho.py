@@ -15,13 +15,15 @@ lets the analyzer decide a binary is an Apple-target userspace process.
 This module mirrors ``btf.py``: a small, table-driven, read-only parser that
 raises a single typed error and never leaks an exception past the loader.
 Both little-endian and byte-swapped (big-endian) images are handled by reading
-the magic in file byte order.  Universal (fat) binaries are recognized by
-:func:`is_macho_magic` but refused by :func:`parse_macho` -- slice extraction
-is out of scope.
+the magic in file byte order.  Universal (fat) binaries get a slice inventory
+via :func:`parse_fat_macho` and first-slice parsing via
+:func:`parse_macho_slice`; :func:`parse_macho` still raises
+:class:`FatMachOError` for fat input, now carrying the slice table.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from struct import unpack_from
@@ -112,9 +114,29 @@ class FatMachOError(MachOError):
     """Raised for a universal (fat) Mach-O image.
 
     A fat image *is* Mach-O -- callers that distinguish it from a non-Mach-O
-    blob can catch this subclass and report ``is_macho=True`` while noting the
-    slice is not parsed.
+    blob can catch this subclass and report ``is_macho=True``.  The message
+    carries the slice inventory; :func:`parse_fat_macho` and
+    :func:`parse_macho_slice` parse it without raising.
     """
+
+
+MAX_FAT_SLICES = 64
+MAX_MACHO_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class FatMachOSlice:
+    """One ``fat_arch`` entry: CPU identity plus the slice window."""
+
+    cputype: int
+    cpusubtype: int
+    offset: int
+    size: int
+    align: int
+
+    @property
+    def cpu_name(self) -> str:
+        return CPU_TYPE_NAMES.get(self.cputype, f"0x{self.cputype:x}")
 
 
 @dataclass(frozen=True)
@@ -194,10 +216,19 @@ def parse_macho(data: bytes) -> MachOFile:
     le = int.from_bytes(raw, "little")
     if le in (MH_MAGIC, MH_MAGIC_64):
         endian, magic = "<", le
+    elif le in (MH_CIGAM, MH_CIGAM_64):
+        # Byte-swapped thin image: fields are big-endian; normalize the
+        # magic to its canonical form for the parsed record.
+        endian, magic = (">", MH_MAGIC) if le == MH_CIGAM else (">", MH_MAGIC_64)
     elif be in (MH_MAGIC, MH_MAGIC_64):
         endian, magic = ">", be
-    elif le in (FAT_MAGIC, FAT_CIGAM):
-        raise FatMachOError("universal (fat) Mach-O: slice parsing not supported")
+    elif le in (FAT_MAGIC, FAT_CIGAM) or be in (FAT_MAGIC, FAT_CIGAM):
+        slices = parse_fat_macho(data)
+        table = ", ".join(f"{s.cpu_name}@0x{s.offset:x}+0x{s.size:x}" for s in slices)
+        raise FatMachOError(
+            f"universal (fat) Mach-O with {len(slices)} slices: {table}; "
+            "parse one slice with parse_macho_slice"
+        )
     else:
         raise MachOError(f"not a Mach-O image: magic 0x{le:08x}")
 
@@ -265,12 +296,89 @@ def parse_macho(data: bytes) -> MachOFile:
     )
 
 
+def parse_fat_macho(data: bytes) -> List[FatMachOSlice]:
+    """List the slices of a universal (fat) Mach-O image.
+
+    ``FAT_MAGIC`` is stored big-endian, ``FAT_CIGAM`` little-endian; the
+    slice table follows the header's own byte order.  Offsets/sizes are
+    validated against the buffer so a crafted table cannot walk off the
+    end; raises :class:`FatMachOError` (a :class:`MachOError`) when the
+    table itself is truncated or absurd.
+    """
+    if len(data) < 8:
+        raise FatMachOError(f"fat Mach-O header truncated: {len(data)} bytes")
+    raw = data[:4]
+    be = int.from_bytes(raw, "big")
+    le = int.from_bytes(raw, "little")
+    # FAT_MAGIC is stored big-endian on disk (lipo); a little-endian read
+    # of those same bytes yields FAT_CIGAM. A FAT_MAGIC little-endian read
+    # means a (nonstandard) LE-stored table.
+    if be == FAT_MAGIC or le == FAT_CIGAM:
+        endian = ">"
+    elif le == FAT_MAGIC:
+        endian = "<"
+    else:
+        raise MachOError("not a fat Mach-O image")
+    from struct import unpack_from as _unpack
+
+    (nfat_arch,) = _unpack(endian + "I", data, 4)
+    if nfat_arch > MAX_FAT_SLICES:
+        raise FatMachOError(
+            f"fat Mach-O claims {nfat_arch} slices (cap {MAX_FAT_SLICES})"
+        )
+    if 8 + nfat_arch * 20 > len(data):
+        raise FatMachOError(
+            f"fat Mach-O slice table ({nfat_arch} entries) overruns the file"
+        )
+    slices: List[FatMachOSlice] = []
+    for index in range(nfat_arch):
+        cputype, cpusubtype, offset, size, align = _unpack(
+            endian + "IIIII", data, 8 + index * 20
+        )
+        if offset + size > len(data) or size == 0:
+            raise FatMachOError(
+                f"fat slice {index} window [0x{offset:x}, +0x{size:x}) "
+                "lies outside the file"
+            )
+        slices.append(
+            FatMachOSlice(
+                cputype=cputype,
+                cpusubtype=cpusubtype,
+                offset=offset,
+                size=size,
+                align=align,
+            )
+        )
+    return slices
+
+
+def parse_macho_slice(data: bytes, index: int = 0) -> MachOFile:
+    """Parse one slice of a universal image (default: the first)."""
+    slices = parse_fat_macho(data)
+    if not slices:
+        raise FatMachOError("fat Mach-O image has no slices")
+    if index < 0 or index >= len(slices):
+        raise FatMachOError(
+            f"slice index {index} out of range for {len(slices)} slices"
+        )
+    window = slices[index]
+    return parse_macho(data[window.offset : window.offset + window.size])
+
+
 def load_macho(path: str) -> MachOFile:
     """Read a Mach-O image from disk and parse it.
 
     Raises :class:`MachOError` for malformed images and :class:`OSError` for
-    I/O failures -- the caller decides how to surface either.
+    I/O failures -- the caller decides how to surface either.  Images over
+    the size cap are refused before reading so a multi-gigabyte blob cannot
+    OOM the parser.
     """
+    size = os.path.getsize(path)
+    if size > MAX_MACHO_BYTES:
+        raise MachOError(
+            f"Mach-O image is {size} bytes, exceeding the "
+            f"{MAX_MACHO_BYTES}-byte cap"
+        )
     with open(path, "rb") as handle:
         return parse_macho(handle.read())
 
@@ -327,10 +435,15 @@ __all__ = [
     "MH_MAGIC_64",
     "MH_FILETYPE_NAMES",
     "FatMachOError",
+    "FatMachOSlice",
+    "MAX_FAT_SLICES",
+    "MAX_MACHO_BYTES",
     "MachOError",
     "MachOFile",
     "MachOSegment",
     "is_macho_magic",
     "load_macho",
+    "parse_fat_macho",
     "parse_macho",
+    "parse_macho_slice",
 ]

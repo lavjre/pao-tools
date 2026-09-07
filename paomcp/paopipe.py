@@ -13,15 +13,22 @@ from typing import Optional, List, Dict, Any, Sequence, Union
 logger = logging.getLogger(__name__)
 
 
+# Queued-output budget: a chattering driver must not grow the pipe queues
+# (and through them the research notes) without bound. Past the cap, text
+# and events are dropped and counted; see stats().
+PIPE_OUTPUT_CAP_BYTES = 16 * 1024 * 1024
+PIPE_EVENTS_CAP = 4096
+
+
 class PaoPipe:
     """
     Simple subprocess I/O pipeline with queued output buffer.
 
-    - Accumulates stdout/stderr into an internal queue
+    - Accumulates stdout/stderr into an internal queue (byte-capped)
     - release() returns accumulated output and clears the queue
     - send(data) writes raw data to stdin (no newline automatically)
     - Detects attach marker lines: 'PAOCLI_ATTACH_RESULT:<json>'
-    - Provides a structured event queue for output/state markers
+    - Provides a structured event queue for output/state markers (capped)
     """
 
     def __init__(
@@ -60,6 +67,11 @@ class PaoPipe:
         self._lock = threading.Lock()
         self._attach_result = None
         self._exit_code: Optional[int] = None
+        self._queued_bytes = 0
+        self._queued_events = 0
+        self._dropped_bytes = 0
+        self._dropped_events = 0
+        self._malformed_control = 0
 
         self._attach_event = threading.Event()
         self._output_event = threading.Event()
@@ -90,7 +102,7 @@ class PaoPipe:
                     self._attach_result = json.loads(payload)
                 self._attach_event.set()
                 self._activity_event.set()
-                self._events.put(
+                self._put_event(
                     {
                         "type": "attached",
                         "ok": bool(
@@ -102,6 +114,8 @@ class PaoPipe:
                     }
                 )
             except Exception:
+                with self._lock:
+                    self._malformed_control += 1
                 pass
             return True
 
@@ -110,13 +124,34 @@ class PaoPipe:
             try:
                 event = json.loads(payload)
                 if isinstance(event, dict):
-                    self._events.put(event)
+                    self._put_event(event)
                     self._output_event.set()
                     self._activity_event.set()
                     return True
             except Exception:
                 pass
+            with self._lock:
+                self._malformed_control += 1
         return False
+
+    def _put_text(self, text: str) -> None:
+        """Queue output text under the byte cap; count what falls off."""
+        size = len(text.encode("utf-8", "replace"))
+        with self._lock:
+            if self._queued_bytes + size > PIPE_OUTPUT_CAP_BYTES:
+                self._dropped_bytes += size
+                return
+            self._queued_bytes += size
+        self._q.put(text)
+
+    def _put_event(self, event: Dict[str, Any]) -> None:
+        """Queue one structured event under the event cap."""
+        with self._lock:
+            if self._queued_events >= PIPE_EVENTS_CAP:
+                self._dropped_events += 1
+                return
+            self._queued_events += 1
+        self._events.put(event)
 
     def _reader(self, pipe, stream: str):
         prefixes = (b"PAOCLI_ATTACH_RESULT:", b"PAO_IPC:")
@@ -128,13 +163,17 @@ class PaoPipe:
             text = decoder.decode(data, final=final)
             if not text:
                 return
-            self._q.put(text)
-            self._events.put({"type": stream, "data": text})
+            self._put_text(text)
+            self._put_event({"type": stream, "data": text})
             self._output_event.set()
             self._activity_event.set()
 
         while True:
-            chunk = os.read(pipe.fileno(), 4096)
+            try:
+                chunk = os.read(pipe.fileno(), 4096)
+            except OSError:
+                # Our own kill() closed the fd from under the blocked read.
+                break
             if not chunk:
                 break
 
@@ -226,7 +265,12 @@ class PaoPipe:
                 chunks.append(self._q.get_nowait())
         except queue.Empty:
             pass
-        return "".join(chunks)
+        text = "".join(chunks)
+        with self._lock:
+            self._queued_bytes = max(
+                0, self._queued_bytes - len(text.encode("utf-8", "replace"))
+            )
+        return text
 
     def release_events(self) -> List[Dict[str, Any]]:
         events: List[Dict[str, Any]] = []
@@ -235,7 +279,22 @@ class PaoPipe:
                 events.append(self._events.get_nowait())
         except queue.Empty:
             pass
+        with self._lock:
+            self._queued_events = max(0, self._queued_events - len(events))
         return events
+
+    def stats(self) -> Dict[str, Any]:
+        """Queue/cap counters: what is held vs what the caps dropped."""
+        with self._lock:
+            return {
+                "queued_bytes": self._queued_bytes,
+                "queued_events": self._queued_events,
+                "dropped_bytes": self._dropped_bytes,
+                "dropped_events": self._dropped_events,
+                "malformed_control_lines": self._malformed_control,
+                "output_capped": self._dropped_bytes > 0,
+                "events_capped": self._dropped_events > 0,
+            }
 
     def get_attach_result(self):
         with self._lock:
@@ -309,3 +368,14 @@ class PaoPipe:
         finally:
             with self._lock:
                 self._alive = False
+            # Close our pipe ends so the reader threads see EOF instead of
+            # hanging on a dead child's open descriptors, then join them.
+            for stream_name in ("stdin", "stdout", "stderr"):
+                stream = getattr(self.proc, stream_name, None)
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            for thread in (self._t_out, self._t_err, self._t_wait):
+                thread.join(timeout=5.0)

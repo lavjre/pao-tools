@@ -48,11 +48,48 @@ def generate_syz_config(
         raise ValueError("ssh_key_path is required (syzkaller SSH key)")
     if not workdir:
         raise ValueError("workdir is required (syzkaller workdir)")
-    forbidden = ("-virtfs", "-net ", "daemonize", "-snapshot=off")
+    allowed_arches = ("amd64", "386", "arm64", "arm", "riscv64", "ppc64le", "s390x")
+    if target_arch not in allowed_arches:
+        raise ValueError(
+            f"target_arch must be one of {list(allowed_arches)}, got {target_arch!r}"
+        )
+    if repro_timeout_seconds <= 0 or repro_timeout_seconds > 3600:
+        raise ValueError("repro_timeout_seconds must be between 1 and 3600")
+    for label, path in (
+        ("kernel_src", kernel_src),
+        ("image_path", image_path),
+        ("ssh_key_path", ssh_key_path),
+        ("workdir", workdir),
+    ):
+        if not os.path.exists(path):
+            raise ValueError(f"{label} does not exist: {path}")
+    host_escape = (
+        "-virtfs",
+        "-fsdev",
+        "-netdev",
+        "-nic",
+        "-net=",
+        "-net ",
+        "-chardev",
+        "-monitor",
+        "-qmp",
+        "-incoming",
+        "-loadvm",
+        "daemonize",
+    )
+    # -snapshot is not an escape, but syzkaller reproductions must persist
+    # to disk; a snapshotted VM silently drops the repro under test.
+    repro_breaking = ("-snapshot",)
     extra = qemu_args or ""
-    for token in forbidden:
-        if token in extra:
+    lowered = extra.lower()
+    for token in host_escape:
+        if token in lowered:
             raise ValueError(f"qemu_args forbids host-escape flag {token!r}")
+    for token in repro_breaking:
+        if token in lowered:
+            raise ValueError(
+                f"qemu_args forbids {token!r}: reproductions must persist to disk"
+            )
     cfg = {
         "target": f"linux/{target_arch}",
         "http": "127.0.0.1:56741",
@@ -108,6 +145,24 @@ def ingest_syz_crash(
             log_text = handle.read(max_bytes)
     assert log_text is not None
     triage = analyze_kernel_oops(log_text=log_text)
+    if not triage.get("success"):
+        # Never mask a triage failure as a triaged crash: surface it so the
+        # caller fixes the log instead of linking an empty finding.
+        return build_backend_response(
+            "ingest_syz_crash",
+            parsed={
+                "schema": SYZ_CRASH_SCHEMA,
+                "supported": False,
+                "verdict": "unresolvable",
+                "reason": str(
+                    triage.get("error") or "kernel-oops triage rejected the log"
+                ),
+                "oops": triage.get("parsed"),
+            },
+            raw_responses=[triage],
+            state="idle",
+            parser_version=PARSER_VERSION,
+        )
     parsed = dict(triage.get("parsed") or {})
     return build_backend_response(
         "ingest_syz_crash",
@@ -116,9 +171,13 @@ def ingest_syz_crash(
             "supported": True,
             "verdict": parsed.get("verdict", "triaged"),
             "fault_kind": parsed.get("fault_kind"),
+            "fault_address": parsed.get("fault_address"),
             "fingerprint": parsed.get("fingerprint"),
             "rip": parsed.get("rip"),
-            "frames": parsed.get("frames") or parsed.get("trace"),
+            "frames": parsed.get("call_trace"),
+            "frame_count": parsed.get("frame_count"),
+            "slab_cache": parsed.get("slab_cache"),
+            "kasan_access": parsed.get("kasan_access"),
             "oops": parsed,
             "next": "link as crash evidence via link_evidence_batch",
         },

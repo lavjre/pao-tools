@@ -515,21 +515,16 @@ class CrashCyclicMixin:
                 candidate = stack_bytes[stack_offset : stack_offset + n]
                 if all(byte in alphabet_set for byte in candidate):
                     candidate_offsets.setdefault(candidate, []).append(stack_offset)
+            # Index via bytes.find (C speed): one lookup per distinct
+            # stack candidate instead of a Python scan of the pattern.
             found_pattern_offsets: Dict[bytes, int] = {}
             if candidate_offsets:
-                for pattern_offset in range(max(0, len(pattern) - n + 1)):
-                    if cancellation_check is not None and not pattern_offset % (
-                        64 * 1024
-                    ):
+                for position, candidate in enumerate(candidate_offsets):
+                    if cancellation_check is not None and not position % 1024:
                         cancellation_check()
-                    candidate = pattern[pattern_offset : pattern_offset + n]
-                    if (
-                        candidate in candidate_offsets
-                        and candidate not in found_pattern_offsets
-                    ):
-                        found_pattern_offsets[candidate] = pattern_offset
-                        if len(found_pattern_offsets) == len(candidate_offsets):
-                            break
+                    offset = pattern.find(candidate)
+                    if offset >= 0:
+                        found_pattern_offsets[candidate] = offset
             stack_base = self._integer(stack.get("address"))
             for candidate, offsets in candidate_offsets.items():
                 found_offset = found_pattern_offsets.get(candidate)

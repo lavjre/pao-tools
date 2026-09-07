@@ -44,6 +44,42 @@ def _byteorder(profile: Mapping[str, Any]) -> Literal["little", "big"]:
     return "little"
 
 
+# Cap on extra live reads one detector pass may issue (einherjar +
+# overlap predecessor headers). Detectors must stay silent past the budget
+# instead of hanging a worker on a 130k-chain heap.
+DETECTOR_MAX_EXTRA_READS = 4096
+
+
+def budgeted_read(read: ReadFn, *, limit: int = DETECTOR_MAX_EXTRA_READS) -> ReadFn:
+    """Wrap a ReadFn with a call budget; exhausted reads report an error."""
+
+    calls = 0
+
+    def _read(address: int, byte_count: int) -> Tuple[bytes, Optional[str]]:
+        nonlocal calls
+        calls += 1
+        if calls > limit:
+            return b"", "detector read budget exhausted"
+        return read(address, byte_count)
+
+    return _read
+
+
+def chunk_header_len(size_sz: int) -> int:
+    """malloc_chunk header length: prev_size + size (2 pointer widths).
+
+    16 bytes on 64-bit, 8 on 32-bit -- never hardcode 16 in detectors.
+    """
+    return 2 * int(size_sz)
+
+
+def size_field_from_header(header: bytes, size_sz: int, byteorder: str) -> int:
+    """Decode the ``size`` field from a chunk header of ``size_sz`` width."""
+    width = int(size_sz)
+    field = header[width : 2 * width]
+    return int.from_bytes(field, byteorder)  # type: ignore[arg-type]
+
+
 def resolve_top_chunk(
     bins: "GlibcBins",
     arenas: "GlibcArenas",
@@ -54,10 +90,10 @@ def resolve_top_chunk(
     """Resolve and read the arena's top chunk header (one bounded read).
 
     The arena's ``top`` field is a *pointer* (malloc_state.top), so the top
-    chunk address is an 8-byte read at ``arena + top_offset`` followed by a
-    16-byte header read at that address.  Returns ``None`` when the layout,
-    the pointer, or the header cannot be resolved -- detectors treat that as
-    "no evidence".
+    chunk address is a pointer-width read at ``arena + top_offset`` followed
+    by a header read (2 pointer widths: 16 on 64-bit, 8 on 32-bit) at that
+    address.  Returns ``None`` when the layout, the pointer, or the header
+    cannot be resolved -- detectors treat that as "no evidence".
     """
     pointer_bits = profile.get("pointer_bits")
     if pointer_bits not in (32, 64):
@@ -77,10 +113,11 @@ def resolve_top_chunk(
     top_address = int.from_bytes(raw, byteorder)
     if top_address == 0:
         return None
-    header, header_err = bins._read_bytes(top_address, 16)
-    if header_err is not None or len(header) < 16:
+    header_len = chunk_header_len(size_sz)
+    header, header_err = bins._read_bytes(top_address, header_len)
+    if header_err is not None or len(header) < header_len:
         return {"address": top_address, "readable": False}
-    size_field = int.from_bytes(header[8:16], byteorder)
+    size_field = size_field_from_header(header, size_sz, byteorder)
     size = size_field & ~SIZE_BITS_MASK
     m = mapping_for(top_address, mappings)
     mapping_end: Optional[int] = None

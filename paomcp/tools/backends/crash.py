@@ -613,6 +613,7 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
                         "integer": integer,
                         "source": "gdb-mi",
                         "attempts": attempts,
+                        "si_code": self._siginfo_code(attempts),
                     }
         return {
             "expression": None,
@@ -620,7 +621,75 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
             "integer": None,
             "source": "gdb-mi",
             "attempts": attempts,
+            "si_code": self._siginfo_code(attempts),
         }
+
+    def _siginfo_code(self, attempts: Dict[str, Any]) -> Optional[int]:
+        """Best-effort ``$_siginfo.si_code`` (1=MAPERR, 2=ACCERR on SIGSEGV)."""
+        result = self.debugger.evaluate_expression("$_siginfo.si_code")
+        attempts["$_siginfo.si_code"] = result
+        if not result.get("success"):
+            return None
+        return self._integer(result.get("parsed", {}).get("value"))
+
+    # si_code values for SIGSEGV/SIGBUS faults (Linux asm-generic/siginfo.h).
+    _SI_MAPERR = 1
+    _SI_ACCERR = 2
+
+    @classmethod
+    def _memory_direction(cls, instruction: Any) -> Optional[str]:
+        """Read/write direction of one faulting instruction (Intel syntax).
+
+        Returns ``"read"`` / ``"write"`` only for unambiguous shapes;
+        anything else (AT&T syntax, unknown mnemonic, missing operands)
+        is ``None`` so callers report ``unknown`` instead of guessing.
+        """
+        if not isinstance(instruction, str):
+            return None
+        text = instruction.strip().lower()
+        if not text or "%" in text:
+            return None
+        mnemonic = cls._instruction_mnemonic(text)
+        if mnemonic is None:
+            return None
+        parts = text[len(mnemonic) :].strip().split(",", 1)
+        operands = [part.strip() for part in parts if part.strip()]
+        if mnemonic in {"push", "pushf", "pushfq"}:
+            return "write"
+        if mnemonic in {"pop", "popf", "popfq", "ret", "leave"}:
+            return "read"
+        if mnemonic in {"call", "jmp"} and any("[" in op for op in operands):
+            return "read"
+        if len(operands) == 2:
+            destination, source = operands
+            if destination.startswith("[") or re.match(
+                r"^(byte|word|dword|qword)\s+ptr\s*\[", destination
+            ):
+                return "write"
+            if "[" in source:
+                return "read"
+        return None
+
+    @classmethod
+    def _fault_access(
+        cls,
+        fault_integer: Optional[int],
+        pc_integer: Optional[int],
+        instruction: Any,
+        si_code: Optional[int],
+    ) -> Dict[str, Any]:
+        """Classify a memory fault as execute/read/write/unknown + evidence."""
+        if (
+            fault_integer is not None
+            and pc_integer is not None
+            and fault_integer == pc_integer
+        ):
+            return {"access": "execute", "si_code": si_code, "mnemonic": None}
+        direction = cls._memory_direction(instruction)
+        mnemonic = cls._instruction_mnemonic(instruction)
+        if direction is not None:
+            return {"access": direction, "si_code": si_code, "mnemonic": mnemonic}
+        return {"access": "unknown", "si_code": si_code, "mnemonic": mnemonic}
 
     @staticmethod
     def _memory_contents(result: Dict[str, Any]) -> Optional[str]:
@@ -710,9 +779,13 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
             # Linux container target) is not a Windows host path; resolving
             # it would prepend the current drive letter and fabricate an
             # identity (``/workspace/target`` -> ``D:/Workspace/target``).
+            # It is also not *verifiable* from this host, so a failed stat
+            # below must not demote stability (see below).
             host_path = normalized
+            verifiable = False
         else:
             host_path = os.path.realpath(raw_path)
+            verifiable = True
         resolved = host_path.replace("\\", "/").rstrip("/")
         identity: Dict[str, Any] = {
             "kind": "file",
@@ -723,7 +796,17 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
         try:
             stat_result = os.stat(host_path)
         except OSError:
-            identity["identity_source"] = "resolved_path"
+            if not verifiable:
+                # A container path observed from a foreign host cannot be
+                # stated from here; keep the verbatim identity without
+                # claiming verification either way.
+                identity["identity_source"] = "resolved_path"
+                return identity
+            # Host path that cannot be stated: a different build at the same
+            # path would dedup together, so demote stability instead of
+            # claiming it.
+            identity["stable"] = False
+            identity["identity_source"] = "resolved_path_unverified"
             return identity
 
         build_id = cls._elf_build_id(host_path)
@@ -1326,11 +1409,17 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
         fault_mapping = self._mapping_for(fault["integer"], mappings)
         pc_mapping = self._mapping_for(pc["integer"], mappings)
         sp_mapping = self._mapping_for(sp["integer"], mappings)
-        fault_access = (
-            "execute"
-            if fault["integer"] is not None and fault["integer"] == pc["integer"]
-            else "unknown"
-        )
+        # Placeholder: refined below once the faulting instruction is known.
+        fault_access_detail: Dict[str, Any] = {
+            "access": (
+                "execute"
+                if fault["integer"] is not None and fault["integer"] == pc["integer"]
+                else "unknown"
+            ),
+            "si_code": fault.get("si_code"),
+            "mnemonic": None,
+        }
+        fault_access = fault_access_detail["access"]
         category = {
             "SIGSEGV": "memory_access_violation",
             "SIGBUS": "memory_access_violation",
@@ -1352,6 +1441,19 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
         ):
             category = "invalid_instruction_pointer"
         faulting_instruction = self._faulting_instruction(snapshot, pc, pc_mapping)
+        if fault_access == "unknown" and memory_fault_signal:
+            refined = self._fault_access(
+                fault["integer"],
+                pc["integer"],
+                (
+                    faulting_instruction.get("instruction")
+                    if isinstance(faulting_instruction, dict)
+                    else None
+                ),
+                fault.get("si_code"),
+            )
+            fault_access_detail = refined
+            fault_access = refined["access"]
 
         component_status = {
             "stop_record": True,
@@ -1386,6 +1488,7 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
                     key: value for key, value in fault.items() if key != "attempts"
                 },
                 "fault_access": fault_access,
+                "fault_access_detail": fault_access_detail,
                 "program_counter": pc,
                 "stack_pointer": sp,
                 "frame_pointer": bp,

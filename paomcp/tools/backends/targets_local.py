@@ -37,6 +37,10 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    kill_process_tree,
+    reap_output_drains,
+    start_output_drains,
+    validate_target_env,
 )
 
 
@@ -57,7 +61,7 @@ class LocalProcessProvider:
                 raise TargetError(f"binary '{binary}' does not exist")
             argv: List[str] = [binary] + list(spec.argv or [])
             env_full = dict(os.environ)
-            env_full.update(spec.env or {})
+            env_full.update(validate_target_env(spec.env))
             handle._set_state(TargetState.STARTING)
             try:
                 handle.process = subprocess.Popen(
@@ -69,6 +73,7 @@ class LocalProcessProvider:
                     env=env_full,
                     start_new_session=True,
                 )
+                start_output_drains(handle)
                 if spec.stdin_bytes is not None and handle.process.stdin is not None:
                     # Write and close: stdin_bytes is a one-shot delivery,
                     # not an interactive stream.
@@ -105,11 +110,15 @@ class LocalProcessProvider:
                 try:
                     process.wait(timeout=max(0.1, timeout_sec))
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=timeout_sec)
+                    kill_process_tree(process)
+                    try:
+                        process.wait(timeout=timeout_sec)
+                    except subprocess.TimeoutExpired:
+                        pass
             except ProcessLookupError:
                 pass
             finally:
+                reap_output_drains(handle)
                 handle.stopped_at = datetime.now(timezone.utc).isoformat()
                 handle._touch()
 

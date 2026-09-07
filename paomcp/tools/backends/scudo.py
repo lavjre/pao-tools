@@ -190,7 +190,11 @@ class ScudoAnalyzer:
     ) -> int:
         if address_kind == "chunk":
             return address
-        return address - header_size
+        if address_kind == "user":
+            return address - header_size
+        raise ValueError(
+            f"address_kind must be 'chunk' or 'user', got {address_kind!r}"
+        )
 
     def _scudo_regions(
         self, mappings: Sequence[Dict[str, Any]]
@@ -240,12 +244,13 @@ class ScudoAnalyzer:
                 class_id = int.from_bytes(window[8:10], byteorder)
                 state = window[10]
                 checksum = int.from_bytes(window[0:8], byteorder)
+                size_field = int.from_bytes(window[12:16], byteorder)
                 if checksum == 0:
                     continue
-                if class_id > _SCUDO_MAX_CLASS_ID:
-                    continue
-                if state not in _SCUDO_KNOWN_STATES:
-                    continue
+                bad_class = class_id > _SCUDO_MAX_CLASS_ID
+                bad_state = state not in _SCUDO_KNOWN_STATES
+                # Keep malformed headers flagged instead of dropping them:
+                # the corruption classifier must see them to fire.
                 chunks.append(
                     {
                         "chunk_address": start + off,
@@ -253,6 +258,9 @@ class ScudoAnalyzer:
                         "class_id": class_id,
                         "state": state,
                         "checksum": checksum,
+                        "size_field": size_field,
+                        "bad_class": bad_class,
+                        "bad_state": bad_state,
                         "header_hex": window.hex(),
                     }
                 )
@@ -287,6 +295,26 @@ class ScudoAnalyzer:
         )
         if guard is not None:
             return guard
+        return self._classify_header(
+            command=command,
+            address_int=address_int,
+            address_kind=address_kind,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
+        )
+
+    def _classify_header(
+        self,
+        *,
+        command: str,
+        address_int: int,
+        address_kind: str,
+        classification: Dict[str, Any],
+        profile: Dict[str, Any],
+        component_status: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Single-context header read + verdict shared by inspect/validate."""
         byteorder = cast(Literal["little", "big"], profile.get("byteorder") or "little")
         chunk = self._chunk_from_user(address_int, address_kind)
         raw, err = self._read_bytes(chunk, SCUDO_HEADER_SIZE)
@@ -314,7 +342,10 @@ class ScudoAnalyzer:
         header = self._decode_header(raw, byteorder)
         state = int(header.get("state") or 0)
         class_id = int(header.get("class_id") or 0)
-        if state not in _SCUDO_KNOWN_STATES:
+        if int(header.get("checksum") or 0) == 0:
+            # Zero checksum: not a live Scudo header (freed/scribbled memory).
+            verdict = "suspicious"
+        elif state not in _SCUDO_KNOWN_STATES:
             verdict = "suspicious"
         elif class_id > _SCUDO_MAX_CLASS_ID:
             verdict = "corrupted"
@@ -369,10 +400,13 @@ class ScudoAnalyzer:
         )
         if guard is not None:
             return guard
-        response = self.inspect_chunk(
-            address=address,
+        response = self._classify_header(
+            command=command,
+            address_int=address_int,
             address_kind=address_kind,
-            cancellation_check=cancellation_check,
+            classification=classification,
+            profile=profile,
+            component_status=component_status,
         )
         parsed = dict(response.get("parsed") or {})
         verdict = parsed.get("verdict")
@@ -607,13 +641,22 @@ class ScudoAnalyzer:
                         "chunk_address": addr,
                     }
                 )
-            if int(ch["class_id"]) > _SCUDO_MAX_CLASS_ID:
+            if ch.get("bad_class"):
                 checks.append(
                     {
                         "check": "bad_class_id",
                         "severity": "corrupted",
                         "chunk_address": addr,
                         "class_id": ch["class_id"],
+                    }
+                )
+            if ch.get("bad_state"):
+                checks.append(
+                    {
+                        "check": "bad_state",
+                        "severity": "suspicious",
+                        "chunk_address": addr,
+                        "state": ch["state"],
                     }
                 )
         for mp in mappings:
@@ -732,6 +775,18 @@ class ScudoAnalyzer:
         max_chunks: int = 512,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
+        if max_bytes <= 0 or max_bytes > 64 * 1024 * 1024:
+            raise ValueError(
+                f"max_bytes must be between 1 and 64MiB, got {max_bytes!r}"
+            )
+        if max_mappings <= 0 or max_mappings > 64:
+            raise ValueError(
+                f"max_mappings must be between 1 and 64, got {max_mappings!r}"
+            )
+        if max_chunks <= 0 or max_chunks > 8192:
+            raise ValueError(
+                f"max_chunks must be between 1 and 8192, got {max_chunks!r}"
+            )
         classification, mappings, profile, component_status = (
             self._prepare_with_mappings(cancellation_check)
         )
@@ -749,11 +804,17 @@ class ScudoAnalyzer:
         chunks, _ = self._scan_headers(
             mappings, byteorder, max_bytes=min(max_bytes, 1 << 20)
         )
-        quarantined = [
-            (int(c["chunk_address"]), int(c["chunk_address"]) + 64)
-            for c in chunks[: max(0, max_chunks)]
-            if int(c["state"]) == SCUDO_STATE_QUARANTINE
-        ]
+        quarantined = []
+        for c in chunks[: max(0, max_chunks)]:
+            if int(c["state"]) != SCUDO_STATE_QUARANTINE or c.get("bad_state"):
+                continue
+            user = int(c["chunk_address"]) + SCUDO_HEADER_SIZE
+            # size_field is advisory (layout v1); clamp to a sane window so
+            # a garbage field cannot stretch the range across the mapping.
+            span = int(c.get("size_field") or 0)
+            if span <= 0 or span > (1 << 20):
+                span = 64
+            quarantined.append((user, user + span))
         if not quarantined:
             return build_backend_response(
                 command,

@@ -10,6 +10,7 @@
 
 import os
 import json
+from typing import Optional
 from urllib import request as _urlreq
 from urllib import error as _urlerr
 import re
@@ -80,8 +81,21 @@ def _set_terminal(*args, **kwargs):
     raise RuntimeError("Terminal-based attach is disabled in Pao Tools mode")
 
 
+def _attach_port_default() -> int:
+    """Attach-sidecar port (5501 by default, PAO_ATTACH_PORT overrides)."""
+    try:
+        return int(os.environ.get("PAO_ATTACH_PORT", "5501"))
+    except ValueError:
+        return 5501
+
+
 def _attach_via_mcp(
-    ctx, pid: int, filename: str, script: str, host: str = "127.0.0.1", port: int = 5501
+    ctx,
+    pid: int,
+    filename: str,
+    script: str,
+    host: str = "127.0.0.1",
+    port: Optional[int] = None,
 ):
     """Attach to running process via Pao Tools /attach API instead of spawning gdb terminal."""
     # Split script into pre/after commands; send continue-like commands after attach
@@ -104,7 +118,8 @@ def _attach_via_mcp(
         "script_pid": os.getpid(),
     }
 
-    url = f"http://{host}:{port}/attach"
+    resolved_port = port if port is not None else _attach_port_default()
+    url = f"http://{host}:{resolved_port}/attach"
     data = json.dumps(payload).encode("utf-8")
     req = _urlreq.Request(
         url, data=data, headers={"Content-Type": "application/json"}, method="POST"

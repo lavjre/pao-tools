@@ -47,6 +47,10 @@ class GhidraDecompiler:
             raise ValueError("max_cache_entries must be positive")
         self._cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._cache_lock = threading.RLock()
+        # PaoDecompile.java ships with the package: hash it once (keyed by
+        # dev/ino/mtime/size) instead of re-reading it on every cache key.
+        self._script_sha256: Optional[str] = None
+        self._script_identity: Optional[tuple] = None
         self.executable = executable or os.environ.get(
             "PAO_GHIDRA_HEADLESS", "/opt/ghidra/support/analyzeHeadless"
         )
@@ -125,6 +129,25 @@ class GhidraDecompiler:
             "modified_ns": str(after.st_mtime_ns),
         }
 
+    def _script_version(self) -> str:
+        """Content hash of the bundled script, re-read only when replaced."""
+        script_path = os.path.join(self.script_dir, "PaoDecompile.java")
+        try:
+            stat_result = os.stat(script_path)
+            identity = (
+                stat_result.st_dev,
+                stat_result.st_ino,
+                stat_result.st_size,
+                stat_result.st_mtime_ns,
+            )
+        except OSError:
+            return "missing"
+        with self._cache_lock:
+            if self._script_identity != identity:
+                self._script_sha256 = self._sha256_file(script_path)
+                self._script_identity = identity
+            return self._script_sha256 or "missing"
+
     def _cache_key(
         self,
         binary_sha256: str,
@@ -132,8 +155,7 @@ class GhidraDecompiler:
         function_timeout: int,
         backend_version: Optional[str],
     ) -> str:
-        script_path = os.path.join(self.script_dir, "PaoDecompile.java")
-        script_sha256 = self._sha256_file(script_path)
+        script_sha256 = self._script_version()
         material = json.dumps(
             {
                 "binary_sha256": binary_sha256,

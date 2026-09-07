@@ -128,6 +128,21 @@ BIN_INSPECTION_SCHEMA = "pao.glibc-bins.v1"
 # when the kernel uses a different base page.
 DEFAULT_SLUB_PAGE_SIZE = 0x1000
 
+# Hard ceiling for any single per-bin walk. Corruption can chain bins
+# arbitrarily long, so an agent-supplied 1e9 must not wedge gdb: walks stop
+# here and say `truncated` instead.
+MAX_WALK_CHUNKS_PER_BIN = 16384
+
+
+def _clamp_walk_cap(max_chunks_per_bin: int) -> int:
+    """Validate a per-bin walk cap; raise outside ``1..MAX``."""
+    if max_chunks_per_bin <= 0 or max_chunks_per_bin > MAX_WALK_CHUNKS_PER_BIN:
+        raise ValueError(
+            "max_chunks_per_bin must be between 1 and "
+            f"{MAX_WALK_CHUNKS_PER_BIN}, got {max_chunks_per_bin!r}"
+        )
+    return max_chunks_per_bin
+
 
 class GlibcBins:
     """Walk glibc bin chains (fastbins today; tcache/regular bins later).
@@ -377,10 +392,7 @@ class GlibcBins:
         glibc has safe-linking enabled (>= 2.32) fd pointers are decoded via
         ``PROTECT_PTR`` so the chain addresses are usable directly.
         """
-        if max_chunks_per_bin <= 0:
-            raise ValueError(
-                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
-            )
+        max_chunks_per_bin = _clamp_walk_cap(max_chunks_per_bin)
 
         classification, mappings, profile, component_status = self._prepare_context(
             cancellation_check
@@ -704,10 +716,7 @@ class GlibcBins:
         tcache yet) the tool returns ``verdict = "uninitialized"`` with
         empty bins -- a legitimate, not-error state.
         """
-        if max_chunks_per_bin <= 0:
-            raise ValueError(
-                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
-            )
+        max_chunks_per_bin = _clamp_walk_cap(max_chunks_per_bin)
 
         classification, mappings, profile, component_status = self._prepare_context(
             cancellation_check
@@ -1080,13 +1089,10 @@ class GlibcBins:
         (the synthetic mchunkptr whose fd/bk slots are the arena entries),
         detects the empty case (fd == bin_head_addr), and walks the
         doubly-linked chain via ``fd`` with per-chain cycle detection and
-        a per-bin cap.  Each chunk carries both fd and bk for evidence;
-        bk consistency validation is deferred to a corruption classifier.
+         a per-bin cap.  Each chunk carries both fd and bk for evidence;
+         bk consistency validation is deferred to a corruption classifier.
         """
-        if max_chunks_per_bin <= 0:
-            raise ValueError(
-                f"max_chunks_per_bin must be positive, got {max_chunks_per_bin!r}"
-            )
+        max_chunks_per_bin = _clamp_walk_cap(max_chunks_per_bin)
 
         classification, mappings, profile, component_status = self._prepare_context(
             cancellation_check

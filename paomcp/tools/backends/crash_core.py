@@ -93,8 +93,16 @@ class CrashCoreMixin:
             if not isinstance(item, dict):
                 continue
             try:
-                start = int(str(item.get("start")), 16)
-                end = int(str(item.get("end")), 16)
+                # Mappings may already carry ints (parsed) or hex strings.
+                start_raw, end_raw = item.get("start"), item.get("end")
+                start = (
+                    int(start_raw)
+                    if isinstance(start_raw, int)
+                    else int(str(start_raw), 16)
+                )
+                end = (
+                    int(end_raw) if isinstance(end_raw, int) else int(str(end_raw), 16)
+                )
             except (TypeError, ValueError):
                 continue
             mapping_size = end - start
