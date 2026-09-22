@@ -63,7 +63,7 @@ _RIP_PATTERN = re.compile(
 _RIP_BARE_PATTERN = re.compile(r"RIP:\s*[0-9a-fA-F]{4}:\[<([0-9a-fA-F]+)\>\]")
 _CALL_TRACE_PATTERN = re.compile(
     r"^\s*(?:\[\s*\d+\.\d+\]\s*)?(?:\?\s*)?(?:<[^>\n]*>\s*)?"
-    r"([A-Za-z_][\w.]*)\+0x[0-9a-fA-F]+/0x[0-9a-fA-F]+",
+    r"([A-Za-z_][\w.]*)\+0x([0-9a-fA-F]+)/0x[0-9a-fA-F]+",
     re.MULTILINE,
 )
 _CPU_PATTERN = re.compile(r"CPU:\s*(\d+)\s+PID:\s*(\d+)\s+Comm:\s*(\S+)")
@@ -98,16 +98,33 @@ def _fault_kind(text: str) -> Tuple[str, List[str]]:
     return "unknown", evidence
 
 
-def _call_trace(text: str, limit: int = MAX_TRACE_FRAMES) -> List[str]:
-    frames = _CALL_TRACE_PATTERN.findall(text)
+def _call_trace_frames(text: str, limit: int = MAX_TRACE_FRAMES) -> List[str]:
+    """Frames as ``symbol+0xoffset``.
+
+    The function-relative offset stays stable across KASLR slides and is
+    what distinguishes two crashes in the same symbol, so these frames are
+    what the fingerprint digests.  Bare ``[<addr>]`` frames (no kallsyms)
+    are not captured here -- their addresses are KASLR-tainted and must not
+    enter the digest.
+    """
+    frames = [
+        f"{symbol}+0x{offset.lower()}"
+        for symbol, offset in _CALL_TRACE_PATTERN.findall(text)
+    ]
     return frames[:limit]
+
+
+def _call_trace(text: str, limit: int = MAX_TRACE_FRAMES) -> List[str]:
+    """Bare symbol names (the historical, offset-free ``call_trace`` shape)."""
+    symbols = [symbol for symbol, _offset in _CALL_TRACE_PATTERN.findall(text)]
+    return symbols[:limit]
 
 
 def _fingerprint(
     kind: str,
     rip_symbol: Optional[str],
     rip_offset: Optional[str],
-    trace: Sequence[str],
+    trace_frames: Sequence[str],
 ) -> str:
     """Stable digest over normalized (ASLR-free) crash identity."""
     normalized = "|".join(
@@ -115,7 +132,7 @@ def _fingerprint(
             kind,
             rip_symbol or "?",
             rip_offset or "?",
-            ",".join(trace[:8]),
+            ",".join(trace_frames[:8]),
         ]
     )
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
@@ -158,6 +175,7 @@ def analyze_kernel_oops(log_text: str) -> Dict[str, Any]:
         bare = _RIP_BARE_PATTERN.search(log_text)
         rip_bare_address = bare.group(1).lower() if bare else None
     trace = _call_trace(log_text)
+    trace_frames = _call_trace_frames(log_text)
     cpu_match = _CPU_PATTERN.search(log_text)
     taint_match = _TAINT_PATTERN.search(log_text)
     oops_match = _OOPS_CODE_PATTERN.search(log_text)
@@ -172,6 +190,7 @@ def analyze_kernel_oops(log_text: str) -> Dict[str, Any]:
         "rip": {"symbol": rip_symbol, "offset": rip_offset},
         "rip_bare_address": rip_bare_address,
         "call_trace": trace,
+        "call_trace_frames": trace_frames,
         "frame_count": len(trace),
         "cpu": (
             {
@@ -191,7 +210,7 @@ def analyze_kernel_oops(log_text: str) -> Dict[str, Any]:
             if kasan_match
             else None
         ),
-        "fingerprint": _fingerprint(kind, rip_symbol, rip_offset, trace),
+        "fingerprint": _fingerprint(kind, rip_symbol, rip_offset, trace_frames),
     }
     warnings = []
     if kind == "unknown":

@@ -30,6 +30,10 @@ def test_null_deref_triage():
     assert parsed["fault_address"] == "0000000000000000"
     assert parsed["rip"] == {"symbol": "slab_alloc_node", "offset": "3a4"}
     assert parsed["call_trace"][:2] == ["kmem_cache_alloc", "vuln_ioctl"]
+    assert parsed["call_trace_frames"][:2] == [
+        "kmem_cache_alloc+0x120",
+        "vuln_ioctl+0x45",
+    ]
     assert parsed["cpu"] == {"cpu": "2", "pid": "1234", "comm": "vuln_mod"}
     assert parsed["oops_code"] == "0002"
     assert len(parsed["fingerprint"]) == 16
@@ -55,6 +59,28 @@ def test_fingerprint_stable_across_timestamps_and_aslr():
     assert first == second
     other = analyze_kernel_oops(KASAN_UAF)["parsed"]["fingerprint"]
     assert other != first
+
+
+def test_fingerprint_distinguishes_same_symbol_different_offset():
+    shifted = NULL_DEREF.replace("kmem_cache_alloc+0x120", "kmem_cache_alloc+0x140")
+    original = analyze_kernel_oops(NULL_DEREF)["parsed"]
+    moved = analyze_kernel_oops(shifted)["parsed"]
+    # The stable bare-symbol view is unchanged; the offset-carrying frames
+    # and therefore the fingerprint are not.
+    assert original["call_trace"] == moved["call_trace"]
+    assert original["call_trace_frames"] != moved["call_trace_frames"]
+    assert original["fingerprint"] != moved["fingerprint"]
+
+
+def test_fingerprint_ignores_kaslr_tainted_bare_addresses():
+    first = analyze_kernel_oops(
+        "RIP: 0010:[<ffffffff81001234>]\nCall Trace:\n helper+0x10/0x20\n"
+    )["parsed"]
+    second = analyze_kernel_oops(
+        "RIP: 0010:[<ffffffff82005678>]\nCall Trace:\n helper+0x10/0x20\n"
+    )["parsed"]
+    assert first["rip_bare_address"] != second["rip_bare_address"]
+    assert first["fingerprint"] == second["fingerprint"]
 
 
 def test_unknown_log_still_fingerprints():

@@ -73,11 +73,11 @@ from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 from paomcp.tools.backends.heap_glibc_heap import (
     PREV_INUSE,
     SIZE_BITS_MASK,
+    glibc_arch_layout,
 )
 from paomcp.tools.backends.heap_glibc_arenas import (
     BINS_ARRAY_LEN,
     NBINS,
-    NFASTBINS,
     arena_layout_cache_key,
     inferior_epoch,
 )
@@ -206,20 +206,27 @@ class GlibcBins:
     # Pure helpers (no debugger required)
     # ------------------------------------------------------------------
     @staticmethod
-    def fastbin_size_for_index(index: int, pointer_bits: int) -> int:
+    def fastbin_size_for_index(
+        index: int, pointer_bits: int, architecture: Optional[str] = None
+    ) -> int:
         """Expected chunk size for fastbinsY[index] on the target.
 
-        Matches glibc's ``fastbin_index`` inverse: the first slot holds
-        chunks of ``2 * MALLOC_ALIGNMENT`` bytes and each subsequent slot
-        adds ``MALLOC_ALIGNMENT``.  On 64-bit that yields the classic
-        0x20/0x30/.../0xb0 size ladder; on 32-bit it is 0x10/0x18/.../0x58.
+        Matches glibc's ``fastbin_index`` inverse.  The index step is
+        SIZE_SZ-based in glibc (``fastbin_index`` shifts by 4 on 64-bit and
+        3 on 32-bit), so the size ladder is the same for every 32-bit ABI:
+        slot ``i`` holds a ``(2 + i) * 2 * SIZE_SZ``-byte chunk.  The
+        architecture only changes the array length (``NFASTBINS`` is 11 on
+        i386 and 10 on x86_64/aarch64/arm32, because ``request2size``
+        rounds ``MAX_FAST_SIZE`` up to ``MALLOC_ALIGNMENT``).  On 64-bit
+        that yields the classic 0x20/0x30/.../0xb0 ladder; on i386
+        0x10/0x18/.../0x60; on arm32 0x10/0x18/.../0x58.
         """
-        if pointer_bits not in (32, 64):
-            raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
-        if index < 0 or index >= NFASTBINS:
-            raise ValueError(f"fastbin index out of range [0, {NFASTBINS}): {index!r}")
-        malloc_alignment = 2 * (pointer_bits // 8)  # 16 on 64-bit, 8 on 32-bit
-        return (2 + index) * malloc_alignment
+        layout = glibc_arch_layout(pointer_bits, architecture)
+        if index < 0 or index >= layout.nfastbins:
+            raise ValueError(
+                f"fastbin index out of range [0, {layout.nfastbins}): {index!r}"
+            )
+        return (2 + index) * 2 * layout.size_sz
 
     @staticmethod
     def decode_safe_linked(encoded: int, position: int) -> int:
@@ -383,8 +390,10 @@ class GlibcBins:
         max_chunks_per_bin: int = DEFAULT_MAX_CHUNKS_PER_FASTBIN,
         cancellation_check: Optional[Callable[[], None]] = None,
     ) -> Dict[str, Any]:
-        """Walk the 10 fastbin chains rooted in an arena's ``fastbinsY`` array.
+        """Walk the fastbin chains rooted in an arena's ``fastbinsY`` array.
 
+        The array length is architecture-dependent (``NFASTBINS``: 10 on
+        x86_64/aarch64/arm32, 11 on i386 -- see ``GLIBC_ARCH_LAYOUTS``).
         ``arena_address`` may be ``None`` (inspect main_arena) or the address
         of a non-main arena obtained via ``list_arenas``.  Each fastbin's
         chain is walked to completion or ``max_chunks_per_bin`` chunks --
@@ -442,6 +451,9 @@ class GlibcBins:
                 "Cannot walk fastbins without a resolved pointer width; "
                 f"target_profile returned pointer_bits={pointer_bits!r}"
             )
+        architecture = profile.get("architecture")
+        layout_spec = glibc_arch_layout(pointer_bits, architecture)
+        nfastbins = layout_spec.nfastbins
         size_sz = pointer_bits // 8
         byteorder = (
             profile.get("byteorder")
@@ -463,21 +475,24 @@ class GlibcBins:
                 "not resolved); fd pointers reported as raw with no decode"
             )
 
-        # Read the whole fastbinsY block in a single 10*size_sz gulp so the
-        # chain walks see a consistent snapshot of the heads.
+        # Read the whole fastbinsY block in a single nfastbins*size_sz gulp
+        # so the chain walks see a consistent snapshot of the heads.  The
+        # block length is architecture-dependent: i386 has 11 slots.
         if cancellation_check is not None:
             cancellation_check()
         heads_block, heads_err = self._read_bytes(
-            target_address + fastbins_offset, NFASTBINS * size_sz
+            target_address + fastbins_offset, nfastbins * size_sz
         )
-        if heads_err is not None or len(heads_block) < NFASTBINS * size_sz:
+        if heads_err is not None or len(heads_block) < nfastbins * size_sz:
             warnings.append(f"fastbinsY read: {heads_err or 'short read'}")
             fastbins_out: List[Dict[str, Any]] = []
-            for i in range(NFASTBINS):
+            for i in range(nfastbins):
                 fastbins_out.append(
                     {
                         "index": i,
-                        "size_class": self.fastbin_size_for_index(i, pointer_bits),
+                        "size_class": self.fastbin_size_for_index(
+                            i, pointer_bits, architecture
+                        ),
                         "head": None,
                         "head_raw_hex": None,
                         "chain": [],
@@ -494,6 +509,7 @@ class GlibcBins:
                 "layout": {
                     "arena_address": layout.get("arena_address"),
                     "fastbinsY_offset": fastbins_offset,
+                    "fastbinsY_count": nfastbins,
                     "resolution_source": layout.get("resolution_source"),
                     "unresolved_fields": layout.get("unresolved_fields", []),
                 },
@@ -524,12 +540,14 @@ class GlibcBins:
             )
 
         fastbins_out = []
-        for i in range(NFASTBINS):
+        for i in range(nfastbins):
             slot_bytes = heads_block[i * size_sz : (i + 1) * size_sz]
             head_ptr = int.from_bytes(slot_bytes, byteorder)  # type: ignore[arg-type]
             bin_entry: Dict[str, Any] = {
                 "index": i,
-                "size_class": self.fastbin_size_for_index(i, pointer_bits),
+                "size_class": self.fastbin_size_for_index(
+                    i, pointer_bits, architecture
+                ),
                 "head": head_ptr,
                 "head_raw_hex": slot_bytes.hex(),
                 "chain": [],
@@ -562,6 +580,7 @@ class GlibcBins:
             "layout": {
                 "arena_address": layout.get("arena_address"),
                 "fastbinsY_offset": fastbins_offset,
+                "fastbinsY_count": nfastbins,
                 "resolution_source": layout.get("resolution_source"),
                 "unresolved_fields": layout.get("unresolved_fields", []),
             },
@@ -595,13 +614,19 @@ class GlibcBins:
     # glibc tcache traversal
     # ------------------------------------------------------------------
     @staticmethod
-    def tcache_size_for_index(index: int, pointer_bits: int) -> int:
+    def tcache_size_for_index(
+        index: int, pointer_bits: int, architecture: Optional[str] = None
+    ) -> int:
         """Expected chunk size for tcache bin ``index`` on the target.
 
-        Matches glibc's ``csize2tidx`` inverse: same size formula as
-        fastbins (``(2 + i) * MALLOC_ALIGNMENT``) but with a wider index
-        range (0..TCACHE_MAX_BINS-1 = 0..63 vs fastbins' 0..9).  On
-        64-bit that yields 0x20/0x30/.../0x410; on 32-bit 0x10/.../0x208.
+        Matches glibc's ``csize2tidx`` inverse: ``MINSIZE + index *
+        MALLOC_ALIGNMENT`` (newer glibc spells the same expression
+        ``tidx2csize``; ``tidx2usize`` is that value minus ``SIZE_SZ``,
+        the usable size).  Unlike the fastbin ladder this step *is*
+        MALLOC_ALIGNMENT-based, so i386 (alignment 16) and arm32
+        (alignment 8) diverge.  On x86_64/aarch64 that yields
+        0x20/0x30/.../0x410; on i386 0x10/0x20/.../0x400; on arm32
+        0x10/0x18/.../0x208.
         """
         if pointer_bits not in (32, 64):
             raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
@@ -609,8 +634,8 @@ class GlibcBins:
             raise ValueError(
                 f"tcache index out of range [0, {TCACHE_MAX_BINS}): {index!r}"
             )
-        malloc_alignment = 2 * (pointer_bits // 8)
-        return (2 + index) * malloc_alignment
+        layout = glibc_arch_layout(pointer_bits, architecture)
+        return layout.minsize + index * layout.malloc_alignment
 
     def _walk_tcache_chain(
         self,
@@ -788,6 +813,7 @@ class GlibcBins:
                 "Cannot walk tcache without a resolved pointer width; "
                 f"target_profile returned pointer_bits={pointer_bits!r}"
             )
+        architecture = profile.get("architecture")
         size_sz = pointer_bits // 8
         byteorder = (
             profile.get("byteorder")
@@ -836,7 +862,9 @@ class GlibcBins:
             empty_bins: List[Dict[str, Any]] = [
                 {
                     "index": i,
-                    "size_class": self.tcache_size_for_index(i, pointer_bits),
+                    "size_class": self.tcache_size_for_index(
+                        i, pointer_bits, architecture
+                    ),
                     "count": 0,
                     "head": None,
                     "chain": [],
@@ -921,7 +949,7 @@ class GlibcBins:
             head = heads[i]
             bin_entry: Dict[str, Any] = {
                 "index": i,
-                "size_class": self.tcache_size_for_index(i, pointer_bits),
+                "size_class": self.tcache_size_for_index(i, pointer_bits, architecture),
                 "count": counts[i],
                 "head": head,
                 "chain": [],

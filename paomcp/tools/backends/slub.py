@@ -527,7 +527,10 @@ class KernelSlab:
 
         Returns (resolved, error).  ``resolved`` holds ``_struct`` (source
         name), ``_size_bytes``, ``freelist`` (required byte offset) and
-        optional ``objects``/``inuse``/``frozen``/``cpu`` members.
+        optional ``objects``/``inuse``/``frozen``/``cpu`` members.  Member
+        lookups recurse through anonymous struct/union members, so the
+        ``struct page`` fallback finds ``freelist`` in its nested anonymous
+        unions on kernels without ``struct slab``.
         """
         for struct_name in (_SLAB_HEADER_STRUCT_SLAB, _SLAB_HEADER_STRUCT_PAGE):
             struct = btf.struct(struct_name)

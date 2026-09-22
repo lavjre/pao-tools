@@ -55,6 +55,10 @@ logger = logging.getLogger(__name__)
 # single source re-exported above); only snapshot-local caps stay here.
 DEFAULT_MAX_SNAPSHOT_LEDGER_ENTRIES = 100_000
 DEFAULT_SNAPSHOT_TIMEOUT_SECONDS = 300.0
+# The bin walkers invoke their cancellation callback once per bin and once
+# per chunk; enforcing the snapshot deadline on every Nth callback keeps a
+# single oversized bin walk from running far past the budget.
+SNAPSHOT_DEADLINE_CHECK_EVERY = 64
 MAX_SNAPSHOT_ARENAS = 256
 MAX_SNAPSHOT_CHUNKS_PER_BIN = 16384
 MAX_SNAPSHOT_LEDGER_ENTRIES = 1_000_000
@@ -484,8 +488,33 @@ class HeapHistory:
             )
         deadline = time.monotonic() + timeout_seconds
 
+        def _check_deadline() -> None:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"heap snapshot exceeded its {timeout_seconds:g}s budget; "
+                    "retry scoped with smaller max_arenas/max_chunks_per_bin"
+                )
+
+        checks_since_deadline = 0
+
+        def _deadline_check() -> None:
+            """Cancellation + deadline check for the walker callbacks.
+
+            The arena/bin walkers accept only a ``cancellation_check``
+            callable and invoke it once per bin and once per chunk.  Wrapping
+            it here is what threads the snapshot deadline into those inner
+            loops instead of testing it only at arena boundaries.
+            """
+            nonlocal checks_since_deadline
+            if cancellation_check is not None:
+                cancellation_check()
+            checks_since_deadline += 1
+            if checks_since_deadline >= SNAPSHOT_DEADLINE_CHECK_EVERY:
+                checks_since_deadline = 0
+                _check_deadline()
+
         classification, _mappings, profile, component_status = self._prepare_context(
-            cancellation_check
+            _deadline_check
         )
         pid = self.gdb.get_inferior_pid()
         epoch = self.gdb.get_inferior_epoch()
@@ -534,7 +563,7 @@ class HeapHistory:
 
         warnings: List[str] = []
         arena_list_response = self.arenas.list_arenas(
-            cancellation_check=cancellation_check
+            cancellation_check=_deadline_check
         )
         arena_list_parsed = arena_list_response.get("parsed", {}) or {}
         for w in arena_list_response.get("warnings") or []:
@@ -553,25 +582,16 @@ class HeapHistory:
         chunk_ledger: List[Dict[str, Any]] = []
         ledger_truncated = False
 
-        def _check_deadline() -> None:
-            if time.monotonic() > deadline:
-                raise TimeoutError(
-                    f"heap snapshot exceeded its {timeout_seconds:g}s budget; "
-                    "retry scoped with smaller max_arenas/max_chunks_per_bin"
-                )
-
         _check_deadline()
         for arena_entry in raw_arenas:
-            if cancellation_check is not None:
-                cancellation_check()
-            _check_deadline()
+            _deadline_check()
             addr = arena_entry.get("address")
             if addr is None:
                 continue
             addr_int = int(addr)
             addr_str = str(addr_int)
             arena_inspect = self.arenas.inspect_arena(
-                arena_address=addr_str, cancellation_check=cancellation_check
+                arena_address=addr_str, cancellation_check=_deadline_check
             )
             arena_parsed = arena_inspect.get("parsed", {}) or {}
             fields = arena_parsed.get("fields") or {}
@@ -592,14 +612,14 @@ class HeapHistory:
             fastbins_response = self.bins.inspect_fastbins(
                 arena_address=addr_str,
                 max_chunks_per_bin=max_chunks_per_bin,
-                cancellation_check=cancellation_check,
+                cancellation_check=_deadline_check,
             )
             for w in fastbins_response.get("warnings") or []:
                 warnings.append(f"inspect_fastbins[{addr_int:#x}]: {w}")
             bins_response = self.bins.inspect_bins(
                 arena_address=addr_str,
                 max_chunks_per_bin=max_chunks_per_bin,
-                cancellation_check=cancellation_check,
+                cancellation_check=_deadline_check,
             )
             for w in bins_response.get("warnings") or []:
                 warnings.append(f"inspect_bins[{addr_int:#x}]: {w}")
@@ -623,7 +643,7 @@ class HeapHistory:
 
         tcache_response = self.bins.inspect_tcache(
             max_chunks_per_bin=max_chunks_per_bin,
-            cancellation_check=cancellation_check,
+            cancellation_check=_deadline_check,
         )
         tcache_parsed = tcache_response.get("parsed", {}) or {}
         for w in tcache_response.get("warnings") or []:

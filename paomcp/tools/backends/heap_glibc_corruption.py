@@ -65,6 +65,7 @@ from paomcp.tools.backends.heap_snapshots import (
 )
 
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
+from paomcp.tools.backends.heap_glibc_heap import glibc_arch_layout
 from paomcp.tools.backends.heap_technique_catalog import technique_hints_for
 from paomcp.tools.backends.heap_technique_context import (
     budgeted_read,
@@ -279,7 +280,11 @@ class GlibcHeapCorruption:
                 "Cannot classify corruption without a resolved pointer width; "
                 f"target_profile returned pointer_bits={pointer_bits!r}"
             )
-        alignment = 2 * (pointer_bits // 8)
+        # Per-arch MALLOC_ALIGNMENT: 16 on x86_64/aarch64/i386, 8 on arm32.
+        # i386 chunks are 16-aligned even though SIZE_SZ is 4.
+        alignment = glibc_arch_layout(
+            pointer_bits, profile.get("architecture")
+        ).malloc_alignment
 
         fastbins_response = self.bins.inspect_fastbins(
             arena_address=arena_address,
@@ -662,8 +667,13 @@ class GlibcHeapCorruption:
         * ``unreadable``  -- chunk header could not be read
         * ``double_free`` -- chunk already present in tcache or fastbins
         * ``corrupted``   -- alignment / mapping / min-size check failed
-        * ``suspicious`` -- non-fatal check failed (e.g. payload overflow)
-        * ``safe``        -- every check passed
+        * ``suspicious`` -- non-fatal check failed (e.g. payload overflow) or
+                            bin membership could not be verified (the
+                            inspector was unresolvable/unreadable); a
+                            membership probe that cannot answer is never
+                            reported as ``safe``
+        * ``safe``        -- every check passed and both membership probes
+                            actually answered
         """
         inspection = self.glibc.inspect_chunk(
             address=address,
@@ -797,25 +807,66 @@ class GlibcHeapCorruption:
             )
             in_tcache = bool((tcache_membership or {}).get("found"))
             in_fastbins = bool((fastbins_membership or {}).get("found"))
+            # ``checked`` is False when the inspector could not answer the
+            # membership question at all (unresolvable layout / unreadable
+            # bins).  That is an *absence of evidence*, not evidence of
+            # absence: the chunk may still be sitting in the bin the
+            # inspector failed to read, so a free must never be promoted to
+            # safe on an unverified probe.
+            tcache_checked = bool((tcache_membership or {}).get("checked"))
+            fastbins_checked = bool((fastbins_membership or {}).get("checked"))
+            unverified: List[str] = []
+            if not in_tcache and not tcache_checked:
+                unverified.append("not_in_tcache")
+            if not in_fastbins and not fastbins_checked:
+                unverified.append("not_in_fastbins")
+
             checks["not_in_tcache"] = {
-                "ok": not in_tcache,
+                "ok": not in_tcache and tcache_checked,
                 "reason": (
-                    None if not in_tcache else "chunk_already_present_in_tcache"
+                    None
+                    if (not in_tcache and tcache_checked)
+                    else (
+                        "chunk_already_present_in_tcache"
+                        if in_tcache
+                        else "membership_unverified: "
+                        + str(
+                            (tcache_membership or {}).get("reason")
+                            or "tcache inspection unavailable"
+                        )
+                    )
                 ),
             }
             checks["not_in_fastbins"] = {
-                "ok": not in_fastbins,
+                "ok": not in_fastbins and fastbins_checked,
                 "reason": (
-                    None if not in_fastbins else "chunk_already_present_in_fastbins"
+                    None
+                    if (not in_fastbins and fastbins_checked)
+                    else (
+                        "chunk_already_present_in_fastbins"
+                        if in_fastbins
+                        else "membership_unverified: "
+                        + str(
+                            (fastbins_membership or {}).get("reason")
+                            or "fastbin inspection unavailable"
+                        )
+                    )
                 ),
             }
             if in_tcache:
                 failures.append("not_in_tcache")
             if in_fastbins:
                 failures.append("not_in_fastbins")
+            # Unverified probes are surfaced as explicit failures so a
+            # consumer aggregating ``failures`` sees them, and the verdict is
+            # bounded below double_free/corrupted: never ``safe``.
+            for name in unverified:
+                failures.append(f"{name}_unverified")
             # Double-free takes precedence over any earlier structural verdict.
             if in_tcache or in_fastbins:
                 verdict = "double_free"
+            elif unverified and verdict == "safe":
+                verdict = "suspicious"
 
         return build_backend_response(
             "validate_free",

@@ -456,8 +456,13 @@ class TestValidateFreeGuards:
 
 class TestValidateFreeSafe:
     def test_valid_chunk_not_in_bins_yields_safe(self):
-        corruption, gdb = build_corruption()
+        # Both membership probes must be *checked* for a safe verdict:
+        # resolve the tcache layout (TcacheAwareFakeDebugger + a placed
+        # empty tcache struct) so tcache membership is verified, not merely
+        # unanswerable.
+        corruption, gdb = build_corruption(debugger=TcacheAwareFakeDebugger())
         _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        gdb.place(TCACHE_ADDR, make_tcache_bytes())
         chunk_addr = HEAP_BASE + 0x400  # aligned to 16
         _place_chunk_header(gdb, chunk_addr, size_field=0x21)
         user_addr = chunk_addr + 16
@@ -466,8 +471,69 @@ class TestValidateFreeSafe:
         assert parsed["verdict"] == "safe"
         assert parsed["failures"] == []
         assert parsed["chunk_summary"]["chunk_address"] == chunk_addr
-        # Both membership probes should have run (checked=True) and found nothing.
+        # Both membership probes ran (checked=True) and found nothing.
         assert parsed["membership"]["fastbins"] == {"found": False, "checked": True}
+        assert parsed["membership"]["tcache"] == {"found": False, "checked": True}
+        assert parsed["checks"]["not_in_tcache"]["ok"] is True
+        assert parsed["checks"]["not_in_fastbins"]["ok"] is True
+
+
+class TestValidateFreeUnverifiedMembership:
+    def test_unresolvable_tcache_never_yields_safe(self):
+        # Regression: when the tcache inspector cannot answer (no debug
+        # symbols -> unresolvable), absent membership is not evidence of
+        # absence.  The verdict must be bounded, never "safe".
+        corruption, gdb = build_corruption()  # plain fake: tcache unresolved
+        _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        chunk_addr = HEAP_BASE + 0x400
+        _place_chunk_header(gdb, chunk_addr, size_field=0x21)
+        user_addr = chunk_addr + 16
+        result = corruption.validate_free(address=hex(user_addr))
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "suspicious"
+        assert "not_in_tcache_unverified" in parsed["failures"]
+        assert parsed["checks"]["not_in_tcache"]["ok"] is False
+        assert "membership_unverified" in parsed["checks"]["not_in_tcache"]["reason"]
+        assert parsed["membership"]["tcache"]["checked"] is False
+        # fastbins still answered, so only the tcache probe is unverified.
+        assert parsed["membership"]["fastbins"]["checked"] is True
+        assert parsed["checks"]["not_in_fastbins"]["ok"] is True
+
+    def test_unresolvable_fastbins_never_yields_safe(self):
+        corruption, gdb = build_corruption(
+            debugger=ArenaFakeDebugger(unresolved_fields=["fastbinsY"])
+        )
+        _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        chunk_addr = HEAP_BASE + 0x400
+        _place_chunk_header(gdb, chunk_addr, size_field=0x21)
+        user_addr = chunk_addr + 16
+        result = corruption.validate_free(address=hex(user_addr))
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "suspicious"
+        assert "not_in_fastbins_unverified" in parsed["failures"]
+        assert parsed["membership"]["fastbins"]["checked"] is False
+
+    def test_double_free_still_takes_precedence_over_unverified(self):
+        # A found membership is still double_free even when the *other*
+        # probe could not be answered.
+        corruption, gdb = build_corruption()  # tcache unresolved
+        chunk_addr = HEAP_BASE + 0x400
+        fastbins = [chunk_addr] + [0] * 9
+        heads = list(range(1, NBINS))
+        bins_array: List[int] = []
+        for i in heads:
+            oh = _bin_head_address(MAIN_ARENA_ADDR, i)
+            bins_array.append(oh)
+            bins_array.append(oh)
+        gdb.place(
+            MAIN_ARENA_ADDR,
+            make_arena_bytes(fastbinsY=fastbins, bins=bins_array),
+        )
+        _place_chunk_header(gdb, chunk_addr, size_field=0x21)
+        user_addr = chunk_addr + 16
+        parsed = corruption.validate_free(address=hex(user_addr))["parsed"]
+        assert parsed["verdict"] == "double_free"
+        assert "not_in_fastbins" in parsed["failures"]
 
 
 class TestValidateFreeCorrupted:
@@ -511,14 +577,16 @@ class TestValidateFreeDoubleFree:
 
 class TestValidateFreeExplicitChunkKind:
     def test_address_kind_chunk_still_verifies_membership(self):
-        corruption, gdb = build_corruption()
+        corruption, gdb = build_corruption(debugger=TcacheAwareFakeDebugger())
         _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        gdb.place(TCACHE_ADDR, make_tcache_bytes())
         chunk_addr = HEAP_BASE + 0x400
         _place_chunk_header(gdb, chunk_addr, size_field=0x21)
         # Pass the chunk address directly rather than the user pointer.
         result = corruption.validate_free(address=hex(chunk_addr), address_kind="chunk")
         parsed = result["parsed"]
         assert parsed["verdict"] == "safe"
+        assert parsed["membership"]["tcache"]["checked"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -532,7 +600,7 @@ class TestHeapToolsFacadeCorruption:
             mappings=_extend_maps_with_heap(),
             libc=_libc_version("2.35"),
         )
-        debugger = ArenaFakeDebugger()
+        debugger = TcacheAwareFakeDebugger()
         facade = HeapTools.__new__(HeapTools)
         facade.discovery = AllocatorDiscovery(
             gdb,
@@ -577,6 +645,7 @@ class TestHeapToolsFacadeCorruption:
     def test_facade_routes_validate_free(self):
         facade, gdb = self._make_facade()
         _place_self_referential_bins(gdb, MAIN_ARENA_ADDR)
+        gdb.place(TCACHE_ADDR, make_tcache_bytes())
         chunk_addr = HEAP_BASE + 0x400
         _place_chunk_header(gdb, chunk_addr, size_field=0x21)
         user_addr = chunk_addr + 16

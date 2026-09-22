@@ -172,7 +172,7 @@ class MuslAnalyzer:
             if (
                 key is not None
                 and layout.get("area_head_off") is not None
-                and layout.get("meta_size") in (40, 28)
+                and layout.get("meta_size") in (40, 24)
             ):
                 self._layout_cache = (key, copy.deepcopy(layout))
         layout["ctx_addr"] = self._eval_int("(void*)&__malloc_context")
@@ -238,14 +238,27 @@ class MuslAnalyzer:
         )
 
     @staticmethod
-    def _decode_meta_bits(word: int, byteorder: Optional[str]) -> Dict[str, int]:
-        """Decode the packed meta bitfield on either endianness."""
+    def _decode_meta_bits(
+        word: int, byteorder: Optional[str], size_sz: int = 8
+    ) -> Dict[str, int]:
+        """Decode the packed ``struct meta`` bitfield.
+
+        musl declares ``last_idx:5``, ``freeable:1``, ``sizeclass:6`` and
+        ``maplen:(8*sizeof(uintptr_t)-12)`` in one ``uintptr_t``
+        (``mallocng/meta.h``).  Little-endian targets pack the first field
+        into the least-significant bits; big-endian targets pack it into
+        the most-significant bits.  ``size_sz`` selects the 32- or 64-bit
+        word width, so 32-bit builds get a 20-bit ``maplen`` and a
+        correspondingly shifted decode.
+        """
+        word_bits = 8 * size_sz
+        maplen_bits = word_bits - 12
         if byteorder == "big":
             return {
-                "last_idx": (word >> 59) & 31,
-                "freeable": (word >> 58) & 1,
-                "sizeclass": (word >> 52) & 63,
-                "maplen": word & ((1 << 52) - 1),
+                "last_idx": (word >> (word_bits - 5)) & 31,
+                "freeable": (word >> (word_bits - 6)) & 1,
+                "sizeclass": (word >> (word_bits - 12)) & 63,
+                "maplen": word & ((1 << maplen_bits) - 1),
             }
         return {
             "last_idx": word & 31,
@@ -376,8 +389,8 @@ class MuslAnalyzer:
         check("meta_mem_matches_group", True, f"{group_base:#x}")
 
         bits_off = 3 * size_sz + 8
-        bits = int.from_bytes(meta_raw[bits_off : bits_off + 8], byteorder)
-        fields = self._decode_meta_bits(bits, byteorder)
+        bits = int.from_bytes(meta_raw[bits_off : bits_off + size_sz], byteorder)
+        fields = self._decode_meta_bits(bits, byteorder, size_sz)
         last_idx, sizeclass, maplen = (
             fields["last_idx"],
             fields["sizeclass"],
@@ -433,15 +446,26 @@ class MuslAnalyzer:
                     target, None, checks, mappings, "offset outside stride"
                 )
             check("offset_in_stride_range", True, None)
-            stride: Optional[int] = MUSL_UNIT * classes[sizeclass]
         elif sizeclass == 63:
             check("offset_in_stride_range", True, "mmap path")
-            stride = None
         else:
             check("sizeclass_known", False, sizeclass)
             return self._chunk_verdict(
                 target, None, checks, mappings, "unknown sizeclass"
             )
+
+        # musl get_stride(): a group with last_idx == 0 and a nonzero maplen
+        # was carved out of whole pages by itself (an individually-mmap'd
+        # allocation or a single-slot group), so its stride is the mapping
+        # length minus the group header -- *not* the size-class stride.
+        # Every other group steps by UNIT * size_classes[sizeclass].
+        if last_idx == 0 and maplen:
+            stride: Optional[int] = maplen * 4096 - MUSL_UNIT
+        elif sizeclass < MUSL_SIZECLASS_COUNT:
+            stride = MUSL_UNIT * classes[sizeclass]  # type: ignore[index]
+        else:
+            stride = None
+
         if maplen and not (offset <= maplen * 4096 // MUSL_UNIT - 1):
             check("maplen_bounds", False, [offset, maplen])
             return self._chunk_verdict(
@@ -542,7 +566,9 @@ class MuslAnalyzer:
         if pointer_bits not in (32, 64):
             raise RuntimeError(f"unsupported pointer width {pointer_bits!r}")
         void_star = 8 if pointer_bits == 64 else 4
-        expected_meta = 40 if pointer_bits == 64 else 28
+        # sizeof(struct meta) = 3 pointers + 2 ints + one uintptr_t bitfield
+        # word: 40 on 64-bit, 24 on 32-bit musl (meta.h).
+        expected_meta = 40 if pointer_bits == 64 else 24
         raw_order = profile.get("byteorder")
         byteorder: Literal["little", "big"] = (
             cast(Literal["little", "big"], raw_order)
@@ -570,6 +596,11 @@ class MuslAnalyzer:
                 "meta_area_head unreadable",
             )
         head = int.from_bytes(area_head_raw, byteorder)
+        # struct meta_area = uint64 check + pointer next + int nslots + a
+        # flexible ``struct meta slots[]``.  The slots offset is that header
+        # rounded up to the meta pointer alignment: 24 on 64-bit (the int is
+        # padded to 8), 16 on 32-bit (no padding needed).
+        meta_area_slots_off = (12 + void_star + void_star - 1) & ~(void_star - 1)
         groups: List[Dict[str, Any]] = []
         areas = 0
         corrupted: Optional[str] = None
@@ -583,8 +614,8 @@ class MuslAnalyzer:
                     corrupted = f"meta_area cycle at {cursor:#x}"
                 break
             seen.add(cursor)
-            header, header_err = self._read_bytes(cursor, 16 + void_star)
-            if header_err is not None or len(header) < 16 + void_star:
+            header, header_err = self._read_bytes(cursor, meta_area_slots_off)
+            if header_err is not None or len(header) < meta_area_slots_off:
                 corrupted = f"unreadable meta_area at {cursor:#x}"
                 break
             if int.from_bytes(header[:8], byteorder) != secret:
@@ -598,7 +629,7 @@ class MuslAnalyzer:
             areas += 1
             meta_size = context["meta_size"]
             blob, blob_err = self._read_bytes(
-                cursor + 16 + void_star, nslots * meta_size
+                cursor + meta_area_slots_off, nslots * meta_size
             )
             if blob_err is not None or len(blob) < nslots * meta_size:
                 corrupted = f"unreadable meta slots at {cursor:#x}"
@@ -611,12 +642,13 @@ class MuslAnalyzer:
                 if mem == 0:
                     continue
                 bits = int.from_bytes(
-                    slot[3 * void_star + 8 : 3 * void_star + 16], byteorder
+                    slot[3 * void_star + 8 : 3 * void_star + 8 + void_star],
+                    byteorder,
                 )
-                fields = self._decode_meta_bits(bits, byteorder)
+                fields = self._decode_meta_bits(bits, byteorder, void_star)
                 groups.append(
                     {
-                        "meta_address": cursor + 16 + void_star + i * meta_size,
+                        "meta_address": cursor + meta_area_slots_off + i * meta_size,
                         "group_base": mem,
                         "sizeclass": fields["sizeclass"],
                         "last_idx": fields["last_idx"],

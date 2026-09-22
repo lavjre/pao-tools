@@ -225,10 +225,12 @@ class ArenaFakeInspection:
         *,
         mappings: Optional[List[Dict[str, Any]]] = None,
         libc: Optional[Dict[str, Any]] = None,
+        arch: str = "amd64-64-little",
     ) -> None:
         self.gdb = gdb
         self._mappings = mappings if mappings is not None else GLIBC_MAPS
         self._libc = libc
+        self._arch = arch
 
     def memory_maps(self) -> Dict[str, Any]:
         return {
@@ -244,7 +246,7 @@ class ArenaFakeInspection:
     def checksec(self, binary_path: str) -> Dict[str, Any]:
         return {
             "success": True,
-            "parsed": {"arch": "amd64-64-little", "file": binary_path},
+            "parsed": {"arch": self._arch, "file": binary_path},
         }
 
 
@@ -408,6 +410,8 @@ class TestParseArenaStruct:
         assert parsed["fields"]["top"] == 0x1234
 
     def test_32bit_target(self):
+        # arm32 layout (MALLOC_ALIGNMENT = 8 -> NFASTBINS = 10); the i386
+        # override is covered separately below.
         offsets_32 = {
             "mutex": 0,
             "flags": 4,
@@ -432,10 +436,50 @@ class TestParseArenaStruct:
             next=0x8049100,
             system_mem=0x21000,
         )
-        parsed = GlibcArenas.parse_arena_struct(raw, offsets_32, 32, "little")
+        parsed = GlibcArenas.parse_arena_struct(
+            raw, offsets_32, 32, "little", architecture="arm-32-little"
+        )
         assert parsed["fields"]["top"] == 0x8049000
         assert parsed["fields"]["next"] == 0x8049100
         assert parsed["fields"]["system_mem"] == 0x21000
+        assert len(parsed["fields"]["fastbinsY"]) == 10
+
+    def test_i386_target_reads_11_fastbin_slots(self):
+        # glibc i386 uses MALLOC_ALIGNMENT = 16 since 2.26 (BZ 21120), so
+        # request2size(80) rounds to 96 and NFASTBINS is 11 -- the extra
+        # slot is the 0x60 fastbin.  A 10-slot decode silently drops it.
+        offsets_32 = {
+            "mutex": 0,
+            "flags": 4,
+            "have_fastchunks": 8,
+            "fastbinsY": 12,
+            "top": 56,  # 12 + 11*4
+            "last_remainder": 60,
+            "bins": 64,
+            "binmap": 64 + BINS_ARRAY_LEN * 4,
+            "next": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4,
+            "next_free": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 4,
+            "attached_threads": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 8,
+            "system_mem": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 12,
+            "max_system_mem": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 16,
+        }
+        struct_size_32 = 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 20
+        raw = make_arena_bytes(
+            struct_size=struct_size_32,
+            pointer_bits=32,
+            offsets=offsets_32,
+            fastbinsY=[0] * 10 + [0x60],
+            top=0x8049000,
+        )
+        parsed = GlibcArenas.parse_arena_struct(
+            raw, offsets_32, 32, "little", architecture="i386-32-little"
+        )
+        assert len(parsed["fields"]["fastbinsY"]) == 11
+        assert parsed["fields"]["fastbinsY"][10] == 0x60
+        assert parsed["fields"]["top"] == 0x8049000
+        # An unresolved 32-bit architecture defaults to the i386 layout.
+        default = GlibcArenas.parse_arena_struct(raw, offsets_32, 32, "little")
+        assert len(default["fields"]["fastbinsY"]) == 11
 
     def test_invalid_pointer_bits_raises(self):
         with pytest.raises(ValueError):

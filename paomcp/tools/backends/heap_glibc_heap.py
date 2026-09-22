@@ -72,6 +72,136 @@ CHUNK_INSPECTION_SCHEMA = "pao.glibc-heap-chunk.v1"
 CHUNK_VALIDATION_SCHEMA = "pao.glibc-heap-chunk-validation.v1"
 
 
+# ----------------------------------------------------------------------
+# Verified per-architecture glibc malloc geometry
+# ----------------------------------------------------------------------
+#
+# The constants below are transcribed from glibc's own sources; each entry
+# cites the header/macro it comes from so it can be re-verified against a
+# release tarball (all paths are relative to the glibc source root):
+#
+# * ``SIZE_SZ`` is ``sizeof(size_t)`` and ``MIN_CHUNK_SIZE`` is
+#   ``offsetof(struct malloc_chunk, fd_nextsize)`` = ``4 * SIZE_SZ``
+#   (``malloc/malloc.c``).
+# * ``MALLOC_ALIGNMENT`` comes from ``sysdeps/generic/malloc-alignment.h``:
+#
+#       MALLOC_ALIGNMENT = (2 * SIZE_SZ < __alignof__(long double)
+#                           ? __alignof__(long double) : 2 * SIZE_SZ)
+#
+#   x86_64 and aarch64 have a 16-byte-aligned ``long double`` -> 16.
+#   arm32's ``long double`` is 8-byte-aligned -> 8.  i386 overrides the
+#   generic rule with a hard ``#define MALLOC_ALIGNMENT 16`` in
+#   ``sysdeps/i386/malloc-alignment.h`` (glibc 2.26+, bug 21120) -- so an
+#   i386 chunk can never be 8-mod-16 even though SIZE_SZ is 4.
+# * ``MINSIZE`` is ``ALIGN_UP(MIN_CHUNK_SIZE, MALLOC_ALIGNMENT)``
+#   (``malloc/malloc.c``): 32 on x86_64/aarch64, 16 on i386/arm32.
+# * ``NFASTBINS`` is ``fastbin_index(request2size(MAX_FAST_SIZE)) + 1``
+#   (``malloc/malloc.c``) with::
+#
+#       fastbin_index(sz) = (sz >> (SIZE_SZ == 8 ? 4 : 3)) - 2
+#       MAX_FAST_SIZE    = 80 * SIZE_SZ / 4
+#       request2size(req) = align_up(req + SIZE_SZ, MALLOC_ALIGNMENT)
+#                           (or MINSIZE, whichever is larger)
+#
+#   The fastbin index shift is deliberately SIZE_SZ-based, *not*
+#   MALLOC_ALIGNMENT-based, on every ABI.  i386 therefore keeps the 8-byte
+#   index step (slot i holds a ``(2 + i) * 8``-byte chunk) while its chunks
+#   are 16-aligned, and the larger request2size rounding makes room for one
+#   extra slot: NFASTBINS is 11 on i386 vs 10 elsewhere.  A tool that
+#   assumes 10 slots on i386 misses the 0x60 fastbin entirely.
+
+
+@dataclass(frozen=True)
+class GlibcArchLayout:
+    """Compile-time glibc malloc constants for one architecture.
+
+    ``size_sz`` is ``sizeof(size_t)``, ``malloc_alignment`` is glibc's
+    ``MALLOC_ALIGNMENT``, ``minsize`` is the aligned minimum chunk size and
+    ``nfastbins`` is the length of ``malloc_state.fastbinsY``.
+    """
+
+    name: str
+    size_sz: int
+    malloc_alignment: int
+    minsize: int
+    nfastbins: int
+
+
+#: Per-architecture layouts keyed by canonical name.  x86_64 and aarch64
+#: carry identical constants; i386 differs in MALLOC_ALIGNMENT/NFASTBINS and
+#: arm32 in MALLOC_ALIGNMENT.
+GLIBC_ARCH_LAYOUTS: Mapping[str, GlibcArchLayout] = {
+    "x86_64": GlibcArchLayout(
+        name="x86_64", size_sz=8, malloc_alignment=16, minsize=32, nfastbins=10
+    ),
+    "aarch64": GlibcArchLayout(
+        name="aarch64", size_sz=8, malloc_alignment=16, minsize=32, nfastbins=10
+    ),
+    "i386": GlibcArchLayout(
+        name="i386", size_sz=4, malloc_alignment=16, minsize=16, nfastbins=11
+    ),
+    "arm32": GlibcArchLayout(
+        name="arm32", size_sz=4, malloc_alignment=8, minsize=16, nfastbins=10
+    ),
+}
+
+# Width fallbacks when the checksec arch string is missing or inconsistent
+# with the runtime pointer width.  i386 is the only 32-bit ABI whose
+# MALLOC_ALIGNMENT overrides the generic 8-byte rule and by far the most
+# common 32-bit glibc target; arm32 callers should pass the checksec arch
+# string (e.g. "arm-32-little") to select the 8-byte alignment.
+DEFAULT_GLIBC_ARCH_64 = "x86_64"
+DEFAULT_GLIBC_ARCH_32 = "i386"
+
+
+def glibc_arch_from_name(architecture: Optional[str]) -> Optional[str]:
+    """Map a checksec-style arch string to a table key, else ``None``.
+
+    Accepts the ``<arch>-<bits>-<endian>`` strings pwndbg checksec emits
+    (``amd64-64-little``, ``i386-32-little``, ``aarch64-64-little``,
+    ``arm-32-little``) plus bare GDB arch names (``i386:x86-64``,
+    ``x86_64``, ``arm``).  Order matters: 64-bit names are matched before
+    their 32-bit prefixes (``x86_64`` before ``x86``, ``aarch64`` before
+    ``arm``).
+    """
+    if not architecture:
+        return None
+    text = str(architecture).lower()
+    if "aarch64" in text or "arm64" in text:
+        return "aarch64"
+    if "amd64" in text or "x86_64" in text or "x86-64" in text:
+        return "x86_64"
+    if (
+        "i386" in text
+        or "i486" in text
+        or "i586" in text
+        or "i686" in text
+        or "x86" in text
+    ):
+        return "i386"
+    if "arm" in text:
+        return "arm32"
+    return None
+
+
+def glibc_arch_layout(
+    pointer_bits: int, architecture: Optional[str] = None
+) -> GlibcArchLayout:
+    """Return the verified glibc layout for a target.
+
+    ``architecture`` is the checksec-style string from the target profile;
+    when it is absent, unrecognized, or disagrees with ``pointer_bits`` the
+    width default is used (x86_64 for 64-bit, i386 for 32-bit).
+    """
+    if pointer_bits not in (32, 64):
+        raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
+    arch = glibc_arch_from_name(architecture)
+    if arch is not None and GLIBC_ARCH_LAYOUTS[arch].size_sz * 8 == pointer_bits:
+        return GLIBC_ARCH_LAYOUTS[arch]
+    fallback = DEFAULT_GLIBC_ARCH_64 if pointer_bits == 64 else DEFAULT_GLIBC_ARCH_32
+    return GLIBC_ARCH_LAYOUTS[fallback]
+
+
 class GlibcHeap:
     """Parse glibc malloc_chunk headers and physical chunk boundaries.
 
@@ -131,6 +261,7 @@ class GlibcHeap:
         chunk_address: int,
         pointer_bits: int,
         byteorder: Optional[str],
+        architecture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Decode a malloc_chunk header from raw bytes with per-field evidence.
 
@@ -138,12 +269,15 @@ class GlibcHeap:
         shorter than the two-pointer header, or a full parse dict with the
         integer fields, decoded flags, physical navigation, structural checks
         (alignment / minimum-size) and the raw byte slice each field was
-        derived from.
+        derived from.  ``architecture`` selects the per-arch
+        ``MALLOC_ALIGNMENT`` / ``MINSIZE`` used for the structural checks
+        (see :func:`glibc_arch_layout`).
         """
-        size_sz = cls._size_sz_from_bits(pointer_bits)
+        layout = glibc_arch_layout(pointer_bits, architecture)
+        size_sz = layout.size_sz
         header_size = 2 * size_sz
-        alignment = 2 * size_sz
-        min_chunk_size = 4 * size_sz
+        alignment = layout.malloc_alignment
+        min_chunk_size = layout.minsize
         order = cls._decode_byteorder(byteorder)
 
         if len(raw_bytes) < header_size:
@@ -492,7 +626,11 @@ class GlibcHeap:
             cancellation_check()
         raw_bytes, read_error = self._read_header(chunk_address, header_size)
         chunk_parsed = self.parse_chunk_header(
-            raw_bytes, chunk_address, pointer_bits, byteorder
+            raw_bytes,
+            chunk_address,
+            pointer_bits,
+            byteorder,
+            architecture=profile.get("architecture"),
         )
 
         warnings: List[str] = []

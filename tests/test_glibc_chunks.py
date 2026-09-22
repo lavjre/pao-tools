@@ -134,15 +134,82 @@ class TestParseChunkHeader:
         assert parsed["fields"]["flags"]["prev_inuse"] is True
 
     def test_32bit_target_profile(self):
+        # Unresolved 32-bit defaults to i386: MALLOC_ALIGNMENT = 16 since
+        # glibc 2.26 (BZ 21120), so chunk alignment is 16, not 8.  arm32 is
+        # covered by the explicit-architecture tests below.
         chunk_addr = 0x08049000
         raw = header_bytes(prev_size=0, size_field=0x11, pointer_bits=32)
         parsed = GlibcHeap.parse_chunk_header(raw, chunk_addr, 32, "little")
         assert parsed["size_sz"] == 4
-        assert parsed["alignment"] == 8
+        assert parsed["alignment"] == 16
         assert parsed["min_chunk_size"] == 16
         assert parsed["fields"]["size"] == 0x10
         assert parsed["user_address"] == chunk_addr + 8
         assert parsed["physical_next"]["address"] == chunk_addr + 0x10
+
+    def test_i386_rejects_8mod16_chunk_size(self):
+        # Regression for the old 2*SIZE_SZ alignment assumption: a 0x18
+        # (8-mod-16) chunk size is impossible on i386 glibc 2.26+ where
+        # MALLOC_ALIGNMENT is 16.
+        chunk_addr = 0x08049000
+        raw = header_bytes(prev_size=0, size_field=0x19, pointer_bits=32)
+        parsed = GlibcHeap.parse_chunk_header(
+            raw, chunk_addr, 32, "little", architecture="i386-32-little"
+        )
+        assert parsed["alignment"] == 16
+        assert parsed["fields"]["size"] == 0x18
+        assert parsed["structural_checks"]["alignment_ok"] is False
+
+    def test_arm32_accepts_8mod16_chunk_size(self):
+        # arm32's generic MALLOC_ALIGNMENT is 8, so 0x18 is a legal chunk.
+        chunk_addr = 0x08049000
+        raw = header_bytes(prev_size=0, size_field=0x19, pointer_bits=32)
+        parsed = GlibcHeap.parse_chunk_header(
+            raw, chunk_addr, 32, "little", architecture="arm-32-little"
+        )
+        assert parsed["alignment"] == 8
+        assert parsed["structural_checks"]["alignment_ok"] is True
+
+    def test_arch_table_matches_glibc_sources(self):
+        # (SIZE_SZ, MALLOC_ALIGNMENT, MINSIZE, NFASTBINS) transcribed from
+        # malloc/malloc.c + sysdeps/*/malloc-alignment.h.
+        from paomcp.tools.backends.heap_glibc_heap import GLIBC_ARCH_LAYOUTS
+
+        expected = {
+            "x86_64": (8, 16, 32, 10),
+            "aarch64": (8, 16, 32, 10),
+            "i386": (4, 16, 16, 11),
+            "arm32": (4, 8, 16, 10),
+        }
+        for name, values in expected.items():
+            layout = GLIBC_ARCH_LAYOUTS[name]
+            assert (
+                layout.size_sz,
+                layout.malloc_alignment,
+                layout.minsize,
+                layout.nfastbins,
+            ) == values
+
+    def test_arch_name_mapping_and_width_fallback(self):
+        from paomcp.tools.backends.heap_glibc_heap import (
+            glibc_arch_from_name,
+            glibc_arch_layout,
+        )
+
+        assert glibc_arch_from_name("amd64-64-little") == "x86_64"
+        assert glibc_arch_from_name("i386-32-little") == "i386"
+        assert glibc_arch_from_name("i686-32-little") == "i386"
+        assert glibc_arch_from_name("aarch64-64-little") == "aarch64"
+        assert glibc_arch_from_name("arm-32-little") == "arm32"
+        assert glibc_arch_from_name("i386:x86-64") == "x86_64"
+        assert glibc_arch_from_name(None) is None
+        assert glibc_arch_from_name("mips-32-big") is None
+        # Width fallbacks: unknown 64-bit -> x86_64, unknown 32-bit -> i386.
+        assert glibc_arch_layout(64, None).name == "x86_64"
+        assert glibc_arch_layout(32, None).name == "i386"
+        # An arch inconsistent with the runtime pointer width is ignored.
+        assert glibc_arch_layout(64, "i386-32-little").name == "x86_64"
+        assert glibc_arch_layout(32, "amd64-64-little").name == "i386"
 
     def test_big_endian_decode(self):
         raw = (16).to_bytes(8, "big") + (0x21).to_bytes(8, "big")
@@ -271,11 +338,13 @@ class FakeInspection:
         mappings: Optional[List[Dict[str, Any]]] = None,
         libc: Optional[Dict[str, Any]] = None,
         mappings_ok: bool = True,
+        arch: str = "amd64-64-little",
     ) -> None:
         self.gdb = gdb
         self._mappings = mappings if mappings is not None else GLIBC_MAPS
         self._libc = libc
         self._mappings_ok = mappings_ok
+        self._arch = arch
 
     def memory_maps(self) -> Dict[str, Any]:
         return {
@@ -291,14 +360,17 @@ class FakeInspection:
     def checksec(self, binary_path: str) -> Dict[str, Any]:
         return {
             "success": True,
-            "parsed": {"arch": "amd64-64-little", "file": binary_path},
+            "parsed": {"arch": self._arch, "file": binary_path},
         }
 
 
 class FakeDebugger:
+    def __init__(self, pointer_bytes: int = 8) -> None:
+        self._pointer_bytes = pointer_bytes
+
     def evaluate_expression(self, expression: str) -> Dict[str, Any]:
         if expression == "sizeof(void*)":
-            return {"success": True, "parsed": {"value": "8"}}
+            return {"success": True, "parsed": {"value": str(self._pointer_bytes)}}
         return {"success": False, "parsed": {}}
 
 
@@ -307,6 +379,8 @@ def build_heap(
     live: bool = True,
     mappings: Optional[List[Dict[str, Any]]] = None,
     libc: Optional[Dict[str, Any]] = None,
+    arch: str = "amd64-64-little",
+    pointer_bytes: int = 8,
 ):
     gdb = ChunkFakeGdb(live=live)
     resolved_libc = (
@@ -318,8 +392,9 @@ def build_heap(
         gdb,
         mappings=mappings,
         libc=None if libc is None and mappings is not None else resolved_libc,
+        arch=arch,
     )
-    debugger = FakeDebugger()
+    debugger = FakeDebugger(pointer_bytes)
     discovery = AllocatorDiscovery(
         gdb, inspection, debugger, "sess", binary_path_provider=lambda: "/bin/chal"
     )
@@ -516,6 +591,54 @@ class TestValidateChunk:
         parsed = result["parsed"]
         assert parsed["verdict"] == "corrupted"
         assert "min_size" in parsed["failures"]
+
+    def test_i386_8mod16_chunk_is_corrupted_end_to_end(self):
+        # Regression: with the i386 profile the chunk parser must use
+        # MALLOC_ALIGNMENT = 16 from the arch table, not 2 * SIZE_SZ = 8.
+        # A 0x18-size chunk is 8-mod-16 and cannot exist on i386 glibc.
+        heap32_base = 0x08049000
+        maps_32 = [
+            {
+                "file": "/bin/chal",
+                "start": "0x8048000",
+                "end": "0x8049000",
+                "permissions": "r-xp",
+                "readable": True,
+                "writable": False,
+                "executable": True,
+            },
+            {
+                "file": "/lib/libc.so.6",
+                "start": "0xf7c00000",
+                "end": "0xf7e00000",
+                "permissions": "rw-p",
+                "readable": True,
+                "writable": True,
+                "executable": False,
+            },
+            {
+                "file": "[heap]",
+                "start": f"0x{heap32_base:x}",
+                "end": f"0x{heap32_base + 0x1000:x}",
+                "permissions": "rw-p",
+                "readable": True,
+                "writable": True,
+                "executable": False,
+            },
+        ]
+        heap, gdb = build_heap(
+            mappings=maps_32,
+            libc={"libc": "/lib/libc.so.6", "version": "2.31"},
+            arch="i386-32-little",
+            pointer_bytes=4,
+        )
+        chunk_addr = heap32_base + 0x400
+        gdb.place(chunk_addr, header_bytes(0, 0x19, pointer_bits=32))
+        result = heap.validate_chunk(address=f"0x{chunk_addr:x}", address_kind="chunk")
+        parsed = result["parsed"]
+        assert parsed["target_profile"]["pointer_bits"] == 32
+        assert parsed["verdict"] == "corrupted"
+        assert "alignment" in parsed["failures"]
 
     def test_corrupted_when_chunk_outside_any_mapping(self):
         heap, gdb = build_heap()

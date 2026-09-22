@@ -50,6 +50,8 @@ from paomcp.tools.backends.heap_snapshots import (
     HeapSnapshotError,
 )
 
+from paomcp.tools.backends.heap_glibc_heap import glibc_arch_layout
+
 from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 
 # ----------------------------------------------------------------------
@@ -67,6 +69,14 @@ from paomcp.tools.backends.heap_discovery import AllocatorDiscovery
 # them from source rather than probing gdb because they participate in the
 # expected malloc_state layout: querying them wouldn't tell us anything the
 # per-field offset lookups already do.
+#
+# ``NFASTBINS`` is architecture-dependent (see GLIBC_ARCH_LAYOUTS in
+# heap_glibc_heap): 10 on x86_64/aarch64/arm32 but 11 on i386, where glibc's
+# SIZE_SZ-based fastbin index step plus the 16-byte MALLOC_ALIGNMENT rounding
+# in request2size() add a slot (the 0x60 fastbin).  This constant is the
+# 64-bit default kept for callers that predate the per-arch table; code that
+# knows the target profile must use :func:`nfastbins_for` /
+# :func:`malloc_state_fields`.
 NFASTBINS = 10
 NBINS = 128
 # glibc's bin array is ``mchunkptr bins[NBINS * 2 - 2]`` -- 254 entries on
@@ -103,6 +113,24 @@ _MALLOC_STATE_FIELDS: Tuple[Tuple[str, str, int], ...] = (
     ("system_mem", "size_t", 1),
     ("max_system_mem", "size_t", 1),
 )
+
+
+def nfastbins_for(pointer_bits: int, architecture: Optional[str] = None) -> int:
+    """Length of ``malloc_state.fastbinsY`` for the target (10, or 11 on i386)."""
+    return glibc_arch_layout(pointer_bits, architecture).nfastbins
+
+
+def malloc_state_fields(
+    pointer_bits: int, architecture: Optional[str] = None
+) -> Tuple[Tuple[str, str, int], ...]:
+    """``_MALLOC_STATE_FIELDS`` with the target's ``fastbinsY`` count."""
+    nfastbins = nfastbins_for(pointer_bits, architecture)
+    if nfastbins == NFASTBINS:
+        return _MALLOC_STATE_FIELDS
+    return tuple(
+        (name, kind, nfastbins if name == "fastbinsY" else count)
+        for name, kind, count in _MALLOC_STATE_FIELDS
+    )
 
 
 def arena_layout_cache_key(
@@ -299,6 +327,7 @@ class GlibcArenas:
         offsets: Mapping[str, Optional[int]],
         pointer_bits: int,
         byteorder: Optional[str],
+        architecture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Decode a malloc_state from raw bytes plus resolved field offsets.
 
@@ -306,6 +335,8 @@ class GlibcArenas:
         falls outside ``raw_bytes`` are reported as ``None`` and listed
         under ``unreadable_fields``.  The caller can distinguish a truly
         zero value from an unreadable field via this list.
+        ``architecture`` selects the per-arch ``fastbinsY`` array length
+        (11 on i386, 10 elsewhere).
         """
         if pointer_bits not in (32, 64):
             raise ValueError(f"pointer_bits must be 32 or 64, got {pointer_bits!r}")
@@ -325,7 +356,7 @@ class GlibcArenas:
         def _read_ptr(offset: int) -> Optional[int]:
             return _read_int(offset, size_sz)
 
-        for name, kind, count in _MALLOC_STATE_FIELDS:
+        for name, kind, count in malloc_state_fields(pointer_bits, architecture):
             offset = offsets.get(name)
             if offset is None:
                 fields[name] = None
@@ -735,7 +766,11 @@ class GlibcArenas:
             )
 
         parsed_fields = self.parse_arena_struct(
-            raw, layout["offsets"], pointer_bits, byteorder
+            raw,
+            layout["offsets"],
+            pointer_bits,
+            byteorder,
+            architecture=profile.get("architecture"),
         )
 
         parsed = {

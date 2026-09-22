@@ -147,6 +147,46 @@ def make_slub_btf(
     return make_btf_blob(records, strings)
 
 
+# struct page without struct slab: freelist hides inside nested anonymous
+# struct/union members (the real pre-6.x layout).
+NESTED_FREELIST_OFF = 0x18
+
+
+def make_slub_btf_nested_page() -> bytes:
+    """BTF with kmem_cache + a struct page whose freelist is nested anonymous.
+
+    Layout: ``page { anon struct @ 0x18 { anon union @ 0 { freelist } } }``.
+    """
+    member_names = [
+        "name",
+        "object_size",
+        "size",
+        "offset",
+        "oo",
+        "random",
+        "freelist",
+    ]
+    strings, off = make_string_section("kmem_cache", "page", *member_names)
+    cache_members = [
+        (off["name"], 1, CACHE_OFF["name"] * 8),
+        (off["object_size"], 1, CACHE_OFF["object_size"] * 8),
+        (off["size"], 1, CACHE_OFF["size"] * 8),
+        (off["offset"], 1, CACHE_OFF["offset"] * 8),
+        (off["oo"], 1, CACHE_OFF["oo"] * 8),
+        (off["random"], 1, CACHE_OFF["random"] * 8),
+    ]
+    records = [btf_struct_record(off["kmem_cache"], KMEM_CACHE_SIZE, cache_members)]
+    # type 2: struct page with one anonymous struct member at byte 0x18.
+    records.append(
+        btf_struct_record(off["page"], SLAB_SIZE, [(0, 3, NESTED_FREELIST_OFF * 8)])
+    )
+    # type 3: anonymous struct with one anonymous union member at byte 0.
+    records.append(btf_struct_record(0, SLAB_SIZE, [(0, 4, 0)]))
+    # type 4: anonymous union carrying freelist.
+    records.append(btf_struct_record(0, SLAB_SIZE, [(off["freelist"], 1, 0)]))
+    return make_btf_blob(records, strings)
+
+
 def place_cache(
     gdb: ArenaFakeGdb,
     *,
@@ -481,6 +521,30 @@ class TestDecodeFreelist:
             slab_address=hex(SLAB_ADDR),
             btf_path=btf_path,
         )["parsed"]
+        assert parsed["slab"]["header_source"] == "struct page"
+        assert parsed["freelist"]["object_addresses"] == [OBJ0, OBJ1, OBJ2]
+
+    def test_decode_nested_anonymous_page_fallback(self, tmp_path: Path):
+        # Kernels without struct slab: page.freelist lives inside nested
+        # anonymous struct/union members, so the BTF lookup must recurse.
+        heap, gdb, btf_path = build_slub(
+            tmp_path=tmp_path, btf_bytes=make_slub_btf_nested_page()
+        )
+        gdb.place(NAME_ADDR, b"kmalloc-64\x00")
+        place_cache(gdb, random=RANDOM)
+        page_buf = bytearray(SLAB_SIZE)
+        page_buf[NESTED_FREELIST_OFF : NESTED_FREELIST_OFF + 8] = OBJ0.to_bytes(
+            8, "little"
+        )
+        gdb.place(SLAB_ADDR, bytes(page_buf))
+        place_slub_chain(gdb, [OBJ0, OBJ1, OBJ2])
+
+        parsed = heap.decode_slub_freelist(
+            cache_address=hex(CACHE_ADDR),
+            slab_address=hex(SLAB_ADDR),
+            btf_path=btf_path,
+        )["parsed"]
+        assert parsed["verdict"] == "decoded"
         assert parsed["slab"]["header_source"] == "struct page"
         assert parsed["freelist"]["object_addresses"] == [OBJ0, OBJ1, OBJ2]
 

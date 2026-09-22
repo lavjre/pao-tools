@@ -154,6 +154,31 @@ class StubBins:
         return self.tcache_response
 
 
+class SlowWalkBins(StubBins):
+    """A bins stub whose fastbin walk simulates a long GDB-read loop.
+
+    Each simulated read invokes the ``cancellation_check`` callback the way
+    the real chain walkers do (once per chunk), so a missing deadline check
+    inside the walk is observable as a completed walk past the budget.
+    """
+
+    def __init__(self, *, iterations: int = 100_000, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._iterations = iterations
+        self.iterations = 0
+        self.completed = False
+
+    def inspect_fastbins(
+        self, *, arena_address=None, max_chunks_per_bin=None, cancellation_check=None
+    ):
+        for _ in range(self._iterations):
+            self.iterations += 1
+            if cancellation_check is not None:
+                cancellation_check()
+        self.completed = True
+        return self.fastbins_response
+
+
 def _canned_backend_response(command: str, parsed: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "success": True,
@@ -200,6 +225,7 @@ def _build_history(
     fastbins_response: Optional[Dict[str, Any]] = None,
     bins_response: Optional[Dict[str, Any]] = None,
     tcache_response: Optional[Dict[str, Any]] = None,
+    bins: Optional[StubBins] = None,
     max_snapshots: int = DEFAULT_MAX_HEAP_SNAPSHOTS,
     max_snapshot_bytes: int = DEFAULT_MAX_HEAP_SNAPSHOT_BYTES,
 ) -> HeapHistory:
@@ -213,7 +239,11 @@ def _build_history(
             _profile_64(),
         ),
         arenas=StubArenas(arenas_response, inspect_arena_by_addr),
-        bins=StubBins(fastbins_response, bins_response, tcache_response),
+        bins=(
+            bins
+            if bins is not None
+            else StubBins(fastbins_response, bins_response, tcache_response)
+        ),
         max_snapshots=max_snapshots,
         max_snapshot_bytes=max_snapshot_bytes,
     )
@@ -795,6 +825,28 @@ class TestCaptureGlibc:
         )
         with pytest.raises(TimeoutError, match="exceeded its .* budget"):
             history.capture_heap_snapshot(timeout_seconds=300.0)
+
+    def test_capture_deadline_enforced_inside_bin_walk(self, monkeypatch) -> None:
+        # One arena whose fastbin walk simulates 100k GDB reads; without a
+        # deadline check inside the walk the budget is only noticed after the
+        # walk returns.  The fake clock advances 1s per monotonic() call.
+        _pin_classification(monkeypatch, _glibc_classification())
+        arena_addr = 0x7FFF_F7E0_0000
+        arenas_response = _canned_backend_response(
+            "list_arenas",
+            {"arenas": [{"address": arena_addr, "is_main": True, "index": 0}]},
+        )
+        slow_bins = SlowWalkBins(iterations=100_000)
+        history = _build_history(arenas_response=arenas_response, bins=slow_bins)
+        ticks = iter(range(1000, 200_000))
+        monkeypatch.setattr(
+            "paomcp.tools.backends.heap_snapshots.time.monotonic",
+            lambda: float(next(ticks)),
+        )
+        with pytest.raises(TimeoutError, match="exceeded its .* budget"):
+            history.capture_heap_snapshot(timeout_seconds=5.0)
+        assert slow_bins.completed is False
+        assert slow_bins.iterations < 100_000
 
     def test_capture_rejects_non_positive_chunk_cap(self) -> None:
         history = _build_history()

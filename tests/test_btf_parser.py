@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from paomcp.tools.backends import btf as btf_module
 from paomcp.tools.backends.btf import (
     BTF_KIND_ARRAY,
     BTF_KIND_CONST,
@@ -283,6 +284,94 @@ class TestKindSkips:
         assert btf.type_count == 19
         # Every record parsed in order; only struct/union got names indexed.
         assert btf.struct("n") is not None
+
+
+# ---------------------------------------------------------------------------
+class TestVlenCap:
+    def test_large_datasec_vlen_above_old_cap_parses(self):
+        # 8193 var_secinfos is legal (below the kernel's BTF_MAX_VLEN of
+        # 0xffff) but was rejected by the old 8192 parse cap.  The trailing
+        # struct proves the big record did not desync the walk.
+        vlen = 8193
+        strings, off = make_string_section("big", "after")
+        big = btf_non_struct_record(
+            BTF_KIND_DATASEC, off["big"], b"\x00" * (12 * vlen), vlen=vlen
+        )
+        after = btf_struct_record(off["after"], 0x10, [])
+        btf = BtfFile.parse(make_btf_blob([big, after], strings))
+        assert btf.type_count == 2
+        assert btf.struct("after").size_bytes == 0x10
+
+    def test_vlen_at_spec_max_parses(self):
+        assert btf_module.MAX_BTF_VLEN == 0xFFFF
+        vlen = 0xFFFF
+        strings, off = make_string_section("big")
+        record = btf_non_struct_record(
+            BTF_KIND_DATASEC, off["big"], b"\x00" * (12 * vlen), vlen=vlen
+        )
+        btf = BtfFile.parse(make_btf_blob([record], strings))
+        assert btf.type_count == 1
+
+    def test_vlen_guard_rejects_above_cap(self, monkeypatch):
+        # The 16-bit vlen field cannot encode a value above BTF_MAX_VLEN, so
+        # the guard is defense-in-depth; lower the cap to prove the rejection
+        # path is still armed at the spec value.
+        monkeypatch.setattr(btf_module, "MAX_BTF_VLEN", 16)
+        strings, off = make_string_section("big")
+        record = btf_non_struct_record(
+            BTF_KIND_DATASEC, off["big"], b"\x00" * (12 * 17), vlen=17
+        )
+        with pytest.raises(BtfError, match="exceeds the 16 cap"):
+            BtfFile.parse(make_btf_blob([record], strings))
+
+
+# ---------------------------------------------------------------------------
+class TestAnonymousMemberLookup:
+    def _nested_blob(self) -> bytes:
+        """struct page { anon struct @ 0x8 { anon union @ 0x10 { freelist } } }."""
+        strings, off = make_string_section("page", "freelist")
+        page = btf_struct_record(off["page"], 0x40, [(0, 2, 0x40)])
+        anon_struct = btf_struct_record(0, 0x20, [(0, 3, 0x80)])
+        anon_union = btf_struct_record(0, 0x10, [(off["freelist"], 1, 0)])
+        return make_btf_blob([page, anon_struct, anon_union], strings)
+
+    def test_member_recurses_through_anonymous_members(self):
+        btf = BtfFile.parse(self._nested_blob())
+        member = btf.member("page", "freelist")
+        assert member is not None
+        assert member.byte_offset == 0x18
+        assert member.bit_offset == 0xC0
+        assert member.bitfield_size == 0
+        assert btf.member("page", "objects") is None
+
+    def test_direct_member_wins_over_nested(self):
+        strings, off = make_string_section("page", "freelist")
+        page = btf_struct_record(
+            off["page"], 0x40, [(off["freelist"], 1, 0x40), (0, 2, 0)]
+        )
+        anon = btf_struct_record(0, 0x10, [(off["freelist"], 1, 0)])
+        btf = BtfFile.parse(make_btf_blob([page, anon], strings))
+        assert btf.member("page", "freelist").byte_offset == 0x08
+
+    def test_nested_bitfield_geometry_accumulates(self):
+        strings, off = make_string_section("page", "objects")
+        page = btf_struct_record(off["page"], 0x40, [(0, 2, 0x80)])
+        anon = btf_struct_record(
+            0, 8, [(off["objects"], 1, (19 << 24) | 6)], kind_flag=True
+        )
+        btf = BtfFile.parse(make_btf_blob([page, anon], strings))
+        member = btf.member("page", "objects")
+        assert member.byte_offset == 16
+        assert member.bit_offset == 128 + 6
+        assert member.bitfield_size == 19
+        assert member.is_bitfield
+
+    def test_self_referential_anonymous_member_terminates(self):
+        # Malformed cycle: the anonymous member points back at its own struct.
+        strings, off = make_string_section("loop")
+        record = btf_struct_record(off["loop"], 0x10, [(0, 1, 0)])
+        btf = BtfFile.parse(make_btf_blob([record], strings))
+        assert btf.member("loop", "nope") is None
 
 
 # ---------------------------------------------------------------------------

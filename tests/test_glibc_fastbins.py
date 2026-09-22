@@ -6,6 +6,8 @@ import pytest
 
 from paomcp.tools.backends.foundation import LiveInferiorError
 from paomcp.tools.backends.heap import (
+    BINMAPSIZE,
+    BINS_ARRAY_LEN,
     DEFAULT_MAX_CHUNKS_PER_FASTBIN,
     FASTBIN_INSPECTION_SCHEMA,
     NFASTBINS,
@@ -65,6 +67,7 @@ def build_bins(
     mappings: Optional[List[Dict[str, Any]]] = None,
     libc: Optional[Dict[str, Any]] = None,
     debugger: Optional[ArenaFakeDebugger] = None,
+    arch: str = "amd64-64-little",
 ):
     gdb = ArenaFakeGdb(live=live)
     resolved_libc = libc if libc is not None else _libc_version("2.35")
@@ -73,6 +76,7 @@ def build_bins(
         gdb,
         mappings=resolved_maps,
         libc=None if libc is None and mappings is not None else resolved_libc,
+        arch=arch,
     )
     dbg = debugger if debugger is not None else ArenaFakeDebugger()
     discovery = AllocatorDiscovery(
@@ -142,11 +146,32 @@ class TestPureHelpers:
         actual = [GlibcBins.fastbin_size_for_index(i, 64) for i in range(NFASTBINS)]
         assert actual == expected
 
-    def test_fastbin_size_32bit_sequence(self):
-        # 32-bit MALLOC_ALIGNMENT = 8 -> sizes 0x10, 0x18, ..., 0x58.
+    def test_fastbin_size_32bit_i386_sequence(self):
+        # i386 MALLOC_ALIGNMENT = 16 since glibc 2.26 (BZ 21120) makes
+        # request2size(MAX_FAST_SIZE=80) round to 96, so NFASTBINS is 11.
+        # The index step itself stays SIZE_SZ-based in glibc, so the ladder
+        # is 0x10/0x18/.../0x60 -- the extra slot is the 0x60 fastbin that
+        # a 10-slot decoder misses.  Unresolved 32-bit defaults to i386.
+        i386 = [GlibcBins.fastbin_size_for_index(i, 32) for i in range(11)]
+        assert i386 == [0x10 + i * 0x08 for i in range(11)]
+        assert i386[-1] == 0x60
+        explicit = [
+            GlibcBins.fastbin_size_for_index(i, 32, "i386-32-little") for i in range(11)
+        ]
+        assert explicit == i386
+        with pytest.raises(ValueError):
+            GlibcBins.fastbin_size_for_index(11, 32)
+
+    def test_fastbin_size_arm32_sequence(self):
+        # arm32 MALLOC_ALIGNMENT = 8 -> NFASTBINS = 10, sizes 0x10..0x58.
         expected = [0x10 + i * 0x08 for i in range(NFASTBINS)]
-        actual = [GlibcBins.fastbin_size_for_index(i, 32) for i in range(NFASTBINS)]
+        actual = [
+            GlibcBins.fastbin_size_for_index(i, 32, "arm-32-little")
+            for i in range(NFASTBINS)
+        ]
         assert actual == expected
+        with pytest.raises(ValueError):
+            GlibcBins.fastbin_size_for_index(NFASTBINS, 32, "arm-32-little")
 
     def test_fastbin_size_rejects_invalid_pointer_bits(self):
         with pytest.raises(ValueError):
@@ -301,6 +326,102 @@ class TestInspectFastbins:
         entry = slot0["chain"][0]
         assert entry["readable"] is False
         assert entry["read_error"]
+
+    def test_i386_end_to_end_walks_11_fastbins(self):
+        # Regression: i386 has NFASTBINS = 11 (the extra slot is the 0x60
+        # fastbin).  A hardcoded 10-slot fastbinsY read/walk silently drops
+        # it.  Exercises the whole inspect_fastbins pipeline on a 32-bit
+        # i386 profile.
+        heap32_base = 0x0804A000
+        heap32_end = 0x0804B000
+        arena32 = 0x08049000 + 0x10
+        offsets_32 = {
+            "mutex": 0,
+            "flags": 4,
+            "have_fastchunks": 8,
+            "fastbinsY": 12,
+            "top": 56,  # 12 + 11*4
+            "last_remainder": 60,
+            "bins": 64,
+            "binmap": 64 + BINS_ARRAY_LEN * 4,
+            "next": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4,
+            "next_free": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 4,
+            "attached_threads": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 8,
+            "system_mem": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 12,
+            "max_system_mem": 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 16,
+        }
+        struct_size_32 = 64 + BINS_ARRAY_LEN * 4 + BINMAPSIZE * 4 + 20
+        maps_32 = [
+            {
+                "file": "/bin/chal",
+                "start": "0x8048000",
+                "end": "0x8049000",
+                "permissions": "r-xp",
+                "readable": True,
+                "writable": False,
+                "executable": True,
+            },
+            {
+                "file": "/lib/libc.so.6",
+                "start": "0xf7c00000",
+                "end": "0xf7e00000",
+                "permissions": "rw-p",
+                "readable": True,
+                "writable": True,
+                "executable": False,
+            },
+            {
+                "file": "[heap]",
+                "start": f"0x{heap32_base:x}",
+                "end": f"0x{heap32_end:x}",
+                "permissions": "rw-p",
+                "readable": True,
+                "writable": True,
+                "executable": False,
+            },
+        ]
+        dbg = ArenaFakeDebugger(
+            arena_address=arena32,
+            struct_size=struct_size_32,
+            offsets=offsets_32,
+            pointer_bytes=4,
+        )
+        bins_, gdb, _ = build_bins(
+            mappings=maps_32,
+            libc=_libc_version("2.31"),
+            debugger=dbg,
+            arch="i386-32-little",
+        )
+        chunk = heap32_base + 0x100
+        heads = [0] * 11
+        heads[10] = chunk  # the 0x60 fastbin
+        gdb.place(
+            arena32,
+            make_arena_bytes(
+                struct_size=struct_size_32,
+                pointer_bits=32,
+                offsets=offsets_32,
+                fastbinsY=heads,
+            ),
+        )
+        # 32-bit chunk: 8-byte header + 4-byte fd (NULL terminator).
+        gdb.place(
+            chunk,
+            (0).to_bytes(4, "little")
+            + (0x61).to_bytes(4, "little")
+            + (0).to_bytes(4, "little"),
+        )
+        result = bins_.inspect_fastbins()
+        parsed = result["parsed"]
+        assert parsed["verdict"] == "parsed"
+        assert parsed["target_profile"]["pointer_bits"] == 32
+        assert len(parsed["fastbins"]) == 11
+        assert parsed["layout"]["fastbinsY_count"] == 11
+        slot10 = parsed["fastbins"][10]
+        assert slot10["size_class"] == 0x60
+        assert slot10["head"] == chunk
+        assert slot10["length"] == 1
+        assert slot10["chain"][0]["size"] == 0x60
 
     def test_fastbins_read_failure_yields_unreadable_verdict(self):
         # arena address resolves but no bytes placed at the arena location:

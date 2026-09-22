@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from struct import unpack_from
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 # BTF header (24 bytes, little-endian).
 BTF_MAGIC = 0xEB9F
@@ -30,11 +30,16 @@ _BTF_TYPE = "<III"
 _BTF_MEMBER = "<III"
 _BTF_TYPE_SIZE = 12
 _BTF_MEMBER_SIZE = 12
-# A vlen above this is not a real type (the kernel caps BTF_MAX_VLEN far
-# lower in practice); reject instead of letting one record skip the rest
-# of the section and desync every later type id.
-MAX_BTF_VLEN = 8192
+# The kernel's own BTF_MAX_VLEN (include/uapi/linux/btf.h); a legitimate
+# DATASEC can carry up to 0xffff var_secinfos.  The vlen field is 16 bits
+# wide, so values beyond this are unrepresentable -- the guard is kept as
+# defense-in-depth against a future field-width change, and records whose
+# claimed payload overruns the section are rejected by the bounds check.
+MAX_BTF_VLEN = 0xFFFF
 MAX_BTF_TYPES = 1 << 20
+# Anonymous struct/union nesting in kernel BTF is shallow (< 10 levels);
+# cap the recursive member search so a malformed blob cannot recurse deep.
+MAX_BTF_ANON_DEPTH = 32
 
 # info bit packing.
 _BTF_INFO_KIND_MASK = 0x1F << 24
@@ -171,13 +176,56 @@ class BtfFile:
         return self._structs_by_name.get(name)
 
     def member(self, struct_name: str, member_name: str) -> Optional[BtfMember]:
-        """Return one member by name, or ``None`` when absent."""
+        """Return one member by name, or ``None`` when absent.
+
+        Anonymous (empty-name) struct/union members are transparent: their
+        members are searched recursively and the bit/byte offsets along the
+        nesting path are accumulated.  This is what lets ``struct page``
+        resolve ``freelist`` inside its nested anonymous unions on kernels
+        that have no ``struct slab``.  Direct members always win over
+        nested ones; a cycle in a malformed blob terminates via a
+        per-path seen-set plus :data:`MAX_BTF_ANON_DEPTH`.
+        """
         struct = self.struct(struct_name)
         if struct is None:
+            return None
+        return self._member_in(struct, member_name, set(), 0)
+
+    def _member_in(
+        self,
+        struct: BtfType,
+        member_name: str,
+        seen: Set[int],
+        depth: int,
+    ) -> Optional[BtfMember]:
+        if struct.id in seen or depth > MAX_BTF_ANON_DEPTH:
             return None
         for member in struct.members:
             if member.name == member_name:
                 return member
+        path_seen = seen | {struct.id}
+        for member in struct.members:
+            if member.name:
+                continue
+            nested = self._type_by_id(member.type_id)
+            if nested is None or not nested.is_struct_like:
+                continue
+            found = self._member_in(nested, member_name, path_seen, depth + 1)
+            if found is None:
+                continue
+            return BtfMember(
+                name=found.name,
+                type_id=found.type_id,
+                byte_offset=member.byte_offset + found.byte_offset,
+                bit_offset=member.bit_offset + found.bit_offset,
+                bitfield_size=found.bitfield_size,
+            )
+        return None
+
+    def _type_by_id(self, type_id: int) -> Optional[BtfType]:
+        # Type ids are 1-based; the parse list preserves definition order.
+        if 0 < type_id <= len(self._types):
+            return self._types[type_id - 1]
         return None
 
     # ------------------------------------------------------------------
@@ -310,7 +358,9 @@ class BtfFile:
         pos = start
         for _ in range(vlen):
             if pos + _BTF_MEMBER_SIZE > type_end:
-                raise BtfError("BTF member record past the type section end")
+                raise BtfError(
+                    f"BTF member record past the type section end (vlen {vlen})"
+                )
             m_name_off, m_type, offset_word = unpack_from(_BTF_MEMBER, data, pos)
             if kind_flag:
                 bitfield_size = offset_word >> _BTF_MEMBER_BITFIELD_SIZE_SHIFT

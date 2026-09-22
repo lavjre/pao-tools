@@ -192,12 +192,30 @@ class TestTcacheSize:
         assert actual[0] == 0x20
         assert actual[-1] == 0x410
 
-    def test_size_for_index_32bit_sequence(self):
+    def test_size_for_index_32bit_i386_sequence(self):
+        # i386 uses MALLOC_ALIGNMENT = 16 since glibc 2.26 (BZ 21120), so
+        # the tcache ladder steps by 16: bin 0 = 0x10, bin 63 = 0x400.
+        # An unresolved 32-bit profile defaults to the i386 layout.
         actual = [
             GlibcBins.tcache_size_for_index(i, 32) for i in range(TCACHE_MAX_BINS)
         ]
         assert actual[0] == 0x10
-        # (2 + 63) * 8 = 520 = 0x208 on 32-bit.
+        # 16 + 63*16 = 1024 = 0x400 on i386.
+        assert actual[-1] == 0x400
+        explicit = [
+            GlibcBins.tcache_size_for_index(i, 32, "i386-32-little")
+            for i in range(TCACHE_MAX_BINS)
+        ]
+        assert explicit == actual
+
+    def test_size_for_index_arm32_sequence(self):
+        # arm32's generic MALLOC_ALIGNMENT is 8 -> 0x10/0x18/.../0x208.
+        actual = [
+            GlibcBins.tcache_size_for_index(i, 32, "arm-32-little")
+            for i in range(TCACHE_MAX_BINS)
+        ]
+        assert actual[0] == 0x10
+        # 16 + 63*8 = 520 = 0x208 on arm32.
         assert actual[-1] == 0x208
 
     def test_size_rejects_out_of_range_index(self):
@@ -578,6 +596,10 @@ class TestInspectTcache:
         parsed = result["parsed"]
         assert parsed["verdict"] == "parsed"
         assert parsed["target_profile"]["pointer_bits"] == 32
+        # i386 ladder (default for an unresolved 32-bit profile): the last
+        # tcache bin is 0x400, not the old 2*SIZE_SZ-sized 0x208.
+        assert parsed["bins"][0]["size_class"] == 0x10
+        assert parsed["bins"][-1]["size_class"] == 0x400
         slot0 = parsed["bins"][0]
         assert slot0["count"] == 1
         assert slot0["head"] == user_addr
