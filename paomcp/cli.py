@@ -13,6 +13,7 @@ from typing import Iterable, List, Optional
 import requests
 
 from paomcp.http.models import AttachRequest, AttachResponse
+from paomcp.logger import configure_logging
 
 DEFAULT_ATTACH_BASE_URL = "http://127.0.0.1:5501"
 
@@ -54,6 +55,7 @@ def attach(
         AttachResponse parsed from the server response.
     """
 
+    configure_logging()
     payload = AttachRequest(
         pre=list(gdbscript) if gdbscript is not None else None,
         pid=pid,

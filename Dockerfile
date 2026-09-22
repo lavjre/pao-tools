@@ -89,6 +89,15 @@ ENV PAO_PYTHON_VENV=/opt/pao-python/shared_venv
 RUN apt-get update && apt-get install -y systemd systemd-sysv && \
     ln -sf /lib/systemd/systemd /sbin/init
 
+# paomcp.service binds 0.0.0.0 for VM networking, so the server's fail-closed
+# remote-bind gate needs PAO_ALLOW_REMOTE=1 plus a bearer token. Bake a
+# per-build random token so the VM boots as shipped; read it inside the VM
+# with `cat /etc/pao/pao.env` and rotate it per deployment.
+RUN mkdir -p /etc/pao && \
+    printf 'PAO_MCP_TOKEN=%s\n' \
+      "$(head -c 32 /dev/urandom | base64 | tr -d '/+=')" > /etc/pao/pao.env && \
+    chmod 600 /etc/pao/pao.env
+
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./

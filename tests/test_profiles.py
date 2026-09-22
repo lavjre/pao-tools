@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 
 from paomcp.server import create_mcp
@@ -5,6 +7,7 @@ from paomcp.tools.profiles import (
     ALL_MODULES,
     PROFILES,
     profile_from_env,
+    profile_name_from_env,
     resolve_profile,
 )
 
@@ -28,6 +31,30 @@ def test_profile_from_env(monkeypatch):
     assert profile_from_env() is None
     monkeypatch.setenv("PAO_PROFILE", "rev")
     assert profile_from_env() is not None
+    monkeypatch.setenv("PAO_PROFILE", "auto")
+    assert profile_from_env() is None
+
+
+def test_profile_name_from_env_returns_validated_names(monkeypatch):
+    monkeypatch.delenv("PAO_PROFILE", raising=False)
+    assert profile_name_from_env() is None
+    monkeypatch.setenv("PAO_PROFILE", " PWN ")
+    assert profile_name_from_env() == "pwn"
+    monkeypatch.setenv("PAO_PROFILE", "full")
+    assert profile_name_from_env() is None
+
+
+def test_profile_name_from_env_auto_falls_back_to_full_with_note(monkeypatch, caplog):
+    monkeypatch.setenv("PAO_PROFILE", "auto")
+    with caplog.at_level(logging.INFO, logger="paomcp.tools.profiles"):
+        assert profile_name_from_env() is None
+    assert "auto" in caplog.text
+
+
+def test_profile_name_from_env_rejects_typos(monkeypatch):
+    monkeypatch.setenv("PAO_PROFILE", "pwwn")
+    with pytest.raises(ValueError, match="unknown tool profile"):
+        profile_name_from_env()
 
 
 def test_profile_module_sets_cover_all_modules():

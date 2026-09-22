@@ -6,25 +6,51 @@ from fastapi import FastAPI
 
 from paomcp.http.models import AttachRequest, AttachResponse
 from paomcp.services import AppServices
+from paomcp.state import SessionClosedError
 from paomcp.tools.backends.foundation import validate_attach_pid
 from paomcp.tools.common import resolve_debug_session, run_session_locked
 from paomcp.utils.paths import resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
-# GDB escapes that run host shell commands. pre/after are debugger-command
-# automation by design (loopback sidecar), but host-shell execution is never
-# part of that contract and is rejected per command instead of executed.
-_BLOCKED_ATTACH_COMMAND_PREFIXES = ("shell", "!")
+# Debugger commands that reach host execution or script interpretation. pre/
+# after are debugger-command automation by design (loopback sidecar), but
+# host-shell/script execution is never part of that contract and is rejected
+# per command instead of executed. ``interpreter-exec console`` stays allowed
+# because it is the plain GDB CLI surface.
+_BLOCKED_ATTACH_COMMAND_PREFIXES = (
+    "!",
+    "shell",
+    "python",
+    "python-interactive",
+    "eval",
+    "pipe",
+    "compile",
+    "interpreter-exec",
+)
+_INTERPRETER_CONSOLE = "console"
 
 
 def _attach_command_blocked(command: str) -> bool:
-    text = (command or "").strip().lower()
-    if not text:
-        return False
-    if text == "shell" or text.startswith("shell ") or text.startswith("shell\t"):
+    text = command or ""
+    # pygdbmi appends exactly one newline per command, so an embedded newline,
+    # carriage return, or NUL lets the payload smuggle a second command that
+    # this filter never inspected (e.g. "info registers\nshell id").
+    if any(marker in text for marker in ("\n", "\r", "\x00")):
         return True
-    return text.startswith("!")
+    tokens = text.strip().split()
+    if not tokens:
+        return False
+    first = tokens[0].lower()
+    if first.startswith("!"):
+        return True
+    if first == "interpreter-exec":
+        # Only the console sub-interpreter maps to debugger commands; every
+        # other sub-interpreter can smuggle raw CLI/script execution.
+        return not (
+            len(tokens) > 1 and tokens[1].strip("\"'").lower() == _INTERPRETER_CONSOLE
+        )
+    return first in _BLOCKED_ATTACH_COMMAND_PREFIXES
 
 
 def _resolve_session(body: AttachRequest, services: AppServices):
@@ -150,9 +176,24 @@ async def run_attach_request(
         # dead gdb pipe.
         return run_session_locked(session, _run_attach_sequence, sync_pid=False)
 
-    attach_success, attach_info, command_results = await asyncio.to_thread(
-        _run_with_session_lock
-    )
+    try:
+        attach_success, attach_info, command_results = await asyncio.to_thread(
+            _run_with_session_lock
+        )
+    except SessionClosedError as exc:
+        # A concurrent session close is a normal session-state outcome, not a
+        # server fault: keep the AttachResponse contract instead of a 500.
+        logger.warning("Attach request hit a closed debug session: %s", exc)
+        return AttachResponse(
+            successful=False,
+            attach={
+                "success": False,
+                "error": str(exc),
+                "pid": body.pid,
+                "session_id": body.session_id,
+            },
+            result={},
+        )
 
     return AttachResponse(
         successful=attach_success,

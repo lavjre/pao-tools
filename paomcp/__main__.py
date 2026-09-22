@@ -4,6 +4,7 @@ Entry point for Pao Tools server
 
 import argparse
 
+from paomcp.logger import configure_logging
 from paomcp.runtime import run_http, run_stdio
 
 
@@ -45,6 +46,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
+    configure_logging()
     cli_args = _parse_args()
     if cli_args.stdio:
         run_stdio()

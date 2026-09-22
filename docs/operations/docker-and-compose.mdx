@@ -14,24 +14,34 @@ description: "Container launch patterns, local image builds, and compose usage f
 </Warning>
 
 <Warning>
-  This private, single-user MCP server does not enforce authentication. The
-  examples and Compose configuration therefore bind port `5500` to host loopback
-  only. Do not change this to `0.0.0.0`, expose it through a public load balancer,
-  or publish the port on an untrusted LAN. The bundled `paomcp.service` binds
-  `0.0.0.0` for VM networking and therefore requires a private host/network
-  boundary.
+  The server is fail-closed about non-loopback binds: binding anything other
+  than loopback requires `PAO_ALLOW_REMOTE=1` plus a `PAO_MCP_TOKEN` bearer,
+  and `/mcp` then rejects requests without `Authorization: Bearer <token>`
+  (`/healthz` stays open for probes). The examples and Compose configuration
+  still publish port `5500` on host loopback only. Do not change the published
+  port to `0.0.0.0`, expose it through a public load balancer, or publish the
+  port on an untrusted LAN. The bundled `paomcp.service` binds `0.0.0.0` for
+  VM networking and relies on the same `PAO_ALLOW_REMOTE=1` +
+  `PAO_MCP_TOKEN` gate described below.
 </Warning>
 
 ## Run the published image
 
+The container binds `0.0.0.0` internally (port mapping depends on it), so a
+plain `docker run` must supply the remote-bind gate env or the server refuses
+to start. Pick a token and pass it to both the container and your MCP client:
+
 <CodeGroup>
 
 ```bash HTTP
+export PAO_MCP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
 docker run --rm -p 127.0.0.1:5500:5500 \
   --cap-add=SYS_PTRACE \
   --cap-add=SYS_ADMIN \
   --security-opt seccomp=unconfined \
   --security-opt apparmor=unconfined \
+  -e PAO_ALLOW_REMOTE=1 \
+  -e PAO_MCP_TOKEN \
   -v "$PWD/workspace:/workspace" \
   -v "pao-runtime:/var/lib/pao" \
   ghcr.io/lavjre/pao-tools:edge
@@ -50,6 +60,12 @@ docker run --rm -i \
 ```
 
 </CodeGroup>
+
+Configure the MCP client for the HTTP form with the same token, for example
+`Authorization: Bearer $PAO_MCP_TOKEN`, or a `BearerAuth(token)` transport in
+the Python client. Clients that connect over host loopback still need the
+bearer because the gate is evaluated inside the container against the
+`0.0.0.0` listener.
 
 ## Build locally
 
@@ -77,6 +93,21 @@ files out of a small `/tmp` tmpfs and preserves retained evidence across contain
 recreation. The host port is intentionally restricted to `127.0.0.1`. Compose
 also fixes the service platform to `linux/amd64`, matching the published image and
 the x86/i386 package set installed by the Dockerfile.
+
+Compose passes `PAO_ALLOW_REMOTE=1` and `PAO_MCP_TOKEN` (read from a gitignored
+`.env`) because the container binds `0.0.0.0`; Compose refuses to start when the
+token is missing.
+
+## systemd unit (Firecracker VM)
+
+The image ships `paomcp.service`, which binds `0.0.0.0:5500` for VM networking.
+The unit sets `PAO_ALLOW_REMOTE=1` and loads the bearer token from
+`/etc/pao/pao.env` via `EnvironmentFile`. The Dockerfile writes that file
+(mode `0600`) at build time with a per-build random token so the unit is
+bootable as shipped; inside the VM read it with `cat /etc/pao/pao.env` and
+rotate it for any shared or long-lived deployment. On a non-image host, create
+the file before starting the unit (see the command in `paomcp.service`). The
+server refuses to start when the file or token is missing.
 
 The prebuilt Python helper environment lives at
 `/opt/pao-python/shared_venv` (`PAO_PYTHON_VENV`), outside the persistent runtime

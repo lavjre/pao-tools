@@ -20,6 +20,9 @@ This page covers the main knobs exposed by `pao-tools` itself.
 
 | Variable | Purpose |
 | --- | --- |
+| `PAO_ALLOW_REMOTE` | set to `1`/`true`/`yes`/`on` to permit a non-loopback bind; remote binds also require `PAO_MCP_TOKEN` |
+| `PAO_MCP_TOKEN` | bearer token required by `/mcp` (and the attach sidecar when it is bound non-loopback); `/healthz` stays open. Values are stripped of surrounding whitespace |
+| `PAO_LOG_LEVEL` | logging level for pao-tools loggers; defaults to `INFO` (all handlers write to stderr, never stdout) |
 | `PAO_RUNTIME_ROOT` | override the root directory for session runtime data, process logs, and shared helper artifacts |
 | `PAO_MAX_DEBUG_SESSIONS` | maximum simultaneous debugger sessions; defaults to `8` |
 | `PAO_MAX_MANAGED_PROCESSES` | maximum tracked background helper processes; defaults to `16` |

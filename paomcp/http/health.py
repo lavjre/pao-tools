@@ -1,9 +1,44 @@
+import logging
+from typing import Any, Optional
+
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from paomcp.services import AppServices
 
-def register_health_routes(mcp: FastMCP) -> None:
+logger = logging.getLogger(__name__)
+
+
+def register_health_routes(
+    mcp: FastMCP, services: Optional[AppServices] = None
+) -> None:
+    """Register ``/healthz`` and ``/readyz``.
+
+    FastMCP 3.1's streamable-http lifespan discards the user lifespan
+    result, so ``app.state.services`` is never populated by the server
+    itself. The services graph is therefore wired into the routes at
+    construction time; the lifespan-result and app-state probes remain as
+    fallbacks for embedding apps that run the factory without services.
+    """
+
+    def _resolve_services(request: Request) -> Optional[Any]:
+        if services is not None:
+            return services
+        lifespan_result = getattr(mcp, "_lifespan_result", None)
+        if isinstance(lifespan_result, dict):
+            candidate = lifespan_result.get("services")
+            if candidate is not None:
+                return candidate
+        scope = getattr(request, "scope", {}) or {}
+        for key in ("lifespan_context", "state", "app_state"):
+            candidate = scope.get(key) if isinstance(scope, dict) else None
+            if isinstance(candidate, dict) and candidate.get("services"):
+                return candidate["services"]
+        app = getattr(request, "app", None)
+        state = getattr(app, "state", None)
+        return getattr(state, "services", None)
+
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
@@ -17,18 +52,8 @@ def register_health_routes(mcp: FastMCP) -> None:
         reasons, but a degraded accelerator never flips readiness.
         """
         try:
-            services = None
-            scope = getattr(request, "scope", {}) or {}
-            for key in ("lifespan_context", "state", "app_state"):
-                candidate = scope.get(key) if isinstance(scope, dict) else None
-                if isinstance(candidate, dict) and candidate.get("services"):
-                    services = candidate["services"]
-                    break
-            app = getattr(request, "app", None)
-            if services is None and app is not None:
-                state = getattr(app, "state", None)
-                services = getattr(state, "services", None)
-            if services is None:
+            resolved = _resolve_services(request)
+            if resolved is None:
                 return JSONResponse(
                     {
                         "ready": False,
@@ -37,16 +62,16 @@ def register_health_routes(mcp: FastMCP) -> None:
                     status_code=503,
                 )
             reasons = []
-            default_id = services.default_session_id
+            default_id = resolved.default_session_id
             if default_id is None:
                 reasons.append("no default debug session (debugger unavailable)")
-            ghidra = services.decompiler.status()
-            ida_status = services.ida.status()
+            ghidra = resolved.decompiler.status()
+            ida_status = resolved.ida.status()
             if not ghidra.get("ready"):
                 reasons.append("ghidra not ready (offline decomp unavailable)")
             if not ida_status.get("ready"):
                 reasons.append("ida not ready (bridge degraded)")
-            capacity = services.session_registry.status()
+            capacity = resolved.session_registry.status()
             ready = default_id is not None
             return JSONResponse(
                 {
@@ -70,7 +95,9 @@ def register_health_routes(mcp: FastMCP) -> None:
                 },
                 status_code=200 if ready else 503,
             )
-        except Exception as exc:
+        except Exception:
+            logger.exception("Readiness check failed")
             return JSONResponse(
-                {"ready": False, "reasons": [str(exc)]}, status_code=503
+                {"ready": False, "reasons": ["readiness check failed"]},
+                status_code=503,
             )

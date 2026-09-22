@@ -2,7 +2,7 @@ import threading
 
 import pytest
 
-from paomcp.http.attach import run_attach_request
+from paomcp.http.attach import _attach_command_blocked, run_attach_request
 from paomcp.http.models import AttachRequest
 
 
@@ -155,3 +155,95 @@ async def test_attach_endpoint_errors_on_missing_session_mapping():
     assert response.successful is False
     assert response.attach is not None
     assert "missing" in response.attach["error"]
+
+
+class TestAttachCommandFilter:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "shell id",
+            "shell",
+            "!ls",
+            "  !id  ",
+            "python",
+            "python 1+1",
+            "python-interactive",
+            "eval 1+1",
+            "pipe ls | cat",
+            "compile code",
+            "interpreter-exec mi 1+1",
+            "info registers\nshell id",
+            "info registers\rpwd",
+            "info\x00registers",
+            "bt\npython import os",
+        ],
+    )
+    def test_blocked_commands(self, command):
+        assert _attach_command_blocked(command) is True
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "break main",
+            "continue",
+            "info registers",
+            "",
+            "   ",
+            'interpreter-exec console "bt"',
+            "interpreter-exec CONSOLE bt",
+        ],
+    )
+    def test_debugger_commands_pass(self, command):
+        assert _attach_command_blocked(command) is False
+
+    @pytest.mark.asyncio
+    async def test_newline_bypass_is_rejected_without_execution(self):
+        tools = FakePwndbgTools(attach_success=True)
+        session = FakeSession("chal-a", tools)
+        services = FakeServices(FakeRegistry(session=session))
+
+        injected = "info registers\nshell id"
+        body = AttachRequest(pre=[injected], pid=1337, session_id="chal-a")
+        response = await run_attach_request(body, services)
+
+        assert response.successful is True
+        assert response.result[injected]["success"] is False
+        assert ("execute", injected) not in tools.calls
+        assert ("execute", "info registers") not in tools.calls
+
+    @pytest.mark.asyncio
+    async def test_python_and_pipe_bypasses_are_rejected(self):
+        tools = FakePwndbgTools(attach_success=True)
+        session = FakeSession("chal-a", tools)
+        services = FakeServices(FakeRegistry(session=session))
+
+        body = AttachRequest(
+            pre=["python import os", "eval 1+1", "pipe cat /etc/passwd | sh"],
+            pid=1337,
+            session_id="chal-a",
+        )
+        response = await run_attach_request(body, services)
+
+        assert response.successful is True
+        for command in ("python import os", "eval 1+1", "pipe cat /etc/passwd | sh"):
+            assert response.result[command]["success"] is False
+            assert ("execute", command) not in tools.calls
+
+
+class TestClosedSessionContract:
+    @pytest.mark.asyncio
+    async def test_closed_session_returns_attach_response_not_500(self):
+        tools = FakePwndbgTools(attach_success=True)
+        session = FakeSession("chal-a", tools)
+        session.closing = True
+        services = FakeServices(FakeRegistry(session=session))
+
+        body = AttachRequest(pid=1337, session_id="chal-a")
+        response = await run_attach_request(body, services)
+
+        assert response.successful is False
+        assert response.attach is not None
+        assert response.attach["success"] is False
+        assert "closed" in response.attach["error"]
+        assert response.result == {}
+        assert tools.calls == []

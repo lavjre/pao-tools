@@ -1,33 +1,30 @@
 """Alternate ASGI entrypoint (``uvicorn paomcp.asgi:app``).
 
 Prefer ``python -m paomcp`` (runtime.py), which enforces the
-loopback-by-default bind gate. This module fails closed the same way:
-non-loopback serving requires ``PAO_ALLOW_REMOTE=1`` plus
-``PAO_MCP_TOKEN``, applied here as bearer middleware.
+loopback-by-default bind gate before binding. This module cannot see the
+address uvicorn will actually bind, so it enforces the same policy per
+request instead: loopback clients stay tokenless, non-loopback clients are
+refused unless ``PAO_ALLOW_REMOTE=1`` is set and they present the
+``PAO_MCP_TOKEN`` bearer. A declared bind host (``PAO_ASGI_HOST`` no longer
+exists) cannot widen access.
 """
 
 import logging
-import os
 
 from starlette.middleware import Middleware
 
-from paomcp.http.auth import BearerAuthMiddleware, check_remote_bind
+from paomcp.http.auth import RemoteBindGateMiddleware
+from paomcp.logger import configure_logging
 from paomcp.server import create_mcp
+from paomcp.tools.profiles import profile_name_from_env
 
 logger = logging.getLogger(__name__)
 
-_ASGI_HOST = os.environ.get("PAO_ASGI_HOST", "127.0.0.1")
-_ASGI_PROFILE = os.environ.get("PAO_PROFILE", "full")
-_token = check_remote_bind(_ASGI_HOST, what="ASGI app")
-logger.info("ASGI app tool profile: %s", _ASGI_PROFILE)
+configure_logging()
+
+profile = profile_name_from_env()
+logger.info("ASGI app tool profile: %s", profile or "full")
 # Built via the factory (not the import-time full global) so PAO_PROFILE
 # actually narrows the listed surface here, matching run_http/run_stdio.
-mcp = create_mcp(profile=_ASGI_PROFILE)
-_middleware = (
-    [Middleware(BearerAuthMiddleware, token=_token)] if _token is not None else []
-)
-
-if _token is not None:
-    logger.warning("ASGI app serving non-loopback with bearer auth enabled")
-
-app = mcp.http_app(path="/mcp", middleware=_middleware or None)
+mcp = create_mcp(profile=profile)
+app = mcp.http_app(path="/mcp", middleware=[Middleware(RemoteBindGateMiddleware)])

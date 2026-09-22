@@ -53,6 +53,8 @@ steps:
           --cap-add=SYS_ADMIN \
           --security-opt seccomp=unconfined \
           --security-opt apparmor=unconfined \
+          -e PAO_ALLOW_REMOTE=1 \
+          -e PAO_MCP_TOKEN=pao-cloudbuild-smoke-token \
           -v "$${BOOT_VOLUME}:/var/lib/pao" \
           "pao-tools:cloudbuild-$BUILD_ID"
 
@@ -76,8 +78,10 @@ steps:
           curl -fsS http://127.0.0.1:5500/healthz
         docker exec -i "$${BOOT_CONTAINER}" /app/.venv/bin/python - <<'PY'
         import asyncio
+        import os
 
         from fastmcp import Client
+        from fastmcp.client.auth import BearerAuth
 
         EXPECTED_STAGE5_TOOLS = {
             "run_until_crash",
@@ -92,7 +96,10 @@ steps:
 
 
         async def verify_stage5_tools() -> None:
-            async with Client("http://127.0.0.1:5500/mcp") as client:
+            async with Client(
+                "http://127.0.0.1:5500/mcp",
+                auth=BearerAuth(os.environ["PAO_MCP_TOKEN"]),
+            ) as client:
                 tools = await client.list_tools()
             names = {tool.name for tool in tools}
             missing = EXPECTED_STAGE5_TOOLS - names

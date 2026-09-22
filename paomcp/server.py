@@ -20,7 +20,10 @@ def create_mcp(
         name="pao-tools",
         lifespan=create_lifespan(services=services),
     )
-    register_health_routes(mcp)
+    # Wire services into the health routes explicitly: FastMCP 3.1's
+    # streamable-http lifespan does not expose the user lifespan result on
+    # app.state, so request-time discovery alone made /readyz permanently 503.
+    register_health_routes(mcp, services=services)
     register_all_tools(mcp, profile=profile)
     return mcp
 

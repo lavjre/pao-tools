@@ -98,6 +98,23 @@ def test_compose_is_loopback_only_and_checks_http_readiness():
     assert '"127.0.0.1:5500:5500"' in compose
     assert "http://127.0.0.1:5500/healthz" in compose
     assert '["CMD", "pgrep"' not in compose
+    # Compose boots the image entrypoint on 0.0.0.0, so the fail-closed
+    # remote-bind gate needs both env values or the container exits.
+    assert "PAO_ALLOW_REMOTE=1" in compose
+    assert "PAO_MCP_TOKEN=${PAO_MCP_TOKEN:?" in compose
+
+
+def test_systemd_unit_supplies_remote_bind_env_from_a_token_file():
+    service = _read("paomcp.service")
+    dockerfile = _read("Dockerfile")
+
+    assert "Environment=PAO_ALLOW_REMOTE=1" in service
+    assert "EnvironmentFile=/etc/pao/pao.env" in service
+    # The image must create that file, otherwise the unit crash-loops on
+    # boot as shipped.
+    assert "/etc/pao/pao.env" in dockerfile
+    assert "PAO_MCP_TOKEN=" in dockerfile
+    assert "chmod 600 /etc/pao/pao.env" in dockerfile
 
 
 def test_publish_serializes_repository_and_pushes_the_smoke_tested_image():
@@ -147,9 +164,15 @@ def test_cloud_build_gates_publication_on_verify_boot_and_stage5_smoke():
     assert "--platform=linux/amd64" in cloudbuild
     assert "pao-tools:cloudbuild-$BUILD_ID" in cloudbuild
     assert "curl -fsS http://127.0.0.1:5500/healthz" in cloudbuild
-    assert 'Client("http://127.0.0.1:5500/mcp")' in cloudbuild
+    assert '"http://127.0.0.1:5500/mcp"' in cloudbuild
     assert "tools = await client.list_tools()" in cloudbuild
     assert 'docker exec -i "$${BOOT_CONTAINER}"' in cloudbuild
+    # The container binds 0.0.0.0, so the boot step supplies the gate env
+    # and the in-container smoke client authenticates the /mcp call.
+    assert "-e PAO_ALLOW_REMOTE=1" in cloudbuild
+    assert "-e PAO_MCP_TOKEN=pao-cloudbuild-smoke-token" in cloudbuild
+    assert "from fastmcp.client.auth import BearerAuth" in cloudbuild
+    assert 'auth=BearerAuth(os.environ["PAO_MCP_TOKEN"])' in cloudbuild
     for tool_name in STAGE5_MCP_TOOLS:
         assert f'"{tool_name}"' in cloudbuild
     assert "/app/tests/docker_stage5_smoke.py" in cloudbuild
@@ -196,10 +219,17 @@ def test_both_docker_workflows_boot_the_default_entrypoint():
         ]
         assert "--entrypoint" not in boot_section
         assert 'docker exec -i "$BOOT_CONTAINER"' in boot_section
-        assert 'Client("http://127.0.0.1:5500/mcp")' in boot_section
+        assert '"http://127.0.0.1:5500/mcp"' in boot_section
         assert "tools = await client.list_tools()" in boot_section
         for tool_name in STAGE5_MCP_TOOLS:
             assert f'"{tool_name}"' in boot_section
+        # A boot without the remote-bind env exits and the health probe goes
+        # red, and a tokenless /mcp call gets 401; both are regression bait.
+        assert "-e PAO_ALLOW_REMOTE=1" in boot_section
+        assert "-e PAO_MCP_TOKEN=" in boot_section
+        assert 'PAO_ALLOW_REMOTE: "1"' in boot_section
+        assert "from fastmcp.client.auth import BearerAuth" in boot_section
+        assert 'auth=BearerAuth(os.environ["PAO_MCP_TOKEN"])' in boot_section
         assert "${{ github.run_id }}-${{ github.run_attempt }}" in workflow
 
 

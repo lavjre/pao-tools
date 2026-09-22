@@ -5,6 +5,14 @@ an operator pay only for the mission at hand: each profile names the tool
 *modules* it keeps (see :func:`register_all_tools`), everything else is
 never registered. ``full`` (the default) keeps the entire surface.
 
+The eight profiles are ``full`` (everything), ``pwn`` (userland exploit
+dev), ``rev`` (static + dynamic reading), ``bounty`` (research/triage/
+fuzzing/reporting), ``chrome`` (browser/JIT), ``kernel`` (oops/SLUB/VM
+targets), ``firmware`` (static-only reversing), and ``ctf`` (alias of
+``pwn``); see ``PROFILE_DESCRIPTIONS`` for one-line scopes. ``auto`` has
+no target to inspect at boot, so it degrades to ``full`` and the
+``suggest_profile`` tool narrows per mission later.
+
 Profiles are token budgets, never authority boundaries: the backend bundle
 is still fully constructed per session, so an excluded module only removes
 its ``list_tools`` entries. A profile that omits e.g. write paths still
@@ -14,8 +22,11 @@ for isolation.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Dict, FrozenSet, Optional
+
+logger = logging.getLogger(__name__)
 
 ALL_MODULES: FrozenSet[str] = frozenset(
     {
@@ -191,17 +202,40 @@ def resolve_profile(name: Optional[str]) -> Optional[FrozenSet[str]]:
 
 
 def profile_from_env() -> Optional[FrozenSet[str]]:
-    """Read the active profile from ``PAO_PROFILE`` (default ``full``)."""
-    raw = (
-        (os.environ.get("PAO_PROFILE", DEFAULT_PROFILE) or DEFAULT_PROFILE)
-        .strip()
-        .lower()
-    )
+    """Read the active profile module set from ``PAO_PROFILE``.
+
+    ``auto`` cannot resolve a target at boot and degrades to ``full``
+    (``None``); unknown names raise ``ValueError`` so a typo fails loudly
+    instead of silently widening the surface.
+    """
+    raw = (os.environ.get("PAO_PROFILE") or "").strip().lower()
     if raw == "auto":
-        # ``auto`` needs target context; the server boots ``full`` and the
-        # ``suggest_profile`` tool narrows per mission. Never crash startup.
         return None
-    return resolve_profile(os.environ.get("PAO_PROFILE", DEFAULT_PROFILE))
+    return resolve_profile(raw or DEFAULT_PROFILE)
+
+
+def profile_name_from_env() -> Optional[str]:
+    """Return the validated ``PAO_PROFILE`` name that ``create_mcp`` expects.
+
+    ``None`` means the full surface: unset/blank, ``full``, and ``auto``.
+    ``auto`` cannot inspect a target at boot, so it falls back to ``full``
+    with a logged note and ``suggest_profile`` narrows later. Unknown names
+    still raise ``ValueError`` instead of silently widening the surface.
+    """
+    raw = (os.environ.get("PAO_PROFILE") or "").strip().lower()
+    if raw == "auto":
+        logger.info(
+            "PAO_PROFILE=auto cannot pick a target at boot; listing the full "
+            "surface (use suggest_profile to narrow per mission)"
+        )
+        return None
+    if not raw:
+        return None
+    # Unknown names raise here instead of silently widening the surface;
+    # ``full`` resolves to None so callers get one representation of it.
+    if resolve_profile(raw) is None:
+        return None
+    return raw
 
 
 def suggest_profile_for_target(
@@ -283,5 +317,6 @@ __all__ = [
     "DEFAULT_PROFILE",
     "resolve_profile",
     "profile_from_env",
+    "profile_name_from_env",
     "suggest_profile_for_target",
 ]
