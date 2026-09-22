@@ -197,16 +197,20 @@ def close_services(services: AppServices) -> None:
         except Exception:
             logger.exception("Failed to close the case store during shutdown")
 
+    # Detach the pipes under the lock, then kill them outside it: a driver
+    # with a blocked stdin write must never hold shutdown behind the global
+    # paopipe_lock (or behind another tool's kill).
     with services.paopipe_lock:
-        for pipe in services.paopipe_sessions.values():
-            try:
-                pipe.kill()
-            except Exception:
-                # A wedged pipe must not abort the rest of shutdown:
-                # target / subprocess / session / artifact cleanup still
-                # needs to run below.
-                logger.exception("Failed to stop a PaO pipe during shutdown")
+        pipes = list(services.paopipe_sessions.values())
         services.paopipe_sessions.clear()
+    for pipe in pipes:
+        try:
+            pipe.kill()
+        except Exception:
+            # A wedged pipe must not abort the rest of shutdown:
+            # target / subprocess / session / artifact cleanup still
+            # needs to run below.
+            logger.exception("Failed to stop a PaO pipe during shutdown")
 
     target_cleanup = services.target_registry.close_all()
     if target_cleanup["errors"]:

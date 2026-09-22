@@ -160,14 +160,20 @@ class CaseStore:
             self._conn.commit()
 
     def load_all(self) -> List[Dict[str, Any]]:
-        """Load every stored session as rehydration dicts (no backend types)."""
+        """Load every stored session as rehydration dicts (no backend types).
+
+        Rows come back newest-first (``updated_at`` descending, with
+        ``session_id`` as the deterministic tie-breaker) so a registry
+        capped below the stored count rehydrates the most recent
+        investigations and drops the oldest.
+        """
         with self._lock:
             cur = self._conn.cursor()
             rows = cur.execute(
                 "SELECT session_id, name, owning_debug_session, description,"
                 " created_at, updated_at, metadata_json, notes_json,"
                 " evidence_json, hypotheses_json FROM cases"
-                " ORDER BY updated_at"
+                " ORDER BY updated_at DESC, session_id DESC"
             ).fetchall()
             result = []
             for (
@@ -222,7 +228,8 @@ class CaseStore:
             return [
                 row[0]
                 for row in self._conn.execute(
-                    "SELECT session_id FROM cases ORDER BY updated_at"
+                    "SELECT session_id FROM cases"
+                    " ORDER BY updated_at DESC, session_id DESC"
                 ).fetchall()
             ]
 

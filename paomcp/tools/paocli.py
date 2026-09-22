@@ -97,21 +97,22 @@ def register(mcp: FastMCP) -> None:
         driver_pid = pipe.get_pid()
 
         replaced = False
-        old_pipe: Optional[PaoPipe] = None
-        with services.paopipe_lock:
-            old_pipe = services.paopipe_sessions.pop(session.session_id, None)
-            if old_pipe is not None:
-                replaced = True
-            services.paopipe_sessions[session.session_id] = pipe
-
-        # Drain the evicted driver before killing it so its unread output
-        # is reported instead of dropped with the pipe.
         replaced_output = ""
         replaced_events: List[Dict[str, Any]] = []
-        if old_pipe is not None:
-            replaced_output = old_pipe.release()
-            replaced_events = old_pipe.release_events()
-            old_pipe.kill()
+        with services.paopipe_lock:
+            old_pipe = services.paopipe_sessions.get(session.session_id)
+            if old_pipe is not None:
+                replaced = True
+                # Drain the evicted driver before killing it so its unread
+                # output is reported instead of dropped with the pipe. The
+                # swap stays atomic under the lock: a concurrent launch must
+                # never observe (or kill) the replacement before the evicted
+                # driver is gone.
+                replaced_output = old_pipe.release()
+                replaced_events = old_pipe.release_events()
+                old_pipe.kill()
+            services.paopipe_sessions[session.session_id] = pipe
+            session.driver_pid = driver_pid
 
         def _collect_startup() -> Tuple[Dict[str, Any], str, Any]:
             startup_result = pipe.wait_ready(timeout=wait_timeout)
@@ -167,14 +168,17 @@ def register(mcp: FastMCP) -> None:
         """
         services = get_services(ctx)
         resolved_session_id, pipe = get_paopipe(services, session_id=session_id)
-        with services.paopipe_lock:
-            if not pipe.is_alive():
-                return {
-                    "success": False,
-                    "session_id": resolved_session_id,
-                    "error": "No active PaoPipe",
-                }
-            ok = pipe.send(data)
+        if not pipe.is_alive():
+            return {
+                "success": False,
+                "session_id": resolved_session_id,
+                "error": "No active PaoPipe",
+            }
+        # The global paopipe_lock is deliberately not held here: a driver
+        # that stops reading would otherwise wedge every paocli tool and
+        # close_services behind a blocked stdin write. PaoPipe.send()
+        # serializes sends per pipe and is bounded.
+        ok = await run_blocking(lambda: pipe.send(data))
         return {"success": bool(ok), "session_id": resolved_session_id}
 
     @mcp.tool()
@@ -234,15 +238,17 @@ def register(mcp: FastMCP) -> None:
         resolved_session_id = resolve_pipe_session_id(services, session_id=session_id)
         with services.paopipe_lock:
             pipe = services.paopipe_sessions.pop(resolved_session_id, None)
-            if not pipe:
-                return {
-                    "success": False,
-                    "session_id": resolved_session_id,
-                    "error": "No active PaoPipe",
-                }
-            was_alive = pipe.is_alive()
-            exit_code = pipe.get_exit_code()
-            pipe.kill()
+        if not pipe:
+            return {
+                "success": False,
+                "session_id": resolved_session_id,
+                "error": "No active PaoPipe",
+            }
+        was_alive = pipe.is_alive()
+        exit_code = pipe.get_exit_code()
+        # Kill outside the global lock: kill() joins reader threads and must
+        # not stall unrelated paocli tools while the driver shuts down.
+        pipe.kill()
         session = require_session_registry(services).get_session(resolved_session_id)
         if session:
             session.driver_pid = None

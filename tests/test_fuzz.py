@@ -1,3 +1,11 @@
+import asyncio
+import subprocess
+import sys
+import threading
+import time
+from types import SimpleNamespace
+from typing import Any, Dict
+
 import pytest
 
 from paomcp.tools.backends.fuzz import FuzzBatch, generate_inputs
@@ -172,3 +180,186 @@ def test_batch_survives_bad_hex_and_run_errors(tmp_path):
     )["parsed"]
     assert parsed["runs"] == 0
     assert len(parsed["errors"]) == 2
+
+
+def _coverage_paths(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    target = workspace / "target"
+    target.write_bytes(b"\x7fELF")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    output = tmp_path / "out"
+    output.mkdir()
+    return target, corpus, output
+
+
+def _fake_afl_engine(monkeypatch, script, *, fuzz_cov):
+    real_popen = subprocess.Popen
+    children = []
+
+    def fake_popen(cmd, **kwargs):
+        child = real_popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(fuzz_cov.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        fuzz_cov.shutil,
+        "which",
+        lambda name: "/fake/afl-fuzz" if name == "afl-fuzz" else None,
+    )
+    return children
+
+
+def test_coverage_campaign_cancellation_kills_child_promptly(tmp_path, monkeypatch):
+    import paomcp.tools.backends.fuzz_cov as fuzz_cov
+    from paomcp.operations import OperationCancelledError
+
+    target, corpus, output = _coverage_paths(tmp_path)
+    children = _fake_afl_engine(
+        monkeypatch, "import time; time.sleep(30)", fuzz_cov=fuzz_cov
+    )
+    cancel_at = time.monotonic() + 0.2
+
+    def check():
+        if time.monotonic() >= cancel_at:
+            raise OperationCancelledError("stop")
+
+    started = time.monotonic()
+    result = fuzz_cov.run_coverage_batch(
+        engine="afl",
+        target_path=str(target),
+        corpus_dir=str(corpus),
+        output_dir=str(output),
+        time_seconds=60,
+        cancellation_check=check,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result["parsed"]["verdict"] == "cancelled"
+    assert elapsed < 10
+    assert children and children[0].poll() is not None
+
+
+def test_coverage_campaign_drains_chatty_engine_without_wedging(tmp_path, monkeypatch):
+    import paomcp.tools.backends.fuzz_cov as fuzz_cov
+
+    target, corpus, output = _coverage_paths(tmp_path)
+    _fake_afl_engine(
+        monkeypatch,
+        (
+            "import sys;"
+            "sys.stdout.write('x' * 200000); sys.stdout.flush();"
+            "sys.stderr.write('y' * 200000); sys.stderr.flush()"
+        ),
+        fuzz_cov=fuzz_cov,
+    )
+
+    started = time.monotonic()
+    result = fuzz_cov.run_coverage_batch(
+        engine="afl",
+        target_path=str(target),
+        corpus_dir=str(corpus),
+        output_dir=str(output),
+        time_seconds=30,
+    )
+    elapsed = time.monotonic() - started
+
+    parsed = result["parsed"]
+    assert parsed["verdict"] == "completed"
+    assert parsed["exit_code"] == 0
+    assert elapsed < 20
+
+
+def test_coverage_campaign_deadline_is_reported_as_timeout(tmp_path, monkeypatch):
+    import paomcp.tools.backends.fuzz_cov as fuzz_cov
+
+    target, corpus, output = _coverage_paths(tmp_path)
+    children = _fake_afl_engine(
+        monkeypatch, "import time; time.sleep(30)", fuzz_cov=fuzz_cov
+    )
+    monkeypatch.setattr(fuzz_cov, "DEADLINE_GRACE_SECONDS", 0)
+
+    result = fuzz_cov.run_coverage_batch(
+        engine="afl",
+        target_path=str(target),
+        corpus_dir=str(corpus),
+        output_dir=str(output),
+        time_seconds=1,
+    )
+
+    parsed = result["parsed"]
+    assert parsed["verdict"] == "timeout"
+    assert parsed["exit_code"] is not None
+    assert children and children[0].poll() is not None
+
+
+@pytest.mark.asyncio
+async def test_run_afl_batch_wires_cooperative_cancellation(tmp_path, monkeypatch):
+    from fastmcp import FastMCP
+
+    from paomcp.artifacts import ArtifactStore
+    from paomcp.operations import (
+        OperationCancelledError,
+        OperationRegistry,
+        current_operation_id,
+    )
+    from paomcp.tools import fuzz as fuzz_module
+    import paomcp.tools.backends.fuzz_cov as fuzz_cov
+
+    started = threading.Event()
+    captured: Dict[str, Any] = {}
+
+    def fake_backend(**kwargs):
+        check = kwargs.get("cancellation_check")
+        captured["has_check"] = check is not None
+        if check is None:
+            return {"success": True, "parsed": {"verdict": "completed"}}
+        captured["operation_id"] = current_operation_id()
+        started.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            check()
+            time.sleep(0.01)
+        raise AssertionError("cancellation was never requested")
+
+    monkeypatch.setattr(fuzz_cov, "run_coverage_batch", fake_backend)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "target").write_bytes(b"\x7fELF")
+    (workspace / "corpus").mkdir()
+    (workspace / "out").mkdir()
+    services = SimpleNamespace(
+        runtime_paths=SimpleNamespace(workspace_root=str(workspace)),
+        operation_registry=OperationRegistry(),
+        artifact_store=ArtifactStore(str(tmp_path / "artifacts"), min_free_bytes=0),
+    )
+    mcp = FastMCP("fuzz-cancel-tests")
+    fuzz_module.register(mcp)
+    tool = await mcp.get_tool("run_afl_batch")
+    ctx = SimpleNamespace(lifespan_context={"services": services})
+
+    task = asyncio.create_task(
+        tool.fn(
+            corpus_dir="corpus",
+            output_dir="out",
+            engine="afl",
+            target_path="target",
+            time_seconds=5,
+            ctx=ctx,
+        )
+    )
+    assert await asyncio.to_thread(started.wait, 5)
+    services.operation_registry.request_cancel(captured["operation_id"])
+    response = await asyncio.wait_for(task, timeout=10)
+
+    assert captured["has_check"] is True
+    assert response["success"] is False
+    assert response["error"]["code"] == "OPERATION_CANCELLED"

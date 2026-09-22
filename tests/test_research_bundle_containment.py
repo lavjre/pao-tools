@@ -13,6 +13,8 @@ backend work.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,6 +28,20 @@ def _services(tmp_path) -> SimpleNamespace:
     return SimpleNamespace(
         runtime_paths=SimpleNamespace(workspace_root=str(tmp_path / "workspace")),
     )
+
+
+def _symlink_escape(tmp_path, name: str) -> Path:
+    """Create workspace/<name> -> <tmp_path>/outside and return the outside dir."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(exist_ok=True)
+    link = workspace / name
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    return outside
 
 
 def _envelope(result) -> dict:
@@ -89,6 +105,87 @@ async def test_verify_rejects_out_of_workspace_source(tmp_path) -> None:
         mcp,
         "verify_research_bundle",
         {"source_path": "/var/log/syslog"},
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+
+
+def test_contained_path_rejects_realpath_escape(tmp_path, monkeypatch) -> None:
+    from paomcp.tools import research as research_tools
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_realpath = os.path.realpath
+
+    def fake_realpath(path):
+        if os.path.basename(str(path)) == "bundle.zip":
+            return str(outside / "bundle.zip")
+        return real_realpath(path)
+
+    monkeypatch.setattr(research_tools.os.path, "realpath", fake_realpath)
+
+    with pytest.raises(ValueError, match="symlink escape"):
+        research_tools._resolve_contained_workspace_path(
+            "bundle.zip",
+            workspace_root=str(workspace),
+            require_exists=False,
+            kind="destination",
+        )
+
+
+@pytest.mark.asyncio
+async def test_export_rejects_symlinked_destination_escape(tmp_path) -> None:
+    mcp = create_mcp(services=_services(tmp_path))
+    _symlink_escape(tmp_path, "escape")
+    response = await _call(
+        mcp,
+        "export_research_session",
+        {"session_id": "whatever", "destination": "escape/bundle.zip"},
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_symlinked_source_escape(tmp_path) -> None:
+    mcp = create_mcp(services=_services(tmp_path))
+    outside = _symlink_escape(tmp_path, "escape")
+    (outside / "bundle.zip").write_bytes(b"not-a-bundle")
+    response = await _call(
+        mcp,
+        "import_research_session",
+        {"source_path": "escape/bundle.zip"},
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_symlinked_artifact_dir_escape(tmp_path) -> None:
+    mcp = create_mcp(services=_services(tmp_path))
+    (tmp_path / "workspace").mkdir(exist_ok=True)
+    (tmp_path / "workspace" / "in.zip").write_bytes(b"not-a-bundle")
+    _symlink_escape(tmp_path, "extract")
+    response = await _call(
+        mcp,
+        "import_research_session",
+        {"source_path": "in.zip", "artifact_destination_dir": "extract"},
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_symlinked_source_escape(tmp_path) -> None:
+    mcp = create_mcp(services=_services(tmp_path))
+    outside = _symlink_escape(tmp_path, "escape")
+    (outside / "bundle.zip").write_bytes(b"not-a-bundle")
+    response = await _call(
+        mcp,
+        "verify_research_bundle",
+        {"source_path": "escape/bundle.zip"},
     )
     assert response["success"] is False
     assert "workspace" in response["error"]["message"].lower()

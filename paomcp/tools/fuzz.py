@@ -219,6 +219,7 @@ def register(mcp: FastMCP) -> None:
             )
         os.makedirs(resolved_corpus, exist_ok=True)
         os.makedirs(resolved_out, exist_ok=True)
+        operation_id = current_operation_id()
 
         def _run() -> Dict[str, Any]:
             return run_coverage_batch(
@@ -229,6 +230,9 @@ def register(mcp: FastMCP) -> None:
                 output_dir=resolved_out,
                 time_seconds=time_seconds,
                 mem_mb=mem_mb,
+                cancellation_check=(
+                    lambda: services.operation_registry.raise_if_cancelled(operation_id)
+                ),
             )
 
         return await run_blocking(_run)

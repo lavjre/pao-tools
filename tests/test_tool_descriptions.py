@@ -55,6 +55,11 @@ async def test_python_execution_tool_guidance_in_descriptions():
     assert "sibling of ``create_breakpoint``" in descriptions["set_breakpoint"]
     assert "temporary" in descriptions["set_breakpoint"]
 
+    # Research descriptions must enumerate the full vocabularies the
+    # backends actually accept (no drift).
+    assert "confirmed" in descriptions["add_hypothesis"]
+    assert "hypothesis_change" in descriptions["append_timeline_event"]
+
 
 @pytest.mark.asyncio
 async def test_all_mcp_tools_publish_unified_response_schema():

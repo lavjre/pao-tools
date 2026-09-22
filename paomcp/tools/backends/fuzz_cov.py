@@ -20,6 +20,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
@@ -36,6 +37,9 @@ MAX_CAMPAIGN_SECONDS = 3600
 MAX_CORPUS_FILES = 2048
 MAX_TOTAL_CORPUS_BYTES = 256 * 1024 * 1024
 MAX_CRASHES_REPORTED = 64
+# Extra wall-clock allowance on top of the engine's own budget before the
+# campaign is declared overrun and the child is killed.
+DEADLINE_GRACE_SECONDS = 60
 
 
 def minimize_corpus(
@@ -105,6 +109,25 @@ def _engine_hint(engine: str) -> str:
     return (
         "build the harness with clang -fsanitize=fuzzer,address and pass harness_path"
     )
+
+
+def _drain_stream(stream: Any, sink: List[str]) -> None:
+    """Consume one child pipe so a chatty engine never blocks on write."""
+    if stream is None:
+        return
+    try:
+        while True:
+            chunk = stream.read(4096)
+            if not chunk:
+                break
+            sink.append(chunk)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
 
 
 def run_coverage_batch(
@@ -253,9 +276,26 @@ def run_coverage_batch(
             state="idle",
             parser_version=PARSER_VERSION,
         )
+    # Drain both pipes while the campaign runs: a chatty engine would
+    # otherwise fill the OS pipe buffer, block in write, and look like a
+    # completed campaign once the deadline kill lands (-9).
+    stdout_chunks: List[str] = []
+    stderr_chunks: List[str] = []
+    drain_threads = [
+        threading.Thread(
+            target=_drain_stream, args=(child.stdout, stdout_chunks), daemon=True
+        ),
+        threading.Thread(
+            target=_drain_stream, args=(child.stderr, stderr_chunks), daemon=True
+        ),
+    ]
+    for thread in drain_threads:
+        thread.start()
+
     cancelled = False
+    timed_out = False
     try:
-        deadline = time.monotonic() + time_seconds + 60
+        deadline = time.monotonic() + time_seconds + DEADLINE_GRACE_SECONDS
         while child.poll() is None:
             if cancellation_check is not None:
                 try:
@@ -265,10 +305,15 @@ def run_coverage_batch(
                     child.kill()
                     break
             if time.monotonic() > deadline:
+                timed_out = True
                 child.kill()
                 break
             time.sleep(0.5)
-        stdout, stderr = child.communicate(timeout=30)
+        try:
+            child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait(timeout=30)
         return_code = child.returncode
     except Exception as exc:
         try:
@@ -289,6 +334,9 @@ def run_coverage_batch(
             state="idle",
             parser_version=PARSER_VERSION,
         )
+    finally:
+        for thread in drain_threads:
+            thread.join(timeout=5)
     if cancelled:
         return build_backend_response(
             "run_afl_batch",
@@ -298,6 +346,27 @@ def run_coverage_batch(
                 "verdict": "cancelled",
                 "campaign_id": campaign_id,
                 "engine": engine,
+            },
+            raw_responses=[],
+            state="idle",
+            parser_version=PARSER_VERSION,
+        )
+    if timed_out:
+        return build_backend_response(
+            "run_afl_batch",
+            parsed={
+                "schema": AFL_BATCH_SCHEMA,
+                "supported": True,
+                "verdict": "timeout",
+                "campaign_id": campaign_id,
+                "engine": engine,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "exit_code": return_code,
+                "reason": (
+                    "campaign exceeded its time budget and was killed; "
+                    "output was drained, not a clean engine exit"
+                ),
+                "next": "triage each crash path with run_until_crash, then link_evidence_batch",
             },
             raw_responses=[],
             state="idle",

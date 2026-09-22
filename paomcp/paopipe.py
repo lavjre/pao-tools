@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 PIPE_OUTPUT_CAP_BYTES = 16 * 1024 * 1024
 PIPE_EVENTS_CAP = 4096
 
+# Upper bound a caller waits for one stdin write. A driver that stops reading
+# fills the OS pipe buffer; the write then blocks until the child dies. The
+# bound keeps sendinput (and shutdown) from wedging on a stuck driver.
+SEND_TIMEOUT_SEC = 5.0
+
 
 class PaoPipe:
     """
@@ -72,6 +77,11 @@ class PaoPipe:
         self._dropped_bytes = 0
         self._dropped_events = 0
         self._malformed_control = 0
+        # Serializes concurrent sends and tracks a writer that outlived its
+        # timeout (the child stopped draining stdin); see send()/kill().
+        self._send_lock = threading.Lock()
+        self._send_wedged = False
+        self._send_thread: Optional[threading.Thread] = None
 
         self._attach_event = threading.Event()
         self._output_event = threading.Event()
@@ -241,22 +251,61 @@ class PaoPipe:
             self._exit_code = self.proc.returncode
         self._exit_event.set()
         self._activity_event.set()
-        self._events.put({"type": "exit", "code": self._exit_code})
+        # Queue the exit event through the cap bookkeeping so stats() stays
+        # truthful (release_events subtracts queued entries).
+        self._put_event({"type": "exit", "code": self._exit_code})
 
     def is_alive(self) -> bool:
         with self._lock:
             return self._alive and (self.proc.poll() is None)
 
-    def send(self, data: str) -> bool:
+    def send(self, data: str, timeout: Optional[float] = None) -> bool:
+        """Write raw data to stdin without blocking a caller forever.
+
+        A driver that stops reading fills the OS pipe buffer and a plain
+        ``write`` then blocks until the child exits. The payload is handed to
+        a daemon writer and the caller waits at most ``timeout`` seconds
+        (default ``SEND_TIMEOUT_SEC``); a timed-out pipe is marked wedged so
+        later sends fail fast instead of queueing behind the stuck writer.
+        ``kill()`` closes stdin to unblock the writer.
+        """
         if not self.is_alive():
             return False
-        try:
-            assert self.proc.stdin is not None
-            self.proc.stdin.write(data.encode("utf-8"))
-            self.proc.stdin.flush()
+        payload = data.encode("utf-8")
+        if not payload:
             return True
-        except Exception:
-            return False
+        limit = SEND_TIMEOUT_SEC if timeout is None else max(0.0, float(timeout))
+        with self._send_lock:
+            if self._send_wedged or not self.is_alive():
+                return False
+            outcome = {"ok": False}
+            done = threading.Event()
+
+            def _write() -> None:
+                try:
+                    stdin = self.proc.stdin
+                    if stdin is None:
+                        return
+                    stdin.write(payload)
+                    stdin.flush()
+                    outcome["ok"] = True
+                except Exception:
+                    outcome["ok"] = False
+                finally:
+                    done.set()
+
+            writer = threading.Thread(target=_write, daemon=True)
+            with self._lock:
+                # Publish under the same lock as start() so kill() can never
+                # observe (and join) an unstarted thread.
+                self._send_thread = writer
+                writer.start()
+            if not done.wait(limit):
+                self._send_wedged = True
+                return False
+            with self._lock:
+                self._send_thread = None
+            return outcome["ok"]
 
     def release(self) -> str:
         chunks = []
@@ -368,9 +417,20 @@ class PaoPipe:
         finally:
             with self._lock:
                 self._alive = False
+                writer = self._send_thread
+            if writer is not None:
+                # A blocked writer unblocks as soon as the child dies above.
+                # Bounded join keeps kill() from waiting on an unkillable
+                # (e.g. D-state) child.
+                writer.join(timeout=2.0)
             # Close our pipe ends so the reader threads see EOF instead of
             # hanging on a dead child's open descriptors, then join them.
             for stream_name in ("stdin", "stdout", "stderr"):
+                if stream_name == "stdin" and writer is not None and writer.is_alive():
+                    # Closing a handle with a pending write can itself block
+                    # on Windows; the daemon writer and handle are released
+                    # at process teardown instead.
+                    continue
                 stream = getattr(self.proc, stream_name, None)
                 if stream is not None:
                     try:

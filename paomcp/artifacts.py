@@ -555,11 +555,12 @@ class ArtifactStore:
 
     def _operational_debt(self) -> Dict[str, int]:
         """Measure protected/quarantined files that normal cleanup cannot reclaim."""
-        with self._lock:
-            try:
-                names = set(os.listdir(self.root_dir))
-            except OSError:
-                names = set()
+        with self._write_lock:
+            with self._lock:
+                try:
+                    names = set(os.listdir(self.root_dir))
+                except OSError:
+                    names = set()
             protected_reservations = self._protected_staging_reservation_map(names)
             protected_targets = set(protected_reservations)
             quarantine_names = {
@@ -1041,7 +1042,8 @@ class ArtifactStore:
             "artifact_count": len(artifacts),
             "pinned_count": sum(item.pinned for item in artifacts),
             "expired_count": sum(
-                item.expires_at is not None
+                not item.pinned
+                and item.expires_at is not None
                 and datetime.fromisoformat(item.expires_at) <= now
                 for item in artifacts
             ),

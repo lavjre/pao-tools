@@ -23,6 +23,9 @@ from paomcp.utils.paths import RuntimePaths, validate_session_id
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_DEBUG_SESSIONS = int(os.environ.get("PAO_MAX_DEBUG_SESSIONS", "8"))
 DEFAULT_SESSION_CLOSE_LOCK_TIMEOUT_SEC = 2.0
+# A cleanup callback that reported live helper processes is retried by later
+# reaps; the cap keeps an unfixable leak from reserving a session slot forever.
+MAX_CLEANUP_ATTEMPTS = 3
 
 
 class SessionLimitError(RuntimeError):
@@ -84,7 +87,7 @@ class DebugSession:
     cleanup_callback: Optional[Callable[["DebugSession"], Any]] = field(
         default=None, repr=False
     )
-    cleanup_attempted: bool = False
+    cleanup_attempts: int = 0
     cleanup_result: Any = field(default=None, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -318,6 +321,11 @@ class DebugSessionRegistry:
             return True
         return bool(failures)
 
+    @classmethod
+    def _cleanup_succeeded(cls, attempts: int, result: Any) -> bool:
+        """Return whether cleanup ran and did not report remaining resources."""
+        return attempts > 0 and not cls._cleanup_failed(result)
+
     def _close_tombstone_session(
         self,
         session: DebugSession,
@@ -336,12 +344,19 @@ class DebugSessionRegistry:
             return {
                 "lock_acquired": False,
                 "controller_closed": False,
+                "tombstone_released": False,
                 "cleanup": session.cleanup_result,
             }
 
         try:
-            if session.cleanup_callback is not None and not session.cleanup_attempted:
-                session.cleanup_attempted = True
+            if (
+                session.cleanup_callback is not None
+                and not self._cleanup_succeeded(
+                    session.cleanup_attempts, session.cleanup_result
+                )
+                and session.cleanup_attempts < MAX_CLEANUP_ATTEMPTS
+            ):
+                session.cleanup_attempts += 1
                 try:
                     session.cleanup_result = session.cleanup_callback(session)
                 except Exception as exc:
@@ -359,13 +374,27 @@ class DebugSessionRegistry:
         finally:
             session.lock.release()
 
-        if controller_closed:
+        cleanup_failed = self._cleanup_failed(session.cleanup_result)
+        retries_exhausted = session.cleanup_attempts >= MAX_CLEANUP_ATTEMPTS
+        # A cleanup failure means helper processes may still be alive: keep
+        # the tombstone so a later reap_tombstones() can retry, and only
+        # release the slot when cleanup succeeded or its retry budget ran out.
+        released = controller_closed and (not cleanup_failed or retries_exhausted)
+        if released:
             with self._lock:
                 if self._tombstones.get(session.session_id) is session:
                     self._tombstones.pop(session.session_id, None)
+        elif controller_closed and cleanup_failed:
+            logger.warning(
+                "Session '%s' cleanup failed; keeping tombstone for retry (%d/%d)",
+                session.session_id,
+                session.cleanup_attempts,
+                MAX_CLEANUP_ATTEMPTS,
+            )
         return {
             "lock_acquired": True,
             "controller_closed": controller_closed,
+            "tombstone_released": released,
             "cleanup": session.cleanup_result,
         }
 
@@ -382,7 +411,7 @@ class DebugSessionRegistry:
             result = self._close_tombstone_session(
                 session, lock_timeout_sec=lock_timeout_sec
             )
-            if result["controller_closed"]:
+            if result["tombstone_released"]:
                 reaped += 1
         return reaped
 
@@ -478,7 +507,9 @@ class DebugSessionRegistry:
                 if self.default_session_id == lookup_id:
                     self.default_session_id = next(iter(self.sessions), None)
 
-            if on_closing is not None and not session.cleanup_attempted:
+            if on_closing is not None and not self._cleanup_succeeded(
+                session.cleanup_attempts, session.cleanup_result
+            ):
                 session.cleanup_callback = on_closing
 
         close_result = self._close_tombstone_session(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Mapping, Optional
 
 from fastmcp import Context, FastMCP
@@ -9,6 +10,43 @@ from fastmcp.dependencies import CurrentContext
 
 from paomcp.tools.common import catch_errors, get_services
 from paomcp.utils.paths import resolve_workspace_path
+
+
+def _resolve_contained_workspace_path(
+    raw_path: str,
+    *,
+    workspace_root: str,
+    require_exists: bool,
+    kind: str,
+) -> str:
+    """Resolve a workspace path and reject symlink escapes after realpath.
+
+    ``resolve_workspace_path`` only rejects lexical escapes (``..``): a
+    symlinked directory under the workspace passes that check while the
+    realpath lands outside it.  Re-running the containment test on the
+    realpath resolves what exists (parents included) before any bundle
+    read or write happens.
+    """
+    resolved = resolve_workspace_path(
+        raw_path,
+        workspace_root=workspace_root,
+        require_exists=require_exists,
+        kind=kind,
+    )
+    workspace_real = os.path.realpath(workspace_root)
+    resolved_real = os.path.realpath(resolved)
+    try:
+        contained = (
+            os.path.commonpath([resolved_real, workspace_real]) == workspace_real
+        )
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(
+            f"{kind} resolves outside the configured workspace "
+            f"(symlink escape): '{raw_path}'"
+        )
+    return resolved
 
 
 def register(mcp: FastMCP) -> None:
@@ -153,8 +191,9 @@ def register(mcp: FastMCP) -> None:
         """Register a claim under investigation with an explicit state.
 
         Valid ``state`` values: ``proposed`` (default), ``supported``,
-        ``rejected``, ``unknown``.  Notes and evidence can be attached
-        to a hypothesis afterwards via their ``hypothesis_id`` fields.
+        ``confirmed``, ``rejected``, ``unknown``.  Notes and evidence
+        can be attached to a hypothesis afterwards via their
+        ``hypothesis_id`` fields.
         """
         services = get_services(ctx)
         return services.research_registry.add_hypothesis_response(
@@ -251,7 +290,8 @@ def register(mcp: FastMCP) -> None:
 
         Args:
             session_id: Research session id.
-            kind: tool_call/debug_stop/crash/note/snapshot/reproduction/other.
+            kind: tool_call/debug_stop/crash/note/snapshot/hypothesis_change/
+                reproduction/artifact/other.
             summary: One-line summary.
             ref: Opaque ref (crash/artifact/operation id).
             hypothesis_id: Existing hypothesis id, if relevant.
@@ -346,7 +386,7 @@ def register(mcp: FastMCP) -> None:
                 other file-taking tool.
         """
         services = get_services(ctx)
-        destination = resolve_workspace_path(
+        destination = _resolve_contained_workspace_path(
             destination,
             workspace_root=services.runtime_paths.workspace_root,
             require_exists=False,
@@ -381,14 +421,14 @@ def register(mcp: FastMCP) -> None:
                 to extract artifact payloads into.  Omit to skip extraction.
         """
         services = get_services(ctx)
-        source_path = resolve_workspace_path(
+        source_path = _resolve_contained_workspace_path(
             source_path,
             workspace_root=services.runtime_paths.workspace_root,
             require_exists=True,
             kind="source_path",
         )
         if artifact_destination_dir is not None:
-            artifact_destination_dir = resolve_workspace_path(
+            artifact_destination_dir = _resolve_contained_workspace_path(
                 artifact_destination_dir,
                 workspace_root=services.runtime_paths.workspace_root,
                 require_exists=False,
@@ -488,7 +528,7 @@ def register(mcp: FastMCP) -> None:
                 the bundle ``.zip``.
         """
         services = get_services(ctx)
-        source_path = resolve_workspace_path(
+        source_path = _resolve_contained_workspace_path(
             source_path,
             workspace_root=services.runtime_paths.workspace_root,
             require_exists=True,

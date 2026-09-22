@@ -580,6 +580,9 @@ class ResearchRegistry:
             # can tell the timeline was pruned rather than silently
             # complete.
             event.metadata["dropped_oldest_for_cap"] = True
+        # Touch before persisting so the stored ``updated_at`` reflects
+        # this mutation rather than the previous one.
+        session._touch()
         # Every registry mutation funnels through this append, so one
         # persist hook here covers notes/evidence/hypotheses/snapshots.
         self._persist(session)
@@ -617,7 +620,6 @@ class ResearchRegistry:
                 snapshot_id=snapshot_id,
                 metadata=metadata,
             )
-            session._touch()
             return event
 
     def get_timeline(
@@ -693,7 +695,6 @@ class ResearchRegistry:
                 note_id=note.note_id,
                 hypothesis_id=hypothesis_id,
             )
-            session._touch()
             return note
 
     # ------------------------------------------------------------------
@@ -755,7 +756,6 @@ class ResearchRegistry:
                 note_id=note_id,
                 metadata={"evidence_id": evidence.evidence_id, "evidence_kind": kind},
             )
-            session._touch()
             return evidence
 
     def link_evidence_batch(
@@ -838,7 +838,6 @@ class ResearchRegistry:
                 summary=f"linked {len(linked)} evidence items ({', '.join(kinds)})",
                 metadata={"evidence_ids": [e.evidence_id for e in linked]},
             )
-            session._touch()
             return linked
 
     # ------------------------------------------------------------------
@@ -880,7 +879,6 @@ class ResearchRegistry:
                 hypothesis_id=hypothesis.hypothesis_id,
                 metadata={"transition": ["<none>", state]},
             )
-            session._touch()
             return hypothesis
 
     def update_hypothesis_state(
@@ -915,7 +913,6 @@ class ResearchRegistry:
                 hypothesis_id=hypothesis.hypothesis_id,
                 metadata={"transition": [previous_state, state]},
             )
-            session._touch()
             return hypothesis
 
     # ------------------------------------------------------------------
@@ -959,7 +956,6 @@ class ResearchRegistry:
                 snapshot_id=snapshot.snapshot_id,
                 metadata={"slot_names": sorted(slots_dict.keys())},
             )
-            session._touch()
             return snapshot
 
     def list_snapshots(self, *, session_id: str) -> List[ResearchSnapshot]:

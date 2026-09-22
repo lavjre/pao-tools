@@ -791,3 +791,74 @@ def test_pinned_artifact_requires_force_to_delete(tmp_path):
 
     deleted = store.delete(artifact.artifact_id, force=True)
     assert deleted.artifact_id == artifact.artifact_id
+
+
+class _CoordinatedProtectedSet(set):
+    """Protected staging names whose iteration overlaps a racing mutation.
+
+    The test writer mutates the set from another thread while ``status()``
+    iterates it.  A correct store serializes the write behind ``_write_lock``,
+    so the mutation cannot land mid-iteration.
+    """
+
+    def __init__(self, values=()):
+        super().__init__(values)
+        self.iteration_started = threading.Event()
+        self.mutation_finished = threading.Event()
+
+    def __iter__(self):
+        self.iteration_started.set()
+        for value in super().__iter__():
+            yield value
+            self.mutation_finished.wait(timeout=0.5)
+
+
+def test_status_reads_protected_staging_names_under_write_lock(tmp_path):
+    store = ArtifactStore(str(tmp_path), quota_bytes=0, min_free_bytes=0)
+    protected_name = ".artifact_race_first.staging"
+    (Path(store.root_dir) / protected_name).write_bytes(b"staging")
+    store._protected_staging_names = _CoordinatedProtectedSet([protected_name])
+    store._protected_staging_reservations[protected_name] = 16
+    mutation = {}
+
+    def mutate():
+        assert store._protected_staging_names.iteration_started.wait(timeout=5)
+        store._protect_staging_name(
+            str(Path(store.root_dir) / ".artifact_race_second.staging"), 32
+        )
+        mutation["finished"] = True
+        store._protected_staging_names.mutation_finished.set()
+
+    writer = threading.Thread(target=mutate)
+    writer.start()
+    status = store.status()
+    writer.join(timeout=5)
+
+    assert mutation.get("finished") is True
+    assert ".artifact_race_second.staging" in store._protected_staging_names
+    assert status["protected_staging_count"] == 1
+
+
+def test_status_expired_count_excludes_pinned_artifacts(tmp_path):
+    store = ArtifactStore(
+        str(tmp_path), ttl_seconds=60, quota_bytes=0, min_free_bytes=0
+    )
+    evictable = store.save_bytes(b"expired", tool="test")
+    pinned = store.save_bytes(b"pinned", tool="test")
+    store.set_pinned(pinned.artifact_id)
+    expired_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    for artifact_id in (evictable.artifact_id, pinned.artifact_id):
+        metadata_path = Path(store._metadata_path(artifact_id))
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload["expires_at"] = expired_at
+        metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = store.status()
+
+    assert status["artifact_count"] == 2
+    assert status["pinned_count"] == 1
+    assert status["expired_count"] == 1
+    cleanup = store.cleanup()
+    assert [item["artifact_id"] for item in cleanup["deletions"]] == [
+        evictable.artifact_id
+    ]

@@ -713,6 +713,13 @@ def test_close_session_reports_associated_cleanup_failure(
     assert result["shutdown_pending"] is False
     assert result["cleanup"] == cleanup
     assert session.gdb.closed is True
+    # A failed cleanup keeps the tombstone so a later reap can retry the
+    # callback instead of silently dropping the surviving helper processes.
+    assert registry.status()["tombstones"] == 1
+    assert registry.reap_tombstones() == 0
+    assert registry.status()["tombstones"] == 1
+    # Retry budget exhausted: the slot is released after MAX_CLEANUP_ATTEMPTS.
+    assert registry.reap_tombstones() == 1
     assert registry.status()["tombstones"] == 0
 
 
