@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import re
-from typing import Any, Dict, List, Optional
+import tempfile
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import pytest
 
 from paomcp.server import create_mcp
 from paomcp.tools.backends.chain_confirm import ChainConfirmer
+from paomcp.tools.backends.rop import ChainBuilder, GadgetIndex
 
 
 @pytest.mark.asyncio
@@ -179,12 +182,78 @@ def _verdict(result: Dict[str, Any]) -> str:
     return result["parsed"]["verdict"]
 
 
+def _record(address: int, instructions: Sequence[str]) -> Dict[str, Any]:
+    return {
+        "address": address,
+        "bytes": b"\x90" * len(instructions),
+        "instructions": list(instructions),
+        "arch": "x86_64",
+    }
+
+
+def _fake_loader(
+    records: Sequence[Mapping[str, Any]],
+) -> Any:
+    def _load(binary_path: str, arch: Optional[str], image_base: Optional[int]):
+        return list(records)
+
+    return _load
+
+
+def _tempbin() -> str:
+    handle = tempfile.NamedTemporaryFile(suffix=".bin", delete=False)
+    handle.write(b"BIN")
+    handle.close()
+    return handle.name
+
+
+def _rich_gadget_set() -> Sequence[Mapping[str, Any]]:
+    return [
+        _record(0x400100, ["pop rdi", "ret"]),
+        _record(0x400200, ["pop rsi", "ret"]),
+        _record(0x400300, ["pop rdx", "ret"]),
+        _record(0x400400, ["pop rcx", "ret"]),
+        _record(0x400500, ["pop r8", "ret"]),
+        _record(0x400600, ["pop r9", "ret"]),
+        _record(0x400800, ["ret"]),
+    ]
+
+
+def _builder_over(records: Sequence[Mapping[str, Any]]) -> ChainBuilder:
+    return ChainBuilder(gadgets=GadgetIndex(loader=_fake_loader(records)))
+
+
+def _entry_value(entry: Mapping[str, Any]) -> int:
+    if entry["kind"] in ("gadget", "target"):
+        return int(entry["address"])
+    return int(entry["value"])
+
+
+def _scripted_program(
+    entries: Sequence[Mapping[str, Any]], buffer_address: int
+) -> List[Dict[str, Any]]:
+    """One step per chain slot consumed after the entry slot.
+
+    The confirmer arms ``$sp`` at ``buffer + 8``, so the step that consumes
+    slot ``k`` lands ``rsp`` at ``buffer + 8*(k+1)``; the final step pops
+    the target slot with exactly the rsp the target sees on entry.
+    """
+    return [
+        {
+            "rip": _entry_value(entry),
+            "rsp": buffer_address + 8 * (index + 1),
+            "reason": "end-stepping-range",
+        }
+        for index, entry in enumerate(entries[1:], start=1)
+    ]
+
+
 class TestReachTarget:
     def test_chain_flows_to_default_target(self) -> None:
         gdb = FakeGdb(
             program=[
                 {"rip": 0x401234, "rsp": 0x7FFFFFFDE08, "reason": "end-stepping-range"},
-                {"rip": 0x401567, "rsp": 0x7FFFFFFDE10, "reason": "end-stepping-range"},
+                {"rip": 0x401567, "rsp": 0x7FFFFFFDE18, "reason": "end-stepping-range"},
             ]
         )
         result = ChainConfirmer(gdb).confirm(chain=[0x401000, 0x401234, 0x401567])
@@ -196,7 +265,7 @@ class TestReachTarget:
         assert gdb.mem[0x7FFFFFFDE00] == 0x401000
         assert gdb.mem[0x7FFFFFFDE08] == 0x401234
         assert gdb.mem[0x7FFFFFFDE10] == 0x401567
-        # 0x...DE10 % 16 == 0 -> aligned.
+        # SysV AMD64 entry phase: 0x...DE18 % 16 == 8 -> aligned.
         assert parsed["stack_aligned"] is True
 
     def test_explicit_target_address(self) -> None:
@@ -233,6 +302,87 @@ class TestReachTarget:
         assert parsed["verdict"] == "reached_target"
         assert parsed["stack_aligned"] is False
         assert parsed["alignment_expected"] == "16-byte"
+
+
+class TestBuilderAlignmentParity:
+    """Confirmer alignment must agree with the builder's SysV parity model.
+
+    A real saved return-address slot sits at ``rsp % 16 == 8``.  The
+    builder appends a bare ``ret`` so a pop-args chain's total pop count is
+    even, which keeps the target's entry rsp at 8 (mod 16).  The confirmer
+    must report that aligned construction as aligned and flag one missing
+    the alignment ret.
+    """
+
+    BUFFER = 0x7FFFFFFFDE08  # saved return-address slot: 8 (mod 16)
+
+    @pytest.mark.parametrize("arg_count", [0, 1, 3, 6])
+    def test_built_chain_alignment_matches_builder_parity(self, arg_count: int) -> None:
+        binary = _tempbin()
+        try:
+            parsed = _builder_over(_rich_gadget_set()).build_rop_chain(
+                binary_path=binary,
+                kind="ret2libc",
+                target_address=0x7FFF_1234_5000,
+                target_symbol="system",
+                args=[0xDEAD0000 + index for index in range(arg_count)],
+            )["parsed"]
+        finally:
+            os.unlink(binary)
+        assert parsed["verdict"] == "built"
+        entries = parsed["entries"]
+        # Builder's documented parity: target entry is on the correct
+        # 16-byte phase iff the chain length is a multiple of 16 bytes.
+        assert parsed["raw_bytes_length"] % 16 == 0
+        gdb = FakeGdb(rsp=self.BUFFER, program=_scripted_program(entries, self.BUFFER))
+        result = ChainConfirmer(gdb).confirm(
+            chain=[_entry_value(entry) for entry in entries],
+            stack_address=self.BUFFER,
+        )
+        assert result["parsed"]["verdict"] == "reached_target"
+        assert result["parsed"]["stack_aligned"] is True
+
+    def test_chain_missing_alignment_ret_is_reported_misaligned(self) -> None:
+        binary = _tempbin()
+        try:
+            parsed = _builder_over(_rich_gadget_set()).build_rop_chain(
+                binary_path=binary,
+                kind="ret2libc",
+                target_address=0x7FFF_1234_5000,
+                target_symbol="system",
+                args=[0xDEAD0001],
+                align_stack=False,
+            )["parsed"]
+        finally:
+            os.unlink(binary)
+        entries = parsed["entries"]
+        assert [entry["kind"] for entry in entries] == [
+            "gadget",
+            "immediate",
+            "target",
+        ]
+        # Odd pop count -> 24 bytes -> 8 (mod 16): the target entry rsp is
+        # NOT on the SysV phase, so the confirmer must say so.
+        assert parsed["raw_bytes_length"] % 16 == 8
+        gdb = FakeGdb(rsp=self.BUFFER, program=_scripted_program(entries, self.BUFFER))
+        result = ChainConfirmer(gdb).confirm(
+            chain=[_entry_value(entry) for entry in entries],
+            stack_address=self.BUFFER,
+        )
+        assert result["parsed"]["verdict"] == "reached_target"
+        assert result["parsed"]["stack_aligned"] is False
+
+    def test_one_gadget_alignment_uses_armed_entry_rsp(self) -> None:
+        # No pivot ret is modeled: the armed $sp (buffer + 8) is the entry
+        # rsp, so an ABI-correct saved-RA slot (8 mod 16) leaves the target
+        # misaligned and needs a leading ``ret``.
+        gdb = FakeGdb(program=[])
+        result = ChainConfirmer(gdb).confirm(
+            chain=[0x401567], stack_address=self.BUFFER
+        )
+        assert result["parsed"]["verdict"] == "reached_target"
+        assert result["parsed"]["steps_executed"] == 0
+        assert result["parsed"]["stack_aligned"] is False
 
 
 class TestCrash:

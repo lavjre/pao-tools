@@ -851,6 +851,7 @@ class ChainValidator:
         except ChainBuilderError as exc:
             raise ChainValidatorError(str(exc)) from exc
         normalized_bad_bytes = GadgetIndex._normalize_bad_bytes(bad_bytes)
+        endianness = GadgetIndex._endianness_for_arch(canonical_arch)
         executable_mappings_list = list(executable_mappings or [])
         exec_check: Dict[str, Any] = {
             "name": "exec_mapping",
@@ -898,7 +899,10 @@ class ChainValidator:
                     )
             if normalized_bad_bytes:
                 if GadgetIndex._address_contains_bad_byte(
-                    address, pointer_bytes, normalized_bad_bytes
+                    address,
+                    pointer_bytes,
+                    normalized_bad_bytes,
+                    endianness=endianness,
                 ):
                     bad_byte_check["issues"].append(
                         {

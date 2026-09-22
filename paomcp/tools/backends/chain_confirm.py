@@ -24,7 +24,9 @@ explicit ``stack_address`` over letting the live stack serve as scratch.
 Verdicts:
 
 * ``reached_target``  -- control transferred to ``target_address`` (defaults
-  to the last chain value) without a signal; stack alignment is reported.
+  to the last chain value) without a signal; stack alignment is reported
+  against the SysV AMD64 entry contract, i.e. ``stack_aligned`` is true
+  when ``rsp % 16 == 8`` at the moment the target is entered.
 * ``crashed``         -- the inferior received a signal while stepping.
 * ``step_failed``     -- GDB could not execute a single step (e.g. an
   invalid instruction or an unreadable instruction fetch).
@@ -50,8 +52,10 @@ DEFAULT_CONFIRM_STEPS = 200
 TRACE_LIMIT = 512
 
 # Per-arch (program-counter, stack-pointer, pointer-width, alignment).
-# SysV AMD64 requires 16-byte alignment at function entry; i386 has no hard
-# requirement, so ``alignment`` is ``None`` there and the field reports it.
+# SysV AMD64 requires rsp % 16 == 8 at function entry -- the caller's
+# ``call`` pushed the 8-byte return address, so the entry rsp phase is
+# 8 (mod 16).  i386 has no hard requirement, so ``alignment`` is ``None``
+# there and the field reports it.
 _ARCH_REGISTERS: Dict[str, Tuple[str, str, int, Optional[int]]] = {
     "x86_64": ("rip", "rsp", 8, 16),
     "i386": ("eip", "esp", 4, None),
@@ -348,13 +352,25 @@ class ChainConfirmer:
         # --- assemble the final payload ---------------------------------
         stack_aligned: Optional[bool] = None
         if verdict == "reached_target" and alignment is not None:
+            # SysV AMD64: rsp % 16 == 8 when control reaches a function
+            # entry.  ``entry_phase`` is that expected remainder (8 for
+            # x86_64, where the pointer width matches the pushed return
+            # address).
+            entry_phase = pointer_bytes % alignment
             if trace:
+                # The stepi that landed on the target already executed the
+                # transferring ``ret``, so the traced rsp *is* the target's
+                # entry rsp.
                 final_rsp = trace[-1].get("rsp")
                 if isinstance(final_rsp, int):
-                    stack_aligned = final_rsp % alignment == 0
+                    stack_aligned = final_rsp % alignment == entry_phase
             else:
-                # Entry was the target: alignment at the scratch buffer.
-                stack_aligned = buffer_address % alignment == 0
+                # Entry *is* the target (a one-gadget): $sp was armed to
+                # buffer + pointer_bytes, and that armed value is the
+                # target's entry rsp.
+                stack_aligned = (
+                    buffer_address + pointer_bytes
+                ) % alignment == entry_phase
         return _response(
             verdict,
             extra={

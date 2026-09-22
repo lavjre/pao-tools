@@ -169,6 +169,24 @@ class TestValidateChain:
         assert bb["verdict"] == "fail"
         assert any(i["slot_index"] == 0 for i in bb["issues"])
 
+    def test_bad_bytes_use_arch_endianness(self, monkeypatch) -> None:
+        # Byte membership cannot observe byte order, so spy on the encoding
+        # helper to prove the validator forwards the arch's endianness.
+        seen: List[str] = []
+        original = GadgetIndex._address_contains_bad_byte
+
+        @classmethod
+        def spy(cls, address, pointer_bytes, bad_bytes, endianness="little"):
+            seen.append(endianness)
+            return original(address, pointer_bytes, bad_bytes, endianness)
+
+        monkeypatch.setattr(GadgetIndex, "_address_contains_bad_byte", spy)
+        chain = [{"kind": "gadget", "address": 0x12345678, "instructions": "ret"}]
+        validator = ChainValidator()
+        validator.validate_rop_chain(chain=chain, bad_bytes=[0x99], arch="mips")
+        validator.validate_rop_chain(chain=chain, bad_bytes=[0x99], arch="x86_64")
+        assert seen == ["big", "little"]
+
     def test_register_clobber_is_warn_not_fail(self) -> None:
         chain = _standard_chain()
         validator = ChainValidator()

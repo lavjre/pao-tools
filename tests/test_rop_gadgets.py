@@ -215,6 +215,33 @@ class TestBadByteFilter:
             0x401234, 8, [0x0A, 0x0D, 0x20]
         )
 
+    def test_big_endian_addresses_use_target_byte_order(self) -> None:
+        # Byte membership is reversal-invariant, so the *verdict* for an
+        # address matches under either order; what this locks is that the
+        # big-endian encoding path is accepted and applied (the previous
+        # signature had no endianness parameter at all).
+        assert GadgetIndex._address_contains_bad_byte(
+            0x12345678, 4, [0x12], endianness="big"
+        )
+        assert not GadgetIndex._address_contains_bad_byte(
+            0x12345678, 4, [0x99], endianness="big"
+        )
+
+    def test_default_endianness_is_little(self) -> None:
+        assert not GadgetIndex._address_contains_bad_byte(0x12345678, 4, [0x99])
+
+    def test_endianness_inferred_from_arch(self) -> None:
+        assert GadgetIndex._endianness_for_arch("mips") == "big"
+        assert GadgetIndex._endianness_for_arch("mipsel") == "little"
+        assert GadgetIndex._endianness_for_arch("x86_64") == "little"
+        assert GadgetIndex._endianness_for_arch(None) == "little"
+
+    def test_gadget_endianness_reads_arch_annotation(self) -> None:
+        assert GadgetIndex._gadget_endianness({"arch_canonical": "mips"}) == "big"
+        assert GadgetIndex._gadget_endianness({"arch": "mips"}) == "big"
+        assert GadgetIndex._gadget_endianness({"arch": "x86_64"}) == "little"
+        assert GadgetIndex._gadget_endianness({}) == "little"
+
     def test_missing_pointer_width_is_conservative(self) -> None:
         # Without a pointer width we cannot honestly encode: fail closed so
         # an unknown arch never passes a tainted address through the filter.
@@ -333,6 +360,33 @@ class TestFindGadgets:
             assert addrs == [0x400100]
         finally:
             os.unlink(binary)
+
+    def test_bad_bytes_uses_arch_endianness(self, monkeypatch) -> None:
+        # 0x12345678 contains 0x12 in both byte orders, so the filter's
+        # verdict cannot observe the order; spy on the encoding helper to
+        # prove the big-endian MIPS arch is forwarded as such.
+        seen: List[str] = []
+        original = GadgetIndex._address_contains_bad_byte
+
+        @classmethod
+        def spy(cls, address, pointer_bytes, bad_bytes, endianness="little"):
+            seen.append(endianness)
+            return original(address, pointer_bytes, bad_bytes, endianness)
+
+        monkeypatch.setattr(GadgetIndex, "_address_contains_bad_byte", spy)
+        records = [_record(0x12345678, ["ret"], arch="mips")]
+        idx = GadgetIndex(loader=_fake_loader(records))
+        binary = _tempbin()
+        try:
+            big = idx.find_gadgets(binary_path=binary, arch="mips", bad_bytes=[0x99])
+            little = idx.find_gadgets(
+                binary_path=binary, arch="mipsel", bad_bytes=[0x99]
+            )
+        finally:
+            os.unlink(binary)
+        assert seen == ["big", "little"]
+        assert big["parsed"]["matched"] == 1
+        assert little["parsed"]["matched"] == 1
 
     def test_max_results_truncates_but_reports_full_count(self) -> None:
         records = [_record(0x400000 + i * 0x10, ["pop rdi", "ret"]) for i in range(5)]
@@ -464,6 +518,31 @@ class TestFindGadgetSequence:
             assert response["parsed"]["steps"][0]["gadget"]["address"] == 0x400100
         finally:
             os.unlink(binary)
+
+    def test_bad_bytes_sequence_uses_arch_endianness(self, monkeypatch) -> None:
+        seen: List[str] = []
+        original = GadgetIndex._address_contains_bad_byte
+
+        @classmethod
+        def spy(cls, address, pointer_bytes, bad_bytes, endianness="little"):
+            seen.append(endianness)
+            return original(address, pointer_bytes, bad_bytes, endianness)
+
+        monkeypatch.setattr(GadgetIndex, "_address_contains_bad_byte", spy)
+        records = [_record(0x12345678, ["ret"], arch="mips")]
+        idx = GadgetIndex(loader=_fake_loader(records))
+        binary = _tempbin()
+        try:
+            response = idx.find_gadget_sequence(
+                binary_path=binary,
+                steps=["^ret$"],
+                arch="mips",
+                bad_bytes=[0x99],
+            )
+        finally:
+            os.unlink(binary)
+        assert seen == ["big"]
+        assert response["parsed"]["steps"][0]["matched"] is True
 
     def test_empty_steps_raise(self) -> None:
         idx = GadgetIndex(loader=_fake_loader([]))

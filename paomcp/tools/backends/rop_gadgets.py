@@ -12,6 +12,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Literal,
     Mapping,
     Optional,
     Sequence,
@@ -69,6 +70,14 @@ _POINTER_BYTES: Dict[str, int] = {
     "mips": 4,
     "mipsel": 4,
     "riscv64": 8,
+}
+
+# Pointer byte order per canonical architecture.  Every indexed arch is
+# little-endian except classic big-endian MIPS; ``mipsel`` is the
+# little-endian variant and is deliberately absent from this table.
+_ByteOrder = Literal["little", "big"]
+_ENDIANNESS: Dict[str, _ByteOrder] = {
+    "mips": "big",
 }
 
 _X86_REGISTERS: Tuple[str, ...] = (
@@ -479,7 +488,10 @@ class GadgetIndex:
             gadget
             for gadget in gadgets
             if not cls._address_contains_bad_byte(
-                gadget["address"], gadget["pointer_bytes"], normalized_bad_bytes
+                gadget["address"],
+                gadget["pointer_bytes"],
+                normalized_bad_bytes,
+                endianness=cls._gadget_endianness(gadget),
             )
         ]
         deduped = cls._dedupe(clean)
@@ -540,6 +552,23 @@ class GadgetIndex:
     @classmethod
     def _pointer_bytes_for_arch(cls, arch: Optional[str]) -> Optional[int]:
         return _POINTER_BYTES.get(cls._canonical_arch(arch))
+
+    @classmethod
+    def _endianness_for_arch(cls, arch: Optional[str]) -> _ByteOrder:
+        """Byte order used to encode pointers for ``arch``.
+
+        Unknown arches keep the historical little-endian default so the
+        filter's behavior only changes where the target platform is known
+        to differ.
+        """
+        return _ENDIANNESS.get(cls._canonical_arch(arch), "little")
+
+    @classmethod
+    def _gadget_endianness(cls, gadget: Mapping[str, Any]) -> _ByteOrder:
+        """Endianness for the arch annotation carried by an analyzed gadget."""
+        return cls._endianness_for_arch(
+            gadget.get("arch_canonical") or gadget.get("arch")
+        )
 
     @classmethod
     def _stack_pointer_for_arch(cls, arch: Optional[str]) -> Optional[str]:
@@ -842,7 +871,11 @@ class GadgetIndex:
 
     @classmethod
     def _address_contains_bad_byte(
-        cls, address: int, pointer_bytes: Optional[int], bad_bytes: Sequence[int]
+        cls,
+        address: int,
+        pointer_bytes: Optional[int],
+        bad_bytes: Sequence[int],
+        endianness: _ByteOrder = "little",
     ) -> bool:
         if not bad_bytes:
             return False
@@ -852,7 +885,7 @@ class GadgetIndex:
             # address through the filter.
             return True
         try:
-            encoded = int(address).to_bytes(pointer_bytes, "little", signed=False)
+            encoded = int(address).to_bytes(pointer_bytes, endianness, signed=False)
         except OverflowError:
             return True  # address doesn't fit the pointer width -> bad
         return any(b in encoded for b in bad_bytes)
@@ -949,7 +982,10 @@ class GadgetIndex:
             ):
                 continue
             if self._address_contains_bad_byte(
-                gadget["address"], gadget["pointer_bytes"], normalized_bad_bytes
+                gadget["address"],
+                gadget["pointer_bytes"],
+                normalized_bad_bytes,
+                endianness=self._gadget_endianness(gadget),
             ):
                 continue
             candidates.append(gadget)
