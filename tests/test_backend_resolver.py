@@ -48,12 +48,30 @@ class TestValidateBackendName:
 
 
 class TestResolveBackend:
-    def test_no_request_defaults_to_gdb_even_without_pwndbg(self) -> None:
-        spec = resolve_backend(which=_which(set()), probe_lldb=_probe(False))
+    def test_no_request_defaults_to_gdb_when_present(self) -> None:
+        spec = resolve_backend(which=_which({"pwndbg"}), probe_lldb=_probe(True))
         assert spec.name == "gdb"
         assert spec.protocol == "gdb-mi3"
         assert spec.reason == "default"
-        assert spec.available is False  # binary absent, but default still gdb
+        assert spec.available is True
+
+    def test_no_request_falls_back_to_lldb_when_gdb_missing(self) -> None:
+        spec = resolve_backend(which=_which({"pwndbg-lldb"}), probe_lldb=_probe(True))
+        assert spec.name == "lldb"
+        assert spec.protocol == "lldb-cli"
+        assert spec.executable == "pwndbg-lldb"
+        assert spec.available is True
+
+    def test_no_request_keeps_gdb_default_without_any_backend(self) -> None:
+        spec = resolve_backend(which=_which(set()), probe_lldb=_probe(False))
+        assert spec.name == "gdb"
+        assert spec.reason == "default"
+        assert spec.available is False
+
+    def test_no_request_does_not_fall_back_to_broken_lldb(self) -> None:
+        spec = resolve_backend(which=_which({"pwndbg-lldb"}), probe_lldb=_probe(False))
+        assert spec.name == "gdb"
+        assert spec.available is False
 
     def test_no_request_preserves_gdb_default_when_present(self) -> None:
         spec = resolve_backend(which=_which({"pwndbg"}), probe_lldb=_probe(True))
@@ -82,6 +100,14 @@ class TestResolveBackend:
         with pytest.raises(BackendUnavailableError):
             resolve_backend(
                 session_backend="gdb", which=_which(set()), probe_lldb=_probe(True)
+            )
+
+    def test_env_requested_unavailable_gdb_raises(self) -> None:
+        with pytest.raises(BackendUnavailableError):
+            resolve_backend(
+                env_backend="gdb",
+                which=_which({"pwndbg-lldb"}),
+                probe_lldb=_probe(True),
             )
 
     def test_explicit_unavailable_lldb_raises_even_with_gdb(self) -> None:

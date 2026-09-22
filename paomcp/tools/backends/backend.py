@@ -217,10 +217,12 @@ def resolve_backend(
     4. ``auto``: a darwin/Mach-O target hint prefers lldb (then gdb); any
        other target prefers gdb (full tool surface), falling back to lldb.
        Neither available raises :class:`BackendUnavailableError`.
-    5. No request at all returns a ``gdb`` spec with ``reason="default"`` --
-       preserving the pre-decision-layer behavior exactly (including for
-       environments where ``pwndbg`` is absent, so construction-time tests
-       that patch the controller keep working).
+    5. No request at all returns a ``gdb`` spec with ``reason="default"`` when
+       ``pwndbg`` is available.  When gdb is absent but a working
+       ``pwndbg-lldb`` is present, lldb is selected instead of returning an
+       unusable gdb spec whose construction would fail with a raw error; with
+       neither available the gdb default is kept (``available=False``) so
+       construction-time tests that patch the controller keep working.
 
     ``target_kind`` is accepted for API symmetry and remote-target host-OS
     hints; today it does not change the ordering beyond the OS/platform hint.
@@ -232,6 +234,8 @@ def resolve_backend(
     l_avail = lldb_probe()
 
     if requested is None:
+        if not g_avail and l_avail:
+            return _spec("lldb", "lldb-cli", "pwndbg-lldb", True, "auto-availability")
         return _spec("gdb", "gdb-mi3", "pwndbg", g_avail, "default")
 
     if requested == "gdb":

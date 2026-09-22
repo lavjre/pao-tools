@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import threading
 import time
 
 import pytest
@@ -504,6 +505,31 @@ def test_snapshot_has_typed_faulting_instruction_classification_and_signature():
     assert signature["schema"] == "pao.crash-fingerprint.v1"
     assert len(signature["digest"]) == 64
     assert "0x401000" not in json.dumps(signature["canonical"], sort_keys=True)
+
+
+def test_memory_direction_is_mnemonic_aware_for_compare_instructions():
+    for instruction in (
+        "cmp [rax], rdx",
+        "cmp qword ptr [rbp-0x8], 0x1",
+        "cmp rax, [rbx]",
+        "test byte ptr [rcx], 0x1",
+        "test [rdx], rax",
+        "cmn [x0], 1",
+        "tst [x1], 1",
+    ):
+        assert CrashTriage._memory_direction(instruction) == "read", instruction
+    # Register-only compares touch no memory: direction stays unknown.
+    assert CrashTriage._memory_direction("cmp rax, rbx") is None
+    assert CrashTriage._memory_direction("test eax, eax") is None
+
+
+def test_fault_access_reports_compare_faults_as_reads():
+    read = CrashTriage._fault_access(0x0, 0x401000, "cmp [rax], rdx", 1)
+    assert read["access"] == "read"
+    assert read["mnemonic"] == "cmp"
+    assert read["si_code"] == 1
+    write = CrashTriage._fault_access(0x0, 0x401000, "mov [rax], rdx", 1)
+    assert write["access"] == "write"
 
 
 def test_classify_crash_is_conservative_and_reuses_exact_cached_snapshot():
@@ -1105,6 +1131,113 @@ def test_core_generation_hard_kills_writer_on_timeout(tmp_path):
     assert events.index("wait") < events.index("kill")
 
 
+def test_core_generation_prefers_clean_stop_when_signal_succeeds(tmp_path):
+    triage, gdb = adapter(stop_record())
+    events = []
+    signalled = threading.Event()
+
+    def oversized_execute(command, timeout_sec=7.0):
+        output_path = command.removeprefix("generate-core-file ")
+        with open(output_path, "wb") as destination:
+            destination.write(b"\x00" * 8192)
+        # Block until the size monitor notices the overshoot and signals.
+        signalled.wait(timeout=5)
+        return {
+            "success": False,
+            "state": "running",
+            "timed_out": True,
+            "responses": [],
+        }
+
+    def signal_interrupt():
+        events.append("signal")
+        signalled.set()
+        return {"success": True, "state": "running", "responses": []}
+
+    def wait_for_writer_quiescence(timeout_sec=2.0, poll_interval=0.02):
+        events.append("wait")
+        return True  # gdb stopped cleanly after the signal
+
+    def kill_process_group():
+        events.append("kill")
+        return {"success": True, "pid": 123, "killed_group": True}
+
+    gdb.execute_command = oversized_execute
+    gdb.signal_interrupt = signal_interrupt
+    gdb.wait_for_writer_quiescence = wait_for_writer_quiescence
+    gdb.kill_process_group = kill_process_group
+
+    with pytest.raises(RuntimeError, match="exceeded"):
+        triage.generate_core_file(
+            "alpha:testgen:1:1",
+            str(tmp_path / "core"),
+            max_size_bytes=4096,
+            min_free_bytes=0,
+        )
+
+    # A successful signal is the clean stop: the bounded quiescence wait runs,
+    # and the hard kill stays a fallback that must not fire.
+    assert "signal" in events
+    assert events.index("signal") < events.index("wait")
+    assert "kill" not in events
+
+
+def test_core_generation_kills_writer_when_signal_interrupt_is_unsupported(
+    tmp_path,
+):
+    triage, gdb = adapter(stop_record())
+    events = []
+    signalled = threading.Event()
+
+    def oversized_execute(command, timeout_sec=7.0):
+        output_path = command.removeprefix("generate-core-file ")
+        with open(output_path, "wb") as destination:
+            destination.write(b"\x00" * 8192)
+        signalled.wait(timeout=5)
+        return {
+            "success": False,
+            "state": "running",
+            "timed_out": True,
+            "responses": [],
+        }
+
+    def signal_interrupt():
+        events.append("signal")
+        signalled.set()
+        return {
+            "success": False,
+            "state": "running",
+            "responses": [],
+            "error": "Signal-only interrupt requires POSIX process signalling",
+            "type": "SignalInterruptUnsupported",
+        }
+
+    def wait_for_writer_quiescence(timeout_sec=2.0, poll_interval=0.02):
+        events.append("wait")
+        return False  # no cooperative stop without a signal
+
+    def kill_process_group():
+        events.append("kill")
+        return {"success": True, "pid": 123, "confirmed_dead": True}
+
+    gdb.execute_command = oversized_execute
+    gdb.signal_interrupt = signal_interrupt
+    gdb.wait_for_writer_quiescence = wait_for_writer_quiescence
+    gdb.kill_process_group = kill_process_group
+
+    with pytest.raises(RuntimeError):
+        triage.generate_core_file(
+            "alpha:testgen:1:1",
+            str(tmp_path / "core"),
+            max_size_bytes=4096,
+            min_free_bytes=0,
+        )
+
+    # The unsupported signal is recorded as a violation and the process-group
+    # kill escalation is the fallback that actually quiesces the writer.
+    assert events.index("signal") < events.index("wait") < events.index("kill")
+
+
 def test_custom_fatal_signal_policy_survives_analysis_refresh():
     triage, _ = adapter(stop_record(signal="SIGTRAP"))
 
@@ -1272,6 +1405,32 @@ def test_run_timeout_invalidates_unsynchronized_session():
     assert result["parsed"]["interrupt_synchronized"] is False
     assert result["parsed"]["session_destroyed"] is True
     assert kills == [True]
+    assert gdb._destroyed is True
+
+
+def test_run_until_crash_surfaces_backend_failure_without_burning_budget():
+    triage, gdb = adapter()
+
+    def failing_drain(timeout_sec=0.0, max_rounds=10):
+        gdb.calls.append(("drain", timeout_sec, max_rounds))
+        return {
+            "success": False,
+            "state": "running",
+            "responses": [],
+            "backend_error": True,
+            "type": "OSError",
+            "error": "pipe is closed",
+        }
+
+    gdb.drain_async = failing_drain
+
+    result = triage.run_until_crash(mode="run", timeout_seconds=30)
+
+    assert result["success"] is False
+    assert result["parsed"]["backend_error"] is True
+    assert result["parsed"]["crashed"] is False
+    assert result["type"] == "OSError"
+    assert "pipe is closed" in result["error"]
     assert gdb._destroyed is True
 
 

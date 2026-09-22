@@ -242,3 +242,121 @@ def test_advanced_step_and_input_validation():
         adapter.step_until_event("instruction", mnemonic="mov;quit")
     with pytest.raises(ValueError):
         adapter.select_thread(0)
+
+
+class FakeLldbController:
+    """LldbController-shaped double: execution results carry the typed payload
+    at the top level instead of inside a ``result`` response."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get_state(self):
+        return "stopped"
+
+    def get_inferior_epoch(self):
+        return 1
+
+    @staticmethod
+    def quote_mi_argument(value):
+        return f'"{value}"'
+
+    def execute_mi_command(self, command, timeout_sec=7.0):
+        self.calls.append(command)
+        if command == "-data-list-register-names":
+            return {
+                "command": command,
+                "success": True,
+                "state": "stopped",
+                "responses": [
+                    {
+                        "type": "result",
+                        "message": "done",
+                        "payload": {"register-names": ["rax", "rip"]},
+                    }
+                ],
+            }
+        raise AssertionError(f"Unexpected MI command: {command}")
+
+    def get_register_values_mi(self, register_numbers=None, timeout_sec=7.0):
+        self.calls.append("-data-list-register-values")
+        return {
+            "command": "register read",
+            "success": True,
+            "state": "stopped",
+            "responses": [
+                {"type": "console", "payload": "rax = 0x0000000000401000"},
+                {"type": "console", "payload": "rip = 0x0000000000401004"},
+            ],
+            "payload": {
+                "register-values": [
+                    {"number": 0, "value": "0x0000000000401000"},
+                    {"number": 1, "value": "0x0000000000401004"},
+                ]
+            },
+        }
+
+    def list_breakpoints(self):
+        self.calls.append("breakpoint list")
+        table = [
+            {
+                "number": "1",
+                "type": "breakpoint",
+                "disp": "keep",
+                "enabled": "y",
+                "addr": "0x401000",
+                "func": "main",
+            }
+        ]
+        return {
+            "command": "breakpoint list",
+            "success": True,
+            "state": "stopped",
+            "responses": [
+                {"type": "console", "payload": "1: name = 'main', locations = 1"}
+            ],
+            "payload": {
+                "BreakpointTable": {"body": table},
+                "breakpoints": table,
+                "count": len(table),
+            },
+        }
+
+    def list_stack_frames_mi(self, low=0, high=None, timeout_sec=7.0):
+        self.calls.append("thread backtrace")
+        stack = [
+            {"level": "0", "addr": "0x401000", "func": "main", "args": []},
+            {"level": "1", "addr": "0x400900", "func": "_start", "args": []},
+        ]
+        return {
+            "command": "thread backtrace",
+            "success": True,
+            "state": "stopped",
+            "responses": [
+                {
+                    "type": "console",
+                    "payload": "frame #0: 0x0000000000401000 a.out`main",
+                }
+            ],
+            "payload": {"stack": stack},
+        }
+
+
+def test_lldb_top_level_payloads_feed_typed_reads():
+    adapter = DebuggerOperations(FakeLldbController(), timeout_seconds=3)
+
+    listed = adapter.list_breakpoints()
+    registers = adapter.read_registers()
+    frames = adapter.stack_frames()
+
+    assert listed["success"] is True
+    assert listed["parsed"]["count"] == 1
+    assert listed["parsed"]["breakpoints"][0]["function"] == "main"
+    assert registers["success"] is True
+    assert [item["name"] for item in registers["parsed"]["registers"]] == [
+        "rax",
+        "rip",
+    ]
+    assert frames["success"] is True
+    assert frames["parsed"]["count"] == 2
+    assert frames["parsed"]["frames"][0]["function"] == "main"

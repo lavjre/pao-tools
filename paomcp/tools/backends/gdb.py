@@ -8,6 +8,7 @@ immediate responses suitable for LLM interaction.
 
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STOP_RECORD_LIMIT = 64
 DEFAULT_GDB_CLOSE_TIMEOUT_SEC = 2.0
+DEFAULT_MI_RESYNC_TIMEOUT_SEC = 0.5
+MEMORY_WORD_FORMATS = ("x", "d", "u", "o", "t", "a", "c", "f", "s", "i")
 
 # On POSIX the gdb process is placed in its own session so the whole process
 # group can be signalled at once; Windows has no session/process-group model, so
@@ -281,6 +284,9 @@ class GdbController:
         self._destroyed = False
         self._stop_sequence = 0
         self._stop_records: Deque[_StopRecord] = deque(maxlen=DEFAULT_STOP_RECORD_LIMIT)
+        # Set when an async drain read fails; drain_async surfaces it instead of
+        # letting a dead gdb look like a quiet one.
+        self._async_error: Optional[BaseException] = None
 
     def initialize(self) -> Dict[str, Any]:
         """
@@ -329,70 +335,125 @@ class GdbController:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
 
+    @staticmethod
+    def _terminal_result_seen(responses: List[Dict[str, Any]]) -> bool:
+        """Return whether a terminal ``result`` record is present.
+
+        Every GDB/MI command produces exactly one result record (``done``,
+        ``running``, ``error``, ...).  Notifications and console/log streams
+        are not terminal: a response batch without a result record cannot be
+        attributed to the command that was written.
+        """
+        return any(
+            isinstance(response, dict) and response.get("type") == "result"
+            for response in responses
+        )
+
+    def _resync_mi_stream(
+        self, timeout_sec: float = DEFAULT_MI_RESYNC_TIMEOUT_SEC
+    ) -> List[Dict[str, Any]]:
+        """Collect late responses after a timeout to re-align the MI stream.
+
+        pygdbmi can return before a command's result record arrives (timeout or
+        the additional-output window closing).  Reading the remaining records
+        here keeps them from being consumed by the *next* command, which would
+        corrupt the response-to-command mapping.
+        """
+        responses: List[Dict[str, Any]] = []
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            batch = self._get_async_responses(timeout_sec=remaining)
+            if not batch:
+                break
+            responses.extend(batch)
+            if self._terminal_result_seen(batch):
+                break
+        return responses
+
+    def _execute_and_align(self, command: str, timeout_sec: float) -> Dict[str, Any]:
+        """Write one command and return responses aligned to its result record.
+
+        Success is only claimed when the command's terminal result record was
+        observed.  When the initial read stops early (timeout or pygdbmi's
+        output window), the stream is drained within a short bounded deadline
+        so the late record is consumed by this call rather than the next one.
+        """
+        # pygdbmi appends exactly one newline, so any embedded control
+        # character would turn this command into a second one. There is no
+        # legitimate multi-line command: fail closed before writing.
+        if any(character in command for character in ("\x00", "\r", "\n")):
+            return {
+                "command": command,
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "type": "ValueError",
+                "error": "Command contains a forbidden control character",
+            }
+        timed_out_error: Optional[BaseException] = None
+        try:
+            responses = self.controller.write(command, timeout_sec=timeout_sec)
+        except (GdbTimeoutError, TimeoutError) as exc:
+            timed_out_error = exc
+            responses = []
+        if not isinstance(responses, list):
+            responses = []
+        if not self._terminal_result_seen(responses):
+            responses = responses + self._resync_mi_stream()
+
+        # Update internal state from notify messages and detect errors
+        error_found = False
+        for response in responses:
+            if not isinstance(response, dict):
+                continue
+            if response.get("type") == "notify":
+                self._handle_notify(response)
+            elif (
+                response.get("type") == "result" and response.get("message") == "error"
+            ):
+                error_found = True
+
+        terminal_found = self._terminal_result_seen(responses)
+        result: Dict[str, Any] = {
+            "command": command,
+            "responses": responses,
+            "success": terminal_found and not error_found,
+            "state": self._state,
+        }
+        if timed_out_error is not None:
+            # The deadline was exceeded even when the late result record was
+            # recovered, so the timeout marker is always reported.  ``success``
+            # reflects whether the command's own result was actually observed.
+            result["timed_out"] = True
+            result["timeout_seconds"] = timeout_sec
+            if not terminal_found:
+                result["type"] = "TimeoutError"
+                result["error"] = (
+                    "MI stream desynchronized after timeout; no terminal result "
+                    f"record for {command!r}"
+                )
+        elif not terminal_found:
+            result["type"] = "MIStreamError"
+            result["error"] = (
+                "MI stream desynchronized; no terminal result record for "
+                f"{command!r}"
+            )
+        return result
+
     def execute_mi_command(
         self, command: str, timeout_sec: float = 7.0
     ) -> Dict[str, Any]:
         """Execute a GDB/MI command and return raw MI responses."""
         logger.debug(f"Executing MI command: {command}")
-        try:
-            responses = self.controller.write(command, timeout_sec=timeout_sec)
-        except (GdbTimeoutError, TimeoutError) as exc:
-            return {
-                "command": command,
-                "responses": [],
-                "success": False,
-                "state": self._state,
-                "error": str(exc) or f"GDB command timed out after {timeout_sec}s",
-                "type": "TimeoutError",
-                "timed_out": True,
-                "timeout_seconds": timeout_sec,
-            }
-        # Update internal state from notify messages and detect errors
-        error_found = False
-        for response in responses:
-            if response.get("type") == "notify":
-                self._handle_notify(response)
-            elif (
-                response.get("type") == "result" and response.get("message") == "error"
-            ):
-                error_found = True
-        return {
-            "command": command,
-            "responses": responses,
-            "success": not error_found,
-            "state": self._state,
-        }
+        return self._execute_and_align(command, timeout_sec)
 
     def execute_command(self, command: str, timeout_sec: float = 7.0) -> Dict[str, Any]:
         """Execute a classic GDB command (non-MI) and return raw responses."""
         logger.debug(f"Executing command: {command}")
-        try:
-            responses = self.controller.write(command, timeout_sec=timeout_sec)
-        except (GdbTimeoutError, TimeoutError) as exc:
-            return {
-                "command": command,
-                "responses": [],
-                "success": False,
-                "state": self._state,
-                "error": str(exc) or f"GDB command timed out after {timeout_sec}s",
-                "type": "TimeoutError",
-                "timed_out": True,
-                "timeout_seconds": timeout_sec,
-            }
-        error_found = False
-        for response in responses:
-            if response.get("type") == "notify":
-                self._handle_notify(response)
-            elif (
-                response.get("type") == "result" and response.get("message") == "error"
-            ):
-                error_found = True
-        return {
-            "command": command,
-            "responses": responses,
-            "success": not error_found,
-            "state": self._state,
-        }
+        return self._execute_and_align(command, timeout_sec)
 
     def _handle_notify(self, response: Dict[str, Any]):
         """Handle GDB notification messages to track state"""
@@ -522,6 +583,13 @@ class GdbController:
         return [self._copy_stop_record(record, latest_identity) for record in records]
 
     def _get_async_responses(self, timeout_sec: float) -> List[Dict[str, Any]]:
+        """Fetch pending async responses, recording any backend read failure.
+
+        Returning ``[]`` for a broken MI stream would make a dead gdb look like
+        a quiet one, so the exception is stored in ``self._async_error`` for
+        :meth:`drain_async` to surface.
+        """
+        self._async_error = None
         getter = getattr(self.controller, "get_gdb_response", None)
         if not callable(getter):
             return []
@@ -530,9 +598,11 @@ class GdbController:
         except TypeError:
             try:
                 responses = getter(timeout_sec=timeout_sec)
-            except Exception:
+            except Exception as exc:
+                self._async_error = exc
                 return []
-        except Exception:
+        except Exception as exc:
+            self._async_error = exc
             return []
         return responses if isinstance(responses, list) else []
 
@@ -541,12 +611,17 @@ class GdbController:
     ) -> Dict[str, Any]:
         """Drain pending async MI notifications from GDB.
 
+        A failed read is reported with ``success`` False plus ``error``,
+        ``type`` and ``backend_error`` keys so callers can tell a destroyed
+        backend apart from a quiet one.
+
         Args:
             timeout_sec: Max time to wait for the first batch.
             max_rounds: Max additional drain loops to clear buffered output.
         """
         responses: List[Dict[str, Any]] = []
         error_found = False
+        backend_error: Optional[BaseException] = None
 
         start = time.monotonic()
         first = True
@@ -558,6 +633,9 @@ class GdbController:
             else:
                 batch = self._get_async_responses(timeout_sec=0.0)
 
+            if self._async_error is not None:
+                backend_error = self._async_error
+                break
             if not batch:
                 break
 
@@ -571,11 +649,21 @@ class GdbController:
                     error_found = True
             responses.extend(batch)
 
-        return {
+        result: Dict[str, Any] = {
             "responses": responses,
-            "success": not error_found,
+            "success": not error_found and backend_error is None,
             "state": self._state,
         }
+        if backend_error is not None:
+            result["error"] = str(backend_error) or type(backend_error).__name__
+            result["type"] = type(backend_error).__name__
+            result["backend_error"] = True
+            # A read failure plus a confirmed-dead process means the backend is
+            # destroyed: reflect that in the state so polling callers stop
+            # treating the controller as usable.
+            if self.is_destroyed():
+                result["state"] = self._state
+        return result
 
     def signal_interrupt(self) -> Dict[str, Any]:
         """Signal GDB without concurrently draining its MI response stream.
@@ -583,25 +671,51 @@ class GdbController:
         This is the thread-safe half of cancellation for a command currently
         blocked inside ``controller.write``.  The command-owning thread remains
         responsible for consuming the resulting MI responses.
+
+        The pinned pygdbmi controller exposes no ``interrupt_gdb`` method, so
+        the interrupt is a direct ``SIGINT`` to the gdb subprocess.  Windows
+        has no signal-only primitive (``os.kill`` there hard-terminates the
+        process), so it returns a typed failure and the caller escalates.
         """
-        try:
-            interrupt_fn = getattr(self.controller, "interrupt_gdb", None)
-            if not callable(interrupt_fn):
-                return {
-                    "responses": [],
-                    "success": False,
-                    "state": self._state,
-                    "error": "The pygdbmi controller has no signal-only interrupt",
-                }
-            interrupt_fn()
-            return {"responses": [], "success": True, "state": self._state}
-        except Exception as exc:
+        if not _POSIX:
             return {
                 "responses": [],
                 "success": False,
                 "state": self._state,
-                "error": str(exc),
+                "error": "Signal-only interrupt requires POSIX process signalling",
+                "type": "SignalInterruptUnsupported",
             }
+        controller = getattr(self, "controller", None)
+        process = (
+            getattr(controller, "gdb_process", None) if controller is not None else None
+        )
+        if process is None:
+            return {
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "error": "No gdb process is available to signal",
+                "type": "SignalInterruptUnavailable",
+            }
+        if self.gdb_process_running() is False:
+            return {
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "error": "The gdb process has already exited",
+                "type": "SignalInterruptUnavailable",
+            }
+        try:
+            process.send_signal(signal.SIGINT)
+        except (OSError, ValueError, AttributeError) as exc:
+            return {
+                "responses": [],
+                "success": False,
+                "state": self._state,
+                "error": str(exc) or "Failed to signal the gdb process",
+                "type": "SignalInterruptError",
+            }
+        return {"responses": [], "success": True, "state": self._state}
 
     def interrupt(self, timeout_sec: float = 1.0) -> Dict[str, Any]:
         """Interrupt the inferior and drain async notifications."""
@@ -737,12 +851,34 @@ class GdbController:
             },
         }
 
+    @staticmethod
+    def _parse_inferior_arguments(args: str) -> List[str]:
+        """Split an inferior-argument string into safely quotable tokens.
+
+        GDB/MI takes one command per line, so control characters that could
+        terminate the command or open a new one are rejected before parsing.
+        Parsing follows POSIX shell rules because the eventual consumer is
+        GDB's own argument parser, not the host shell.
+        """
+        if any(character in args for character in ("\x00", "\r", "\n")):
+            raise ValueError("arguments cannot contain NUL or newline characters")
+        try:
+            return shlex.split(args, posix=True)
+        except ValueError as exc:
+            raise ValueError(f"could not parse inferior arguments: {exc}") from exc
+
     def run(self, args: str = "", start: bool = False) -> Dict[str, Any]:
         """Run the loaded program using MI command"""
         if args:
-            set_args_result = self.execute_mi_command(f"-exec-arguments {args}")
-            if not set_args_result["success"]:
-                return set_args_result
+            command = "-exec-arguments"
+            values = self._parse_inferior_arguments(args)
+            if values:
+                command += " " + " ".join(
+                    self.quote_mi_argument(value) for value in values
+                )
+                set_args_result = self.execute_mi_command(command)
+                if not set_args_result["success"]:
+                    return set_args_result
 
         run_command = "-exec-run --start" if start else "-exec-run"
         self._clear_stop_records()
@@ -801,8 +937,7 @@ class GdbController:
         if temporary:
             parts.append("-t")
         if condition:
-            escaped_condition = condition.replace("\\", "\\\\").replace('"', '\\"')
-            parts.extend(["-c", f'"{escaped_condition}"'])
+            parts.extend(["-c", self.quote_mi_argument(condition)])
         parts.append("--")
         parts.append(self.quote_mi_argument(location))
         mi_command = " ".join(parts)
@@ -861,6 +996,11 @@ class GdbController:
 
     def write_memory_bytes(self, address: str, data_hex: str) -> Dict[str, Any]:
         """Write raw bytes expressed as an even-length hexadecimal string."""
+        if not data_hex or len(data_hex) % 2:
+            raise ValueError("data_hex must contain an even number of hex digits")
+        hex_digits = "0123456789abcdefABCDEF"
+        if any(character not in hex_digits for character in data_hex):
+            raise ValueError("data_hex must contain only hexadecimal digits")
         return self.execute_mi_command(
             f"-data-write-memory-bytes {self.quote_mi_argument(address)} {data_hex}"
         )
@@ -879,6 +1019,8 @@ class GdbController:
         self, address: str, word_format: str, word_size: int, nr_rows: int, nr_cols: int
     ) -> Dict[str, Any]:
         """Read memory using MI command"""
+        if word_format not in MEMORY_WORD_FORMATS:
+            raise ValueError("word_format must be one of x, d, u, o, t, a, c, f, s, i")
         mi_command = (
             f"-data-read-memory {self.quote_mi_argument(address)} "
             f"{word_format} {word_size} {nr_rows} {nr_cols}"

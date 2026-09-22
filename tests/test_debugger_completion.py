@@ -315,7 +315,8 @@ def test_vector_register_group_threads_and_inferiors_are_typed():
 
     vectors = adapter.read_register_group("vector")
     threads = adapter.threads()
-    inferiors = adapter.inferiors(recurse=2)
+    inferiors = adapter.inferiors(recurse=1)
+    flat = adapter.inferiors(recurse=0)
 
     assert [item["name"] for item in vectors["parsed"]["registers"]] == [
         "xmm0",
@@ -324,10 +325,14 @@ def test_vector_register_group_threads_and_inferiors_are_typed():
     assert threads["parsed"]["current_thread_id"] == "1"
     assert threads["parsed"]["threads"][0]["frame"]["function"] == "main"
     assert inferiors["parsed"]["inferiors"][0]["pid"] == "100"
+    assert flat["parsed"]["recurse"] == 0
     assert ("-thread-info", 3) in gdb.calls
-    assert ("inferiors", 2, 3) in gdb.calls
+    assert ("inferiors", 1, 3) in gdb.calls
+    assert ("inferiors", 0, 3) in gdb.calls
     with pytest.raises(ValueError):
         adapter.read_register_group("secret")
+    with pytest.raises(ValueError, match="recurse must be 0 or 1"):
+        adapter.inferiors(recurse=2)
 
 
 def test_memory_write_requires_writable_mapping_unless_explicitly_overridden():

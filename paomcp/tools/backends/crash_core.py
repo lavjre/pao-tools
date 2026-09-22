@@ -363,24 +363,38 @@ class CrashCoreMixin:
         last_reported = -1
 
         def signal_core_writer() -> None:
-            """Interrupt a blocking GDB command without racing its MI reader."""
+            """Interrupt a blocking GDB command without racing its MI reader.
+
+            A successful signal is the preferred clean stop: the command-owning
+            thread consumes the MI responses and ``ensure_writer_quiescent``
+            confirms the stop, escalating to a process-group kill only when the
+            writer does not go away.  A failed signal is recorded as a violation
+            so that same escalation runs.
+            """
             signal_interrupt = getattr(self.gdb, "signal_interrupt", None)
             if callable(signal_interrupt):
                 interrupted = signal_interrupt()
-            else:
-                # A legacy adapter without signal-only support cannot safely
-                # consume MI from this monitor thread. Terminate the writer
-                # boundary instead and force the registry to rebuild it.
-                killer = getattr(self.gdb, "kill_process_group", None)
-                interrupted = (
-                    killer()
-                    if callable(killer)
-                    else {
-                        "success": False,
-                        "error": "No signal-only or process-kill capability",
-                    }
-                )
-                self._invalidate_gdb("core monitor lacked signal-only interruption")
+                if not interrupted.get("success", False):
+                    violation.append(
+                        CoreDumpGenerationError(
+                            "Could not signal the active GDB core writer: "
+                            + str(interrupted.get("error", "unknown interrupt failure"))
+                        )
+                    )
+                return
+            # A legacy adapter without signal-only support cannot safely
+            # consume MI from this monitor thread. Terminate the writer
+            # boundary instead and force the registry to rebuild it.
+            killer = getattr(self.gdb, "kill_process_group", None)
+            interrupted = (
+                killer()
+                if callable(killer)
+                else {
+                    "success": False,
+                    "error": "No signal-only or process-kill capability",
+                }
+            )
+            self._invalidate_gdb("core monitor lacked signal-only interruption")
             if not interrupted.get("success", False):
                 violation.append(
                     CoreDumpGenerationError(

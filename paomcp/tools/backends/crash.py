@@ -409,6 +409,8 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
                         ),
                         max_rounds=100,
                     )
+                    if drained.get("backend_error"):
+                        break
                     responses = drained.get("responses", [])
                     event_responses.extend(responses)
                     if not responses:
@@ -423,6 +425,7 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
                 raise
 
         timed_out = False
+        backend_failure: Optional[Dict[str, Any]] = None
         while not reached_terminal_stop():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -431,6 +434,12 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
             drained = self.gdb.drain_async(
                 timeout_sec=min(0.25, remaining), max_rounds=100
             )
+            if drained.get("backend_error"):
+                # A dead debugger can no longer produce a terminal stop; stop
+                # polling and surface the destroyed backend instead of burning
+                # the remaining timeout budget.
+                backend_failure = drained
+                break
             new_responses = drained.get("responses", [])
             event_responses.extend(new_responses)
             if not new_responses:
@@ -438,6 +447,27 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
             # Check cancellation AFTER draining. If its stop notification is late,
             # the worker performs a bounded drain before propagating cancellation.
             raise_if_cancelled_after_sync()
+
+        if backend_failure is not None:
+            self._invalidate_gdb("debugger backend failed while waiting for a crash")
+            return {
+                "success": False,
+                "command": "run_until_crash",
+                "state": self.gdb.get_state(),
+                "timeout_seconds": timeout,
+                "parser_version": PARSER_VERSION,
+                "parsed": {
+                    "mode": resolved_mode,
+                    "crashed": False,
+                    "backend_error": True,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                },
+                "raw_responses": {"launch": launch_result, "events": event_responses},
+                "error": backend_failure.get(
+                    "error", "Debugger backend failed while waiting for a crash"
+                ),
+                "type": backend_failure.get("type", "DebuggerBackendError"),
+            }
 
         timeout_interrupt = None
         if timed_out:
@@ -636,6 +666,10 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
     _SI_MAPERR = 1
     _SI_ACCERR = 2
 
+    # Mnemonics whose operands are read-only: a memory destination is never
+    # written, so ``cmp [mem], reg`` faults on a read, not a write.
+    _READ_ONLY_MEMORY_MNEMONICS = frozenset({"cmp", "test", "cmn", "tst"})
+
     @classmethod
     def _memory_direction(cls, instruction: Any) -> Optional[str]:
         """Read/write direction of one faulting instruction (Intel syntax).
@@ -660,6 +694,8 @@ class CrashTriage(CrashCyclicMixin, CrashCoreMixin, CrashCompareMixin):
             return "read"
         if mnemonic in {"call", "jmp"} and any("[" in op for op in operands):
             return "read"
+        if mnemonic in cls._READ_ONLY_MEMORY_MNEMONICS:
+            return "read" if any("[" in op for op in operands) else None
         if len(operands) == 2:
             destination, source = operands
             if destination.startswith("[") or re.match(

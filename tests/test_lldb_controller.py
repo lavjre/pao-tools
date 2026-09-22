@@ -1,5 +1,6 @@
 """Tests for the minimal pwndbg-lldb controller (Feature B)."""
 
+import subprocess
 from typing import Dict, List, Optional
 
 import pytest
@@ -55,20 +56,26 @@ class _FakePopen:
         self.stderr = None
         self._alive = True
         self._returncode: Optional[int] = None
+        self.kill_calls = 0
+        self.terminate_calls = 0
+        self.wait_calls = 0
 
     def poll(self) -> Optional[int]:
         return None if self._alive else self._returncode
 
     def wait(self, timeout: Optional[float] = None) -> int:
+        self.wait_calls += 1
         self._alive = False
         self._returncode = 0
         return 0
 
     def terminate(self) -> None:
+        self.terminate_calls += 1
         self._alive = False
         self._returncode = -15
 
     def kill(self) -> None:
+        self.kill_calls += 1
         self._alive = False
         self._returncode = -9
 
@@ -139,6 +146,65 @@ class TestLifecycle:
         controller = lldb_module.LldbController(timeout_sec=1.0)
         with pytest.raises(BackendUnavailableError):
             controller.initialize()
+
+
+class TestInitializeRecovery:
+    def test_failed_initialize_reaps_process_before_retry(self, monkeypatch) -> None:
+        processes: List[_FakePopen] = []
+        scripts = [["hung with no prompt"], list(BANNER)]
+
+        def _fake_popen(args, **kwargs):
+            popen = _FakePopen(scripts[len(processes)])
+            popen.pid = 5000 + len(processes)
+            processes.append(popen)
+            return popen
+
+        monkeypatch.setattr(lldb_module.subprocess, "Popen", _fake_popen)
+        controller = lldb_module.LldbController(timeout_sec=0.3)
+
+        with pytest.raises(BackendUnavailableError):
+            controller.initialize()
+
+        assert processes[0].kill_calls == 1
+        assert processes[0].wait_calls >= 1
+        assert processes[0]._alive is False
+        assert controller.get_gdb_process_pid() is None
+
+        controller.initialize()
+
+        assert len(processes) == 2
+        assert controller.get_gdb_process_pid() == 5001
+        assert controller.get_state() == "idle"
+        assert controller.is_destroyed() is False
+
+
+class TestCloseVerification:
+    def test_close_confirms_process_exit(self, monkeypatch) -> None:
+        controller = _make_controller(monkeypatch, list(BANNER))
+        assert controller.close() is True
+        assert controller.gdb_process_running() is False
+
+    def test_close_reports_failure_when_process_survives(self, monkeypatch) -> None:
+        class _StubbornPopen(_FakePopen):
+            def wait(self, timeout: Optional[float] = None) -> int:
+                self.wait_calls += 1
+                raise subprocess.TimeoutExpired("pwndbg-lldb", timeout or 0.0)
+
+            def terminate(self) -> None:
+                self.terminate_calls += 1
+
+            def kill(self) -> None:
+                self.kill_calls += 1
+
+        stubborn = _StubbornPopen(list(BANNER))
+        controller = lldb_module.LldbController(timeout_sec=0.1)
+        controller._process = stubborn
+
+        assert controller.close(timeout_sec=0.05) is False
+        assert controller.gdb_process_running() is True
+        assert stubborn.terminate_calls == 1
+        assert stubborn.kill_calls == 1
+        assert controller.is_destroyed() is True
 
 
 class TestAttachGuardrails:
@@ -229,6 +295,110 @@ class TestCommandExecution:
         result = controller.execute_command("process continue")
         assert result["state"] == "exited"
         assert controller.get_inferior_pid() is None
+
+
+class TestInterrupt:
+    def test_interrupt_fails_while_inferior_still_running(self, monkeypatch) -> None:
+        lines = list(BANNER)
+        lines += ["(lldb) process interrupt", "Process 4242 running", "(lldb) "]
+        controller = _make_controller(monkeypatch, lines)
+
+        result = controller.interrupt(timeout_sec=0.0)
+
+        assert result["success"] is False
+        assert result["state"] == "running"
+
+    def test_interrupt_succeeds_when_inferior_is_stopped(self, monkeypatch) -> None:
+        lines = list(BANNER)
+        lines += ["(lldb) process interrupt", "Process 4242 stopped", "(lldb) "]
+        controller = _make_controller(monkeypatch, lines)
+
+        result = controller.interrupt(timeout_sec=0.0)
+
+        assert result["success"] is True
+        assert result["state"] == "stopped"
+
+
+class TestSetFileState:
+    def test_set_file_failure_keeps_previous_state(self, monkeypatch) -> None:
+        lines = list(BANNER)
+        lines += [
+            '(lldb) target create "/missing"',
+            "error: unable to find executable for '/missing'",
+            "(lldb) ",
+        ]
+        controller = _make_controller(monkeypatch, lines)
+
+        result = controller.set_file("/missing")
+
+        assert result["success"] is False
+        assert controller.get_state() == "idle"
+
+
+class TestBreakpointConditionQuoting:
+    def test_set_breakpoint_quotes_condition_with_spaces(self, monkeypatch) -> None:
+        captured: Dict = {}
+        lines = list(BANNER)
+        lines += [
+            '(lldb) breakpoint set --name main --condition "$rax == 1"',
+            "Breakpoint 1: where = a.out`main",
+            "(lldb) ",
+        ]
+        controller = _make_controller(monkeypatch, lines, captured)
+
+        result = controller.set_breakpoint("main", condition="$rax == 1")
+
+        assert result["success"] is True
+        writes = captured["popen"].stdin.writes
+        assert 'breakpoint set --name main --condition "$rax == 1"\n' in writes
+
+    def test_break_insert_translates_quoted_condition(self, monkeypatch) -> None:
+        captured: Dict = {}
+        lines = list(BANNER)
+        lines += [
+            '(lldb) breakpoint set --name main --condition "$rax == 1"',
+            "Breakpoint 1: where = a.out`main",
+            "(lldb) ",
+        ]
+        controller = _make_controller(monkeypatch, lines, captured)
+
+        result = controller.execute_mi_command('-break-insert -c "$rax == 1" main')
+
+        assert result["success"] is True
+        writes = captured["popen"].stdin.writes
+        assert 'breakpoint set --name main --condition "$rax == 1"\n' in writes
+
+
+class TestTypedReads:
+    def test_read_registers_surfaces_lldb_register_values(self, monkeypatch) -> None:
+        from paomcp.tools.backends.debugger import DebuggerOperations
+
+        lines = list(BANNER)
+        lines += [
+            "(lldb) register info",
+            "       Name: rax",
+            "       Name: rbx",
+            "(lldb) ",
+            "(lldb) register info",
+            "       Name: rax",
+            "       Name: rbx",
+            "(lldb) ",
+            "(lldb) register read",
+            "rax = 0x0000000000401000",
+            "rbx = 0x00007fff00000000",
+            "(lldb) ",
+        ]
+        controller = _make_controller(monkeypatch, lines)
+        adapter = DebuggerOperations(controller, timeout_seconds=3)
+
+        result = adapter.read_registers()
+
+        assert result["success"] is True
+        assert [item["name"] for item in result["parsed"]["registers"]] == [
+            "rax",
+            "rbx",
+        ]
+        assert result["parsed"]["count"] == 2
 
 
 class TestMiTranslation:

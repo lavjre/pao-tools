@@ -143,6 +143,9 @@ class DebuggerOperations:
             payload = response.get("payload")
             if isinstance(payload, dict):
                 payloads.append(payload)
+        top_level = result.get("payload")
+        if isinstance(top_level, dict):
+            payloads.append(top_level)
         return payloads
 
     @classmethod
@@ -756,8 +759,8 @@ class DebuggerOperations:
         self, recurse: int = 1, *, deadline: Optional[float] = None
     ) -> Dict[str, Any]:
         """List GDB thread groups/inferiors using the MI hierarchy."""
-        if not 0 <= recurse <= 16:
-            raise ValueError("recurse must be between 0 and 16")
+        if recurse not in (0, 1):
+            raise ValueError("recurse must be 0 or 1")
         result = self.gdb.list_thread_groups_mi(
             recurse=recurse,
             timeout_sec=self._remaining_timeout(deadline),

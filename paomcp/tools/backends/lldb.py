@@ -102,6 +102,61 @@ def _is_error_line(text: str) -> bool:
     )
 
 
+def _quote_argument(value: str) -> str:
+    """Quote one lldb command-line argument."""
+    if any(character in value for character in ("\x00", "\r", "\n")):
+        raise ValueError("lldb argument contains a forbidden control character")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _first_payload(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read the first typed payload, falling back to a top-level payload.
+
+    Mirrors ``DebuggerOperations._first_payload``: MI-shaped results carry the
+    payload inside a ``result`` response, while the lldb typed reads attach it
+    to the top level of the execution result.
+    """
+    for response in result.get("responses", []):
+        if response.get("type") != "result":
+            continue
+        payload = response.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    payload = result.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _split_mi_arguments(text: str) -> List[str]:
+    """Split an MI argument string on unquoted whitespace, keeping quoting."""
+    tokens: List[str] = []
+    current: List[str] = []
+    in_quotes = False
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character == "\\" and in_quotes and index + 1 < len(text):
+            current.append(character)
+            current.append(text[index + 1])
+            index += 2
+            continue
+        if character == '"':
+            in_quotes = not in_quotes
+            current.append(character)
+        elif character.isspace() and not in_quotes:
+            if current:
+                tokens.append("".join(current))
+                current = []
+        else:
+            current.append(character)
+        index += 1
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 @dataclass(frozen=True)
 class _StopRecord:
     """One immutable snapshot of an lldb stop event."""
@@ -150,6 +205,7 @@ class LldbController:
         """Spawn pwndbg-lldb and confirm it reached its prompt."""
         if self._initialized:
             return {"status": "already_initialized", "messages": []}
+        self._reap_existing_process()
         popen_kwargs: Dict[str, Any] = {
             "shell": False,
             "stdout": subprocess.PIPE,
@@ -184,16 +240,15 @@ class LldbController:
             leftover = self._drain_new_lines()
             combined = "\n".join(leftover).encode("utf-8", "replace")
             if any(marker in combined for marker in LLDB_FAILURE_MARKERS):
-                self.close()
+                self._reap_existing_process()
+                self.mark_destroyed(
+                    "pwndbg-lldb bundled lldb cannot load host libraries"
+                )
                 raise BackendUnavailableError(
                     f"{self.executable} is present but its bundled lldb cannot "
                     "load host libraries; the lldb backend is unavailable"
                 )
-            if self._process is not None:
-                try:
-                    self._process.kill()
-                except OSError:
-                    pass
+            self._reap_existing_process()
             self.mark_destroyed("pwndbg-lldb never reached its prompt")
             raise BackendUnavailableError(
                 f"{self.executable} did not reach its prompt; the lldb backend "
@@ -201,15 +256,53 @@ class LldbController:
             )
         combined = "\n".join(banner).encode("utf-8", "replace")
         if any(marker in combined for marker in LLDB_FAILURE_MARKERS):
-            self.close()
+            self._reap_existing_process()
+            self.mark_destroyed("pwndbg-lldb bundled lldb cannot load host libraries")
             raise BackendUnavailableError(
                 f"{self.executable} is present but its bundled lldb cannot "
                 "load host libraries; the lldb backend is unavailable"
             )
         self._state = "idle"
         self._initialized = True
+        self._destroyed = False
+        self._destroyed_reason = None
         logger.info("pwndbg-lldb backend initialized (pid %s)", self._process.pid)
         return {"status": "initialized", "messages": []}
+
+    def _reap_existing_process(
+        self, timeout_sec: float = DEFAULT_LLDB_CLOSE_TIMEOUT_SEC
+    ) -> None:
+        """Kill, wait for, and clear a leftover process from a failed attempt."""
+        process = self._process
+        if process is None:
+            return
+        try:
+            if process.poll() is None:
+                process.kill()
+        except OSError:
+            logger.debug("Failed to kill leftover lldb process", exc_info=True)
+        try:
+            process.wait(timeout=max(0.0, float(timeout_sec)))
+        except (subprocess.TimeoutExpired, TimeoutError):
+            logger.warning("Leftover lldb process did not exit before reap timeout")
+        except OSError:
+            logger.debug("Failed while reaping leftover lldb process", exc_info=True)
+        for stream_name in ("stdin", "stdout", "stderr"):
+            stream = getattr(process, stream_name, None)
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    logger.debug(
+                        "Failed to close leftover lldb %s pipe",
+                        stream_name,
+                        exc_info=True,
+                    )
+        self._process = None
+        self._reader = None
+        with self._lines_lock:
+            self._lines.clear()
+            self._consumed = 0
 
     def _read_loop(self) -> None:
         stream = getattr(self._process, "stdout", None)
@@ -522,10 +615,15 @@ class LldbController:
     def interrupt(self, timeout_sec: float = 1.0) -> Dict[str, Any]:
         result = self.signal_interrupt()
         drained = self.drain_async(timeout_sec=timeout_sec)
-        result["responses"] = result.get("responses", []) + drained.get("responses", [])
-        result["success"] = bool(result.get("success") or drained.get("success"))
-        result["state"] = self._state
-        return result
+        responses = result.get("responses", []) + drained.get("responses", [])
+        # An empty drain reports success with no lines; the only honest
+        # signal is the inferior actually being stopped afterwards.
+        success = bool(result.get("success")) and self._state == "stopped"
+        return {
+            "responses": responses,
+            "success": success,
+            "state": self._state,
+        }
 
     # -- lifecycle of the inferior ------------------------------------
     @staticmethod
@@ -537,7 +635,8 @@ class LldbController:
 
     def set_file(self, filepath: str) -> Dict[str, Any]:
         result = self._execute(f"target create {self._quote_lldb_path(filepath)}")
-        self._state = "stopped"
+        if result.get("success"):
+            self._state = "stopped"
         result["state"] = self._state
         return result
 
@@ -705,7 +804,7 @@ class LldbController:
 
     def _register_names_by_number(self) -> Dict[int, str]:
         result = self.execute_mi_command("-data-list-register-names")
-        names = result.get("payload", {}).get("register-names", [])
+        names = _first_payload(result).get("register-names", [])
         return {number: str(name) for number, name in enumerate(names)}
 
     def select_thread(self, thread_id: int) -> Dict[str, Any]:
@@ -809,7 +908,7 @@ class LldbController:
         else:
             parts = ["breakpoint set --name", loc]
         if condition:
-            parts.extend(["--condition", condition])
+            parts.extend(["--condition", self.quote_mi_argument(condition)])
         if temporary:
             parts.append("--one-shot true")
         return self._execute(" ".join(parts))
@@ -917,30 +1016,45 @@ class LldbController:
             self._state = "exited"
             self._initialized = False
             return True
-        try:
-            if process.stdin is not None:
-                try:
-                    process.stdin.write(b"quit\n")
-                    process.stdin.flush()
-                except OSError:
-                    pass
-        except (ValueError, OSError):
-            pass
+        timeout = max(0.0, float(timeout_sec))
+        if process.stdin is not None:
+            try:
+                process.stdin.write(b"quit\n")
+                process.stdin.flush()
+            except (ValueError, OSError):
+                pass
         if self._process_running():
             try:
-                process.wait(timeout=max(0.0, float(timeout_sec)))
+                process.wait(timeout=timeout)
             except (subprocess.TimeoutExpired, TimeoutError):
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
-                try:
-                    process.wait(timeout=max(0.0, float(timeout_sec)))
-                except (subprocess.TimeoutExpired, TimeoutError):
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
+                logger.warning("lldb did not exit before the graceful close timeout")
+            except OSError:
+                logger.debug("Failed while waiting for lldb to exit", exc_info=True)
+        if self._process_running():
+            try:
+                process.terminate()
+            except OSError:
+                logger.debug("Failed to terminate lldb gracefully", exc_info=True)
+            try:
+                process.wait(timeout=timeout)
+            except (subprocess.TimeoutExpired, TimeoutError):
+                logger.warning("lldb did not exit after terminate")
+            except OSError:
+                logger.debug("Failed while waiting for lldb terminate", exc_info=True)
+        if self._process_running():
+            try:
+                process.kill()
+            except OSError:
+                logger.debug("Failed to kill lldb", exc_info=True)
+            try:
+                process.wait(timeout=timeout)
+            except (subprocess.TimeoutExpired, TimeoutError):
+                logger.warning("lldb did not exit after kill")
+            except OSError:
+                logger.debug("Failed while reaping killed lldb", exc_info=True)
+        if self._process_running():
+            self.mark_destroyed("lldb process remained alive after bounded close")
+            return False
         for stream_name in ("stdin", "stdout", "stderr"):
             stream = getattr(process, stream_name, None)
             if stream is not None:
@@ -1022,7 +1136,9 @@ def _translate_mi_command(
             loc = loc.lstrip("*")
         return f"thread jump --addr {loc}"
     if token == "-break-insert":
-        parts = rest.split()
+        parts = _split_mi_arguments(rest)
+        if not parts:
+            return None
         one_shot = "-t" in parts
         condition = None
         if "-c" in parts:
@@ -1030,15 +1146,13 @@ def _translate_mi_command(
             if idx + 1 < len(parts):
                 condition = _unquote(parts[idx + 1])
         # Last token is the location.
-        if not parts:
-            return None
         location = _unquote(parts[-1])
         if location.startswith("0x") or location.startswith("*0x"):
             cmd = ["breakpoint set --address", location.lstrip("*")]
         else:
             cmd = ["breakpoint set --name", location]
         if condition:
-            cmd.extend(["--condition", condition])
+            cmd.extend(["--condition", _quote_argument(condition)])
         if one_shot:
             cmd.append("--one-shot true")
         return " ".join(cmd)

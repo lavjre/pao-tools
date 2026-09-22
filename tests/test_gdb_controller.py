@@ -1,9 +1,11 @@
 from datetime import datetime
+import signal
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from pygdbmi.constants import GdbTimeoutError
 
 from paomcp.tools.backends import gdb as gdb_module
 from paomcp.tools.backends.gdb import GdbController
@@ -509,3 +511,377 @@ def test_spawn_cleans_up_child_when_io_manager_initialization_fails(
     assert spawned.stderr.closed is True
     assert controller.gdb_process is None
     assert controller.io_manager is None
+
+
+class _SignalTestProcess:
+    def __init__(self, *, running: bool = True) -> None:
+        self.pid = 4242
+        self.returncode = None if running else 9
+        self.signals = []
+
+    def poll(self):
+        return self.returncode
+
+    def send_signal(self, sig) -> None:
+        self.signals.append(sig)
+
+
+def test_signal_interrupt_sends_sigint_without_draining_mi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gdb_module, "_POSIX", True)
+    process = _SignalTestProcess()
+    controller = bare_controller()
+    drains = []
+    controller.controller = SimpleNamespace(
+        gdb_process=process,
+        get_gdb_response=lambda **kwargs: drains.append(kwargs) or [],
+    )
+
+    result = controller.signal_interrupt()
+
+    assert result["success"] is True
+    assert result["responses"] == []
+    assert process.signals == [signal.SIGINT]
+    # The documented contract: never consume the MI stream from the signalling
+    # thread; the command-owning thread drains it.
+    assert drains == []
+
+
+def test_signal_interrupt_reports_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gdb_module, "_POSIX", False)
+    process = _SignalTestProcess()
+    controller = bare_controller()
+    controller.controller = SimpleNamespace(gdb_process=process)
+
+    result = controller.signal_interrupt()
+
+    assert result["success"] is False
+    assert result["type"] == "SignalInterruptUnsupported"
+    assert process.signals == []
+
+
+def test_signal_interrupt_without_live_process_is_a_typed_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gdb_module, "_POSIX", True)
+    controller = bare_controller()
+    controller.controller = SimpleNamespace(gdb_process=None)
+
+    result = controller.signal_interrupt()
+
+    assert result["success"] is False
+    assert result["type"] == "SignalInterruptUnavailable"
+
+    exited = _SignalTestProcess(running=False)
+    controller.controller = SimpleNamespace(gdb_process=exited)
+    result = controller.signal_interrupt()
+
+    assert result["success"] is False
+    assert result["type"] == "SignalInterruptUnavailable"
+    assert exited.signals == []
+
+
+def test_signal_interrupt_reports_send_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gdb_module, "_POSIX", True)
+
+    class _FailingSignal(_SignalTestProcess):
+        def send_signal(self, sig) -> None:
+            raise OSError("no such process")
+
+    controller = bare_controller()
+    controller.controller = SimpleNamespace(gdb_process=_FailingSignal())
+
+    result = controller.signal_interrupt()
+
+    assert result["success"] is False
+    assert result["type"] == "SignalInterruptError"
+    assert "no such process" in result["error"]
+
+
+class _SharedMiStream:
+    """Fake controller whose pending MI record survives a timed-out write."""
+
+    def __init__(self, pending) -> None:
+        self.pending = pending
+        self.writes = []
+        self.reads = 0
+
+    def write(
+        self,
+        command,
+        timeout_sec=7.0,
+        raise_error_on_timeout=True,
+        read_response=True,
+    ):
+        self.writes.append(command)
+        if command == "-thread-info":
+            raise GdbTimeoutError("Did not get response from gdb after 2.5 seconds")
+        if self.pending is not None:
+            record, self.pending = self.pending, None
+            return [record]
+        return [
+            {
+                "type": "result",
+                "message": "done",
+                "payload": {"command": command},
+            }
+        ]
+
+    def get_gdb_response(self, timeout_sec=7.0, raise_error_on_timeout=True):
+        self.reads += 1
+        if self.pending is not None:
+            record, self.pending = self.pending, None
+            return [record]
+        return []
+
+
+def test_execute_mi_command_consumes_late_result_after_timeout() -> None:
+    late = {"type": "result", "message": "done", "payload": {"late": True}}
+    stream = _SharedMiStream(late)
+    controller = bare_controller()
+    controller.controller = stream
+
+    timed_out = controller.execute_mi_command("-thread-info", timeout_sec=2.5)
+
+    # The command really completed (its terminal record was recovered), so
+    # success is honest, but the deadline overrun is still reported.
+    assert timed_out["success"] is True
+    assert timed_out["timed_out"] is True
+    assert timed_out["timeout_seconds"] == 2.5
+    assert timed_out["responses"] == [late]
+    assert stream.reads == 1
+
+    second = controller.execute_mi_command("-data-list-register-names", timeout_sec=2.5)
+
+    assert second["success"] is True
+    assert second["responses"] == [
+        {
+            "type": "result",
+            "message": "done",
+            "payload": {"command": "-data-list-register-names"},
+        }
+    ]
+    assert "timed_out" not in second
+
+
+def test_execute_mi_command_flags_desync_when_late_result_never_arrives() -> None:
+    stream = _SharedMiStream(None)
+    controller = bare_controller()
+    controller.controller = stream
+
+    result = controller.execute_mi_command("-thread-info", timeout_sec=2.5)
+
+    assert result["success"] is False
+    assert result["timed_out"] is True
+    assert result["type"] == "TimeoutError"
+    assert "desynchronized after timeout" in result["error"]
+    assert result["responses"] == []
+
+
+class _NormalPathStream:
+    def __init__(self, first_responses, pending=None) -> None:
+        self.first_responses = list(first_responses)
+        self.pending = list(pending or [])
+        self.drained = 0
+
+    def write(
+        self, command, timeout_sec=7.0, raise_error_on_timeout=True, read_response=True
+    ):
+        return list(self.first_responses)
+
+    def get_gdb_response(self, timeout_sec=7.0, raise_error_on_timeout=True):
+        self.drained += 1
+        if self.pending:
+            batch, self.pending = self.pending, []
+            return batch
+        return []
+
+
+def test_execute_mi_command_normal_path_never_drains() -> None:
+    terminal = {"type": "result", "message": "done", "payload": {}}
+    stream = _NormalPathStream(
+        [
+            {"type": "notify", "message": "stopped", "payload": {"reason": "x"}},
+            terminal,
+        ]
+    )
+    controller = bare_controller()
+    controller.controller = stream
+
+    result = controller.execute_mi_command("-stack-list-frames")
+
+    assert result["success"] is True
+    assert result["responses"][-1] == terminal
+    assert stream.drained == 0
+    assert controller.get_state() == "stopped"
+
+
+def test_execute_mi_command_recovers_terminal_missing_from_early_return() -> None:
+    terminal = {"type": "result", "message": "done", "payload": {}}
+    stream = _NormalPathStream(
+        [{"type": "notify", "message": "running", "payload": {}}],
+        pending=[terminal],
+    )
+    controller = bare_controller()
+    controller.controller = stream
+
+    result = controller.execute_mi_command("-exec-continue")
+
+    assert result["success"] is True
+    assert result["responses"][-1] == terminal
+    assert stream.drained == 1
+    assert controller.get_state() == "running"
+
+
+def test_execute_mi_command_refuses_success_without_terminal_result() -> None:
+    stream = _NormalPathStream([{"type": "console", "payload": "partial"}])
+    controller = bare_controller()
+    controller.controller = stream
+
+    result = controller.execute_mi_command("-stack-list-frames")
+
+    assert result["success"] is False
+    assert result["type"] == "MIStreamError"
+    assert "desynchronized" in result["error"]
+    assert stream.drained == 1
+
+
+def test_run_rejects_newline_in_inferior_arguments() -> None:
+    controller = bare_controller()
+    writes = []
+    controller.controller = SimpleNamespace(
+        write=lambda command, timeout_sec: writes.append(command) or []
+    )
+
+    with pytest.raises(ValueError, match="NUL or newline"):
+        controller.run("safe\n-interpreter-exec console quit")
+
+    assert writes == []
+
+
+def test_run_quotes_inferior_arguments_with_spaces_and_quotes() -> None:
+    controller = bare_controller()
+    writes = []
+
+    def write(command, timeout_sec=7.0, **kwargs):
+        writes.append(command)
+        return [{"type": "result", "message": "done", "payload": {}}]
+
+    controller.controller = SimpleNamespace(write=write)
+
+    result = controller.run("first \"two words\" 'three four'")
+
+    assert result["success"] is True
+    assert writes == [
+        '-exec-arguments "first" "two words" "three four"',
+        "-exec-run",
+    ]
+
+
+def test_run_round_trips_embedded_quotes() -> None:
+    controller = bare_controller()
+    writes = []
+
+    def write(command, timeout_sec=7.0, **kwargs):
+        writes.append(command)
+        return [{"type": "result", "message": "done", "payload": {}}]
+
+    controller.controller = SimpleNamespace(write=write)
+
+    controller.run('say "hi \\"there\\""')
+
+    assert writes[0] == '-exec-arguments "say" "hi \\"there\\""'
+
+
+def test_set_breakpoint_rejects_condition_control_characters() -> None:
+    controller = bare_controller()
+
+    with pytest.raises(ValueError, match="control character"):
+        controller.set_breakpoint("main", condition="x == 1\n-break-delete 1")
+
+
+def test_memory_mi_string_arguments_are_validated_before_interpolation() -> None:
+    controller = bare_controller()
+
+    with pytest.raises(ValueError, match="word_format"):
+        controller.read_memory_mi("0x0", "x\n-interpreter-exec console quit", 8, 1, 1)
+    with pytest.raises(ValueError, match="hex"):
+        controller.write_memory_bytes("0x0", "aa\nbb")
+
+
+def test_drain_async_surfaces_backend_read_failure() -> None:
+    class _RaisingController:
+        def get_gdb_response(self, timeout_sec=0.0, raise_error_on_timeout=False):
+            raise OSError("pipe is closed")
+
+    controller = bare_controller()
+    controller.controller = _RaisingController()
+
+    result = controller.drain_async(timeout_sec=0.0)
+
+    assert result["success"] is False
+    assert result["backend_error"] is True
+    assert result["type"] == "OSError"
+    assert "pipe is closed" in result["error"]
+    assert result["responses"] == []
+
+
+def test_drain_async_marks_destroyed_when_process_is_gone() -> None:
+    class _RaisingController:
+        def get_gdb_response(self, timeout_sec=0.0, raise_error_on_timeout=False):
+            raise OSError("pipe is closed")
+
+    controller = bare_controller()
+    controller._destroyed = False
+    controller.controller = SimpleNamespace(
+        gdb_process=SimpleNamespace(poll=lambda: 9),
+        get_gdb_response=_RaisingController().get_gdb_response,
+    )
+
+    result = controller.drain_async(timeout_sec=0.0)
+
+    assert result["success"] is False
+    assert result["backend_error"] is True
+    assert result["state"] == "exited"
+    assert controller.is_destroyed() is True
+    assert controller.get_destroyed_reason() == "gdb process exited unexpectedly"
+
+
+def test_drain_async_surfaces_legacy_getter_failure() -> None:
+    class _LegacyRaisingController:
+        def get_gdb_response(self, timeout_sec=0.0):
+            raise RuntimeError("legacy read failure")
+
+    controller = bare_controller()
+    controller.controller = _LegacyRaisingController()
+
+    result = controller.drain_async(timeout_sec=0.0)
+
+    assert result["success"] is False
+    assert result["backend_error"] is True
+    assert result["type"] == "RuntimeError"
+    assert "legacy read failure" in result["error"]
+
+
+def test_execute_command_rejects_embedded_control_characters() -> None:
+    writes: list[str] = []
+
+    class _RecordingController:
+        def write(self, command, timeout_sec=0.0):
+            writes.append(command)
+            return []
+
+    controller = bare_controller()
+    controller.controller = _RecordingController()
+
+    result = controller.execute_command("x/s 0x1\nshell id")
+
+    assert result["success"] is False
+    assert result["type"] == "ValueError"
+    assert "control character" in result["error"]
+    assert writes == []
