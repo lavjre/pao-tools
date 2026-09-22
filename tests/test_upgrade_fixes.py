@@ -25,6 +25,10 @@ class TestDockerFlagJail:
             "--pid=host",
             "--network host",
             "--device /dev/kvm",
+            # Host-less publish specs bind every interface; loopback must be explicit.
+            "-p 1234:1234",
+            "--publish 8080:80",
+            "-p 0.0.0.0:1234:1234",
         ],
     )
     def test_escapes_rejected(self, entry):
@@ -34,8 +38,8 @@ class TestDockerFlagJail:
     @pytest.mark.parametrize(
         "entry",
         [
-            "-p 1234:1234",
-            "--publish 8080:80",
+            "-p 127.0.0.1:1234:1234",
+            "--publish 127.0.0.1:8080:80",
             "-e FOO=bar",
             # Constraining/neutral flags narrow the container; blocking them
             # would push callers away from limits.

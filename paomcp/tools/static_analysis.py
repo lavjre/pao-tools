@@ -14,7 +14,11 @@ from paomcp.tools.backends.static_analysis import StaticBinaryAnalyzer
 from paomcp.tools.common import catch_errors, get_services, run_blocking
 from paomcp.operations import current_operation_id
 from paomcp.services import AppServices
-from paomcp.utils.paths import resolve_workspace_file, stable_file_snapshot
+from paomcp.utils.paths import (
+    resolve_workspace_file,
+    resolve_workspace_path,
+    stable_file_snapshot,
+)
 
 _ANALYZER = StaticBinaryAnalyzer()
 
@@ -122,6 +126,33 @@ def _analyze_with_streamed_strings(
 def _resolve_workspace_file(raw_path: str, workspace_root: str, kind: str) -> str:
     """Compatibility wrapper around the shared regular-file resolver."""
     return resolve_workspace_file(raw_path, workspace_root, kind=kind)
+
+
+def _resolve_workspace_output_dir(raw_path: str, workspace_root: str, kind: str) -> str:
+    """Resolve an output directory and re-check containment after symlinks.
+
+    ``resolve_workspace_path`` is lexical only: ``/workspace/link`` may point
+    at ``/etc``, so ``/workspace/link/out`` passes the lexical check while
+    extraction would write outside. ``realpath`` resolves what exists
+    (parents included) and the containment test runs again on the result.
+    """
+    resolved = resolve_workspace_path(
+        raw_path,
+        workspace_root=workspace_root,
+        require_exists=False,
+        kind=kind,
+    )
+    workspace_real = os.path.realpath(workspace_root)
+    resolved_real = os.path.realpath(resolved)
+    try:
+        contained = (
+            os.path.commonpath([resolved_real, workspace_real]) == workspace_real
+        )
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(f"{kind} resolves outside the configured workspace")
+    return resolved_real
 
 
 def register(mcp: FastMCP) -> None:
@@ -346,13 +377,10 @@ def register(mcp: FastMCP) -> None:
         )
         resolved_out = None
         if output_dir is not None:
-            from paomcp.utils.paths import resolve_workspace_path as _resolve_dir
-
-            resolved_out = _resolve_dir(
+            resolved_out = _resolve_workspace_output_dir(
                 output_dir,
-                workspace_root=workspace_root,
-                require_exists=False,
-                kind="corpus_dir",
+                workspace_root,
+                "corpus_dir",
             )
 
         def _run() -> Dict[str, Any]:
@@ -360,6 +388,7 @@ def register(mcp: FastMCP) -> None:
                 image_path=resolved_image,
                 output_dir=resolved_out,
                 timeout_seconds=timeout_seconds,
+                workspace_root=workspace_root,
             )
 
         return await run_blocking(_run)

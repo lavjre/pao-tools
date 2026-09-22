@@ -34,6 +34,8 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    ensure_local_path_contained,
+    ensure_target_paths_contained,
 )
 
 DockerRunner = Callable[[List[str], float], Tuple[int, str, str]]
@@ -56,10 +58,11 @@ def _default_docker_runner(argv: List[str], timeout_sec: float) -> Tuple[int, st
 
 
 # Blocked = host-impact only (privilege, namespaces, mounts, devices,
-# runtimes). Constraining flags (--memory, --pids-limit, --ulimit, --user,
-# --name, --hostname, --workdir, --entrypoint) stay allowed: they narrow
-# what the container can do, and the provider already owns --name/-w via
-# its own fields. Blocking limits would push callers away from them.
+# runtimes, host files). Constraining flags (--memory, --pids-limit,
+# --ulimit, --user, --name, --hostname, --workdir, --entrypoint) stay
+# allowed: they narrow what the container can do, and the provider already
+# owns --name/-w via its own fields. Blocking limits would push callers
+# away from them.
 BLOCKED_DOCKER_PREFIXES = (
     "--privileged",
     "--pid",
@@ -80,47 +83,165 @@ BLOCKED_DOCKER_PREFIXES = (
     "--userns",
     "--gpus",
     "--runtime",
+    # Host file read/write primitives.
+    "--env-file",
+    "--label-file",
+    "--cidfile",
+    # Publishes every exposed port on all interfaces, bypassing the
+    # loopback-only publish policy below.
+    "--publish-all",
     "-v",
 )
-# NOTE: -p/--publish is deliberately allowed: exposing a container port is
-# the documented way to reach a gdbserver inside it (see tcp_remote). The
-# host side stays safe because compose binds 127.0.0.1 by default.
+# Shorthands that must never appear inside a short-flag cluster. ``P`` is
+# ``--publish-all``; ``v`` is ``--volume``.
+_BLOCKED_DOCKER_SHORTHANDS = frozenset({"v", "P"})
+# Short flags that take a value; the remainder of the cluster (or the next
+# argv token) is consumed as that value, so scanning stops there.
+_DOCKER_VALUE_SHORTHANDS = frozenset({"a", "c", "e", "h", "l", "m", "p", "u", "v", "w"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+_PUBLISH_HINT = "Use '-p 127.0.0.1:<host_port>:<container_port>'"
 
 
-def _docker_flag_name(entry: str) -> str:
-    """Normalize one extra arg to its flag name (``--cap-add=x`` -> ``--cap-add``).
+def _docker_blocked_error(entry: str) -> TargetError:
+    return TargetError(
+        f"Blocked unsafe docker_extra_args entry '{entry}': privileged "
+        "mode, host mounts, host pid/network, devices, runtimes, GPUs, "
+        "host file mapping and capability changes are not allowed"
+    )
 
-    Whitespace splits first so ``--mount type=bind,src=/`` normalizes to
-    ``--mount`` (not ``--mount type``); only ``=`` then separates the value.
-    ``:`` is deliberately not a separator: ``-v/src:/dst`` must keep its
-    ``-v`` head instead of being sliced into a bare ``-v/src`` miss.
-    """
-    text = entry.strip().lower()
-    first = text.split()[0] if text else ""
-    head, sep, _ = first.partition("=")
-    if sep and head.startswith("-"):
-        return head
-    return first
+
+def _publish_host_part(spec: str) -> Optional[str]:
+    """Return the host IP of a publish spec, or None when it is host-less."""
+    text = spec.strip()
+    if text.startswith("["):
+        end = text.find("]")
+        if end == -1 or not text[end + 1 :].startswith(":"):
+            return None
+        if not text[end + 2 :]:
+            return None
+        return text[1:end]
+    parts = text.split(":")
+    if len(parts) == 3 and parts[0]:
+        return parts[0]
+    return None
+
+
+def _validate_publish_value(value: str, entry: str) -> None:
+    """Fail closed unless a ``-p`` mapping names an explicit loopback host."""
+    host = _publish_host_part(value)
+    if host is None:
+        raise TargetError(
+            f"Unsafe docker publish spec '{entry}': a host-less port "
+            f"mapping binds every interface. {_PUBLISH_HINT}"
+        )
+    if host not in _LOOPBACK_HOSTS:
+        raise TargetError(
+            f"Unsafe docker publish spec '{entry}': host '{host}' is not "
+            f"loopback. {_PUBLISH_HINT}"
+        )
+
+
+def _validate_docker_token(
+    token: str, pending: Optional[str], entry: str
+) -> Optional[str]:
+    """Validate one normalized token; return a flag awaiting its value."""
+    if pending is not None:
+        # The pending flag is always --publish/-p in this walk.
+        _validate_publish_value(token, entry)
+        return None
+    if not token.startswith("-") or token == "-":
+        # A plain value (env value, port spec, ...): inert without its flag.
+        return None
+    if token.startswith("--"):
+        name, sep, value = token.partition("=")
+        name = name.lower()
+        if name in BLOCKED_DOCKER_PREFIXES:
+            raise _docker_blocked_error(entry)
+        if name == "--publish":
+            if sep:
+                _validate_publish_value(value, entry)
+                return None
+            return "--publish"
+        return None
+    body = token[1:]
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char in _BLOCKED_DOCKER_SHORTHANDS:
+            raise _docker_blocked_error(entry)
+        rest = body[index + 1 :]
+        if rest.startswith("="):
+            rest = rest[1:]
+        if char in _DOCKER_VALUE_SHORTHANDS:
+            if char == "p":
+                if rest:
+                    _validate_publish_value(rest, entry)
+                    return None
+                return "p"
+            return None
+        index += 1
+    return None
 
 
 def validate_docker_extra_args(extra_args) -> None:
-    """Reject privilege/mount/device/network escapes in all spellings.
+    """Reject privilege/mount/device/network/host-file escapes in all spellings.
 
-    Only the flag *name* is compared (``--cap-add=NET_ADMIN`` normalizes to
-    ``--cap-add``), so ``--flag value``, ``--flag=value`` and glued short
-    forms like ``-v/src:/dst`` are all caught. Plain values pass through:
-    they are inert without their flag.
+    Long flags are matched after ``--flag=value`` normalization; short
+    clusters (``-itv``, ``-itv/:/host``) are scanned character by character
+    so a blocked shorthand cannot hide behind benign ones. ``-p`` /
+    ``--publish`` is fail-closed: the mapping must name an explicit
+    loopback host. A flag that takes its value from the next argv entry
+    (``-v /src:/dst``) is caught before the value is even reached.
     """
+    pending: Optional[str] = None
     for extra in list(extra_args or []):
-        name = _docker_flag_name(extra)
-        if not name:
+        if not isinstance(extra, str):
+            pending = None
             continue
-        if name in BLOCKED_DOCKER_PREFIXES or name.startswith("-v"):
-            raise TargetError(
-                f"Blocked unsafe docker_extra_args entry '{extra}': "
-                "privileged mode, host mounts, host pid/network, devices, "
-                "runtimes, GPUs and capability changes are not allowed"
-            )
+        stripped = extra.strip()
+        if not stripped:
+            continue
+        # Accept both list-form tokens and a single string holding
+        # "flag value" (the old normalizer split on whitespace).
+        tokens = stripped.split() if stripped.startswith("-") else [stripped]
+        for token in tokens:
+            pending = _validate_docker_token(token, pending, extra)
+
+
+def _redact_env_assignment(value: str) -> str:
+    """Mask the value of ``NAME=VALUE`` while keeping the variable name."""
+    body = value[1:] if value.startswith("=") else value
+    name, sep, _ = body.partition("=")
+    if not sep:
+        return "***"
+    return f"{name}=***"
+
+
+def redact_docker_run_argv(argv: Sequence[str]) -> List[str]:
+    """Mask ``-e``/``--env`` values in an argv kept for metadata.
+
+    The registry surfaces ``run_argv`` through list/status responses, and
+    env values routinely carry secrets; only the names stay visible.
+    """
+    redacted: List[str] = []
+    pending_env = False
+    for token in argv:
+        if pending_env:
+            redacted.append(_redact_env_assignment(token))
+            pending_env = False
+            continue
+        if token in ("-e", "--env"):
+            redacted.append(token)
+            pending_env = True
+            continue
+        if token.startswith("--env="):
+            redacted.append("--env=" + _redact_env_assignment(token[len("--env=") :]))
+            continue
+        if token.startswith("-e") and len(token) > 2:
+            redacted.append("-e" + _redact_env_assignment(token[2:]))
+            continue
+        redacted.append(token)
+    return redacted
 
 
 class DockerProvider:
@@ -163,6 +284,9 @@ class DockerProvider:
                     f"docker_image must be an image name, got flag-like "
                     f"{spec.docker_image!r}"
                 )
+            # No host-side launch path exists for docker, but the shared
+            # start-time re-check keeps every provider on one contract.
+            ensure_target_paths_contained(spec)
             container_name = spec.name or f"pao-target-{handle.target_id}"
             handle._set_state(TargetState.STARTING)
             argv: List[str] = [
@@ -194,7 +318,9 @@ class DockerProvider:
             )
             handle.metadata["container_name"] = container_name
             handle.metadata["container_id"] = container_id
-            handle.metadata["run_argv"] = argv
+            # Env values routinely carry secrets and metadata is returned
+            # by list_targets/get_target_status; keep names, mask values.
+            handle.metadata["run_argv"] = redact_docker_run_argv(argv)
             handle.started_at = datetime.now(timezone.utc).isoformat()
             handle._set_state(TargetState.RUNNING)
 
@@ -285,6 +411,11 @@ class DockerProvider:
                 f"docker target '{handle.target_id}' has no running container"
             )
         if direction == "download":
+            destination = ensure_local_path_contained(
+                destination,
+                workspace_root=handle.spec.workspace_root,
+                kind="destination",
+            )
             local_dir = os.path.dirname(destination)
             if local_dir:
                 os.makedirs(local_dir, exist_ok=True)
@@ -302,6 +433,11 @@ class DockerProvider:
                 "local_path": os.path.abspath(destination),
                 "bytes": info.st_size,
             }
+        source = ensure_local_path_contained(
+            source,
+            workspace_root=handle.spec.workspace_root,
+            kind="source",
+        )
         argv = ["docker", "cp", source, f"{container}:{destination}"]
         rc, stdout, stderr = self._docker(argv)
         if rc != 0:

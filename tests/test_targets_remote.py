@@ -304,3 +304,46 @@ class TestGdbserverProviderPure:
         response = registry.start_target_response(target_id=handle.target_id)
         assert response["parsed"]["success"] is False
         assert handle.state == TargetState.ERROR
+
+    def test_start_rejects_symlink_swapped_between_create_and_start(
+        self, tmp_path
+    ) -> None:
+        from tests.test_target_containment import (
+            make_directory_link,
+            retarget_directory_link,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        inside_dir = tmp_path / "inside"
+        inside_dir.mkdir()
+        (inside_dir / "prog").write_bytes(b"\x7fELF" + b"P" * 32)
+        link = workspace / "drop"
+        make_directory_link(link, inside_dir)
+
+        registry = TargetRegistry()
+        registry._providers[TargetKind.GDBSERVER] = GdbserverProvider(
+            listen_timeout_sec=0.01,
+            executable="__pao_not_a_real_gdbserver__",
+        )
+        spec = TargetSpec.from_config(
+            "gdbserver",
+            {
+                "binary_path": str(link / "prog"),
+                "port": _find_free_tcp_port(),
+                "workspace_root": str(workspace),
+            },
+            session_id="sess",
+        )
+        handle = registry.create(spec)
+        # Swap the contained link for one resolving outside the workspace.
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "prog").write_bytes(b"\x7fELF" + b"O" * 32)
+        retarget_directory_link(link, outside_dir)
+
+        response = registry.start_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is False
+        assert "workspace" in response["parsed"]["error"]
+        assert handle.state == TargetState.ERROR

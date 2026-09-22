@@ -203,6 +203,30 @@ def resolve_workspace_cwd(
     return cwd_real
 
 
+def ensure_realpath_contained(
+    path: str, workspace_root: str, *, kind: str = "path"
+) -> str:
+    """Return ``path``'s realpath after re-checking workspace containment.
+
+    Lexical containment alone is not enough: a workspace entry may be a
+    symlink pointing outside.  Re-resolving at the moment of use (after
+    target creation, before launch/read/write) closes the window where a
+    link is swapped between the check and the actual access.
+    """
+    workspace_real = os.path.realpath(workspace_root)
+    path_real = os.path.realpath(path)
+    try:
+        contained = os.path.commonpath([path_real, workspace_real]) == workspace_real
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(
+            f"{kind} resolves outside the configured workspace "
+            f"(symlink escape): '{path}'"
+        )
+    return path_real
+
+
 def resolve_workspace_file(
     raw_path: str,
     workspace_root: str = DEFAULT_WORKSPACE,

@@ -26,6 +26,7 @@ from typing import (
 
 from paomcp.tools.backends.foundation import build_backend_response, parse_int
 from paomcp.tools.backends.gdb import GdbController
+from paomcp.utils.paths import ensure_realpath_contained, resolve_workspace_path
 
 # System PATH used to resolve provider infrastructure binaries (qemu,
 # gdbserver). Deliberately independent of any caller-supplied PATH so a
@@ -81,6 +82,9 @@ BLOCKED_TARGET_ENV = frozenset(
         "RUBYLIB",
         "PERL5LIB",
         "NODE_PATH",
+        # QEMU reads this as an implicit ``-L`` sysroot; allowing it in the
+        # spec env would bypass the workspace containment of qemu_ld_prefix.
+        "QEMU_LD_PREFIX",
     }
 )
 
@@ -101,6 +105,182 @@ def validate_target_env(env: Optional[Mapping[str, Any]]) -> Dict[str, str]:
             )
         merged[name] = str(value)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# QEMU extra-arg path containment (shared by create-time and launch-time).
+# ---------------------------------------------------------------------------
+# Flags whose comma-separated operand names a host file path.
+_QEMU_COMMA_OPERAND_KEYS = {
+    "-drive": "file",
+    "-blockdev": "filename",
+    "-device": "file",
+    "-chardev": "path",
+}
+# Flags whose operand is a bare host path.
+_QEMU_BARE_PATH_FLAGS = frozenset({"-kernel", "-initrd", "-L"})
+# ``-serial`` chardev prefixes that name a host file/socket.
+_QEMU_SERIAL_FILE_PREFIXES = ("file:", "pipe:", "unix:")
+_QEMU_OPERAND_FLAGS = frozenset(_QEMU_COMMA_OPERAND_KEYS) | _QEMU_BARE_PATH_FLAGS
+
+
+def _canonical_qemu_operand_flag(name: str) -> Optional[str]:
+    """Normalize ``--kernel`` / ``-L`` spellings to the flag variant we track."""
+    stripped = name.strip().lower().lstrip("-")
+    if not stripped:
+        return None
+    canonical = f"-{stripped}"
+    if canonical == "-l":
+        # QEMU's sysroot flag is ``-L`` (case-sensitive); ``-l`` is not a flag.
+        canonical = "-L"
+    if canonical in _QEMU_OPERAND_FLAGS:
+        return canonical
+    if canonical == "-serial":
+        return canonical
+    return None
+
+
+def _contain_qemu_operand(flag: str, value: str, *, workspace_root: str) -> str:
+    """Rewrite one QEMU file operand so it stays inside the workspace."""
+    if flag in _QEMU_COMMA_OPERAND_KEYS:
+        key = _QEMU_COMMA_OPERAND_KEYS[flag]
+        kind = f"qemu {flag.lstrip('-')} {key}"
+        rebuilt = []
+        for part in value.split(","):
+            name, sep, val = part.partition("=")
+            if sep and name.strip().lower() == key and val.strip():
+                resolved = resolve_workspace_path(
+                    val.strip(),
+                    workspace_root=workspace_root,
+                    require_exists=False,
+                    kind=kind,
+                )
+                rebuilt.append(
+                    f"{name}="
+                    f"{ensure_realpath_contained(resolved, workspace_root, kind=kind)}"
+                )
+            else:
+                rebuilt.append(part)
+        return ",".join(rebuilt)
+    if flag == "-serial":
+        lowered = value.lower()
+        for prefix in _QEMU_SERIAL_FILE_PREFIXES:
+            if not lowered.startswith(prefix):
+                continue
+            path, sep, options = value[len(prefix) :].partition(",")
+            if not path:
+                return value
+            resolved = resolve_workspace_path(
+                path,
+                workspace_root=workspace_root,
+                require_exists=False,
+                kind="qemu serial path",
+            )
+            contained = ensure_realpath_contained(
+                resolved, workspace_root, kind="qemu serial path"
+            )
+            return f"{value[:len(prefix)]}{contained}{sep}{options}"
+        return value
+    resolved = resolve_workspace_path(
+        value,
+        workspace_root=workspace_root,
+        require_exists=False,
+        kind=f"qemu {flag} path",
+    )
+    return ensure_realpath_contained(resolved, workspace_root, kind=f"qemu {flag} path")
+
+
+def contain_qemu_extra_args(
+    extra_args: Sequence[Any], *, workspace_root: str
+) -> List[Any]:
+    """Contain every file operand in a QEMU extra-args list.
+
+    Handles ``--kernel=/p`` / ``-kernel=/p`` glued values, ``-blockdev
+    driver=file,filename=/p``, ``-device loader,file=/p``, ``-serial
+    file:/p``, ``-chardev file,path=/p`` and glued ``-L/p``.  A path that
+    escapes the workspace raises ValueError (fail closed).
+    """
+    normalized: List[Any] = []
+    pending: Optional[str] = None
+    for token in list(extra_args or []):
+        if not isinstance(token, str):
+            normalized.append(token)
+            pending = None
+            continue
+        if pending is not None:
+            normalized.append(
+                _contain_qemu_operand(pending, token, workspace_root=workspace_root)
+            )
+            pending = None
+            continue
+        if not token.startswith("--") and len(token) > 2 and token[:2] == "-L":
+            remainder = token[2:]
+            if remainder.startswith("="):
+                remainder = remainder[1:]
+            normalized.append(
+                "-L"
+                + _contain_qemu_operand("-L", remainder, workspace_root=workspace_root)
+            )
+            continue
+        name, sep, value = token.partition("=")
+        canonical = _canonical_qemu_operand_flag(name)
+        if canonical is not None and sep:
+            normalized.append(
+                f"{name}="
+                f"{_contain_qemu_operand(canonical, value, workspace_root=workspace_root)}"
+            )
+            continue
+        if canonical is not None:
+            pending = canonical
+        normalized.append(token)
+    return normalized
+
+
+_TARGET_PATH_ATTRS = (
+    "binary_path",
+    "working_dir",
+    "kernel_path",
+    "initrd_path",
+    "disk_path",
+    "qemu_ld_prefix",
+)
+
+
+def ensure_target_paths_contained(spec: "TargetSpec") -> None:
+    """Re-check every host path in ``spec`` against the workspace (TOCTOU).
+
+    ``_contain_target_config`` validates at create time, but a symlink can
+    be swapped afterwards; providers call this right before spawning so a
+    swapped link cannot redirect execution outside the workspace.
+    """
+    workspace_root = getattr(spec, "workspace_root", None)
+    if not workspace_root:
+        return
+    for attr in _TARGET_PATH_ATTRS:
+        value = getattr(spec, attr, None)
+        if not value:
+            continue
+        try:
+            ensure_realpath_contained(value, workspace_root, kind=attr)
+        except ValueError as exc:
+            raise TargetError(str(exc)) from exc
+    if spec.qemu_extra_args:
+        try:
+            contain_qemu_extra_args(spec.qemu_extra_args, workspace_root=workspace_root)
+        except ValueError as exc:
+            raise TargetError(str(exc)) from exc
+
+
+def ensure_local_path_contained(
+    path: str, *, workspace_root: Optional[str], kind: str
+) -> str:
+    """Realpath-check a provider-local transfer path against the workspace."""
+    if not workspace_root:
+        return path
+    try:
+        return ensure_realpath_contained(path, workspace_root, kind=kind)
+    except ValueError as exc:
+        raise TargetError(str(exc)) from exc
 
 
 def drain_stream_to_buffer(
@@ -279,6 +459,9 @@ class TargetSpec:
     kind: TargetKind
     name: Optional[str] = None
     session_id: Optional[str] = None
+    # Workspace the host-side paths below were contained against; providers
+    # re-validate against it right before launching (TOCTOU guard).
+    workspace_root: Optional[str] = None
     # Local process / QEMU user
     binary_path: Optional[str] = None
     argv: List[str] = field(default_factory=list)
@@ -337,6 +520,7 @@ class TargetSpec:
         spec = cls(kind=resolved_kind, session_id=session_id)
         for attr in (
             "name",
+            "workspace_root",
             "binary_path",
             "working_dir",
             "host",

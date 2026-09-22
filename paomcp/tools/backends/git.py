@@ -15,6 +15,27 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
+def _is_strict_descendant(root: str, candidate: str) -> bool:
+    """Whether ``candidate`` is inside ``root`` but is not ``root`` itself."""
+    try:
+        if os.path.commonpath([root, candidate]) != root:
+            return False
+    except ValueError:
+        return False
+    return candidate != root
+
+
+def _redact_repo_url(repo_url: str) -> str:
+    """Strip embedded credentials before a URL reaches an INFO log."""
+    scheme, separator, remainder = repo_url.partition("://")
+    if not separator:
+        return repo_url
+    userinfo, at_sign, host = remainder.rpartition("@")
+    if not at_sign or not userinfo:
+        return repo_url
+    return f"{scheme}://***@{host}"
+
+
 class GitTools:
     """Tools for git repository operations"""
 
@@ -86,16 +107,16 @@ class GitTools:
             # Containment: the repository must land inside the workspace so
             # overwrite=True can never rmtree caller-owned content outside it.
             # Use realpath so a symlinked workspace path cannot smuggle a
-            # target outside the root.
+            # target outside the root, and require a *strict* descendant so
+            # target_dir='.' (or a URL ending in '/.') cannot resolve to the
+            # workspace root itself.
             workspace_root = os.path.realpath(self.workspace_dir)
             candidate = (
                 os.path.realpath(os.path.join(workspace_root, target_dir))
                 if not os.path.isabs(target_dir)
                 else os.path.realpath(target_dir)
             )
-            if candidate != workspace_root and not candidate.startswith(
-                workspace_root + os.sep
-            ):
+            if not _is_strict_descendant(workspace_root, candidate):
                 return {
                     "success": False,
                     "error": (
@@ -115,8 +136,23 @@ class GitTools:
                         "path": repo_path,
                         "type": "FileExistsError",
                     }
-                logger.info("Replacing repository at %s", repo_path)
-                shutil.rmtree(repo_path)
+                # Re-check with a fresh realpath immediately before the
+                # destructive call (mirrors the create_target pattern), so a
+                # symlink swapped in after the first check cannot redirect the
+                # deletion outside the workspace or back onto the root.
+                verified = os.path.realpath(repo_path)
+                if not _is_strict_descendant(workspace_root, verified):
+                    return {
+                        "success": False,
+                        "error": (
+                            f"target_dir escapes the git workspace "
+                            f"'{workspace_root}' after symlink resolution"
+                        ),
+                        "path": verified,
+                        "type": "ValueError",
+                    }
+                logger.info("Replacing repository at %s", verified)
+                shutil.rmtree(verified)
 
             # Clone the repository.  A shallow clone has no history to
             # satisfy an arbitrary version ref, so when a version is
@@ -126,7 +162,8 @@ class GitTools:
                 clone_cmd.extend(["--depth", "1"])
             clone_cmd.extend([repo_url, repo_path])
 
-            logger.info(f"Cloning repository: {repo_url}")
+            logger.info(f"Cloning repository: {_redact_repo_url(repo_url)}")
+            logger.debug("Cloning repository (full URL): %s", repo_url)
             result = subprocess.run(
                 clone_cmd,
                 capture_output=True,

@@ -37,6 +37,7 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    ensure_target_paths_contained,
     kill_process_tree,
     reap_output_drains,
     start_output_drains,
@@ -56,6 +57,9 @@ class LocalProcessProvider:
             spec = handle.spec
             if not spec.binary_path:
                 raise TargetError("local_process spec has no binary_path")
+            # Re-validate right before launch: a symlink swapped between
+            # create and start must not execute outside the workspace.
+            ensure_target_paths_contained(spec)
             binary = os.path.abspath(spec.binary_path)
             if not os.path.isfile(binary):
                 raise TargetError(f"binary '{binary}' does not exist")

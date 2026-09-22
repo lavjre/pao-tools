@@ -123,6 +123,20 @@ def _ssh_spec() -> TargetSpec:
     )
 
 
+def _ssh_spec_in(workspace) -> TargetSpec:
+    return TargetSpec.from_config(
+        "ssh",
+        {
+            "host": "ctf.remote",
+            "port": 22,
+            "ssh_user": "player",
+            "ssh_key_path": "/tmp/id_rsa",
+            "workspace_root": str(workspace),
+        },
+        session_id="sess",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Spec validation
 # ---------------------------------------------------------------------------
@@ -369,6 +383,66 @@ class TestSshFileSync:
                 source="/x",
                 destination=str(tmp_path / "y"),
             )
+
+
+class TestSshTransferContainment:
+    def _workspace_and_escape(self, tmp_path, name: str = "drop"):
+        from tests.test_target_containment import make_directory_link
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        link = workspace / name
+        make_directory_link(link, outside)
+        return workspace, link, outside
+
+    def test_download_rejects_symlinked_destination_dir(self, tmp_path) -> None:
+        fake = _FakeSshClient(remote_files={"/remote/binary": b"HELLO"})
+        registry = _build_registry(fake)
+        workspace, link, outside = self._workspace_and_escape(tmp_path)
+        handle = registry.create(_ssh_spec_in(workspace))
+        registry.connect_target_response(target_id=handle.target_id)
+
+        with pytest.raises(TargetError, match="workspace"):
+            registry.sync_target_files_response(
+                target_id=handle.target_id,
+                source="/remote/binary",
+                destination=str(link / "stolen.bin"),
+                direction="download",
+            )
+        assert list(outside.iterdir()) == []
+
+    def test_upload_rejects_symlinked_source(self, tmp_path) -> None:
+        fake = _FakeSshClient(remote_files={})
+        registry = _build_registry(fake)
+        workspace, link, outside = self._workspace_and_escape(tmp_path)
+        (outside / "payload.bin").write_bytes(b"SECRET")
+        handle = registry.create(_ssh_spec_in(workspace))
+        registry.connect_target_response(target_id=handle.target_id)
+
+        with pytest.raises(TargetError, match="workspace"):
+            registry.sync_target_files_response(
+                target_id=handle.target_id,
+                source=str(link / "payload.bin"),
+                destination="/remote/payload.bin",
+                direction="upload",
+            )
+        assert "/remote/payload.bin" not in fake._remote_files
+
+    def test_fetch_libraries_rejects_symlinked_destination_dir(self, tmp_path) -> None:
+        fake = _FakeSshClient()
+        registry = _build_registry(fake)
+        workspace, link, outside = self._workspace_and_escape(tmp_path, "libs")
+        handle = registry.create(_ssh_spec_in(workspace))
+        registry.connect_target_response(target_id=handle.target_id)
+
+        with pytest.raises(TargetError, match="workspace"):
+            registry.fetch_runtime_libraries_response(
+                target_id=handle.target_id,
+                destination_dir=str(link),
+            )
+        assert list(outside.iterdir()) == []
 
 
 class TestFetchRuntimeLibraries:

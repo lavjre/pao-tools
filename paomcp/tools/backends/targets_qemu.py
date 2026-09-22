@@ -35,6 +35,7 @@ from paomcp.tools.backends.targets_base import (
     TargetKind,
     TargetSpec,
     TargetState,
+    ensure_target_paths_contained,
     resolve_infra_executable,
     start_output_drains,
     validate_target_env,
@@ -130,6 +131,9 @@ class QemuUserProvider:
                 raise TargetError(
                     "qemu_user spec requires 'qemu_binary' (e.g. 'qemu-x86_64')"
                 )
+            # Re-validate right before launch: a symlink swapped between
+            # create and start must not execute outside the workspace.
+            ensure_target_paths_contained(spec)
             binary = os.path.abspath(spec.binary_path)
             if not os.path.isfile(binary):
                 raise TargetError(f"binary '{binary}' does not exist")
@@ -290,6 +294,9 @@ class QemuSystemProvider:
     def start(self, handle: TargetHandle) -> None:
         with handle._lock:
             spec = handle.spec
+            # Re-validate right before launch: a symlink swapped between
+            # create and start must not execute outside the workspace.
+            ensure_target_paths_contained(spec)
             for path_attr in ("kernel_path", "initrd_path", "disk_path"):
                 path = getattr(spec, path_attr)
                 if path and not os.path.isfile(path):

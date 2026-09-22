@@ -115,3 +115,70 @@ async def test_fetch_runtime_libraries_rejects_out_of_workspace_dir(tmp_path) ->
     )
     assert response["success"] is False
     assert "workspace" in response["error"]["message"].lower()
+
+
+def _escape_link(tmp_path, name: str = "drop"):
+    from tests.test_target_containment import make_directory_link
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / name
+    make_directory_link(link, outside)
+    return link, outside
+
+
+@pytest.mark.asyncio
+async def test_sync_download_rejects_symlinked_destination(tmp_path) -> None:
+    _link, outside = _escape_link(tmp_path)
+    mcp = create_mcp(services=_services(tmp_path))
+    response = await _call(
+        mcp,
+        "sync_target_files",
+        {
+            "target_id": "whatever",
+            "source": "/remote/file",
+            "destination": "drop/stolen.bin",
+            "direction": "download",
+        },
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_sync_upload_rejects_symlinked_source(tmp_path) -> None:
+    _link, outside = _escape_link(tmp_path)
+    (outside / "payload.bin").write_bytes(b"SECRET")
+    mcp = create_mcp(services=_services(tmp_path))
+    response = await _call(
+        mcp,
+        "sync_target_files",
+        {
+            "target_id": "whatever",
+            "source": "drop/payload.bin",
+            "destination": "/remote/file",
+            "direction": "upload",
+        },
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_fetch_runtime_libraries_rejects_symlinked_dir(tmp_path) -> None:
+    _link, outside = _escape_link(tmp_path, "libs")
+    mcp = create_mcp(services=_services(tmp_path))
+    response = await _call(
+        mcp,
+        "fetch_runtime_libraries",
+        {
+            "target_id": "whatever",
+            "destination_dir": "libs",
+        },
+    )
+    assert response["success"] is False
+    assert "workspace" in response["error"]["message"].lower()
+    assert list(outside.iterdir()) == []

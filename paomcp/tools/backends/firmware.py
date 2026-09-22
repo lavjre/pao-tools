@@ -86,6 +86,28 @@ def _sha256(path: str) -> str:
     return digest.hexdigest()
 
 
+def _require_contained(candidate: str, root: str, kind: str) -> str:
+    """Re-check a write/extraction destination after symlink resolution.
+
+    Lexical containment is not enough: ``<root>/link`` may point outside, so
+    ``<root>/link/out`` passes a string prefix test while extraction would
+    write beyond the root.  ``realpath`` resolves what exists (parents
+    included) and the containment test runs again on the result.
+    """
+    root_real = os.path.realpath(root)
+    candidate_real = os.path.realpath(candidate)
+    try:
+        contained = os.path.commonpath([candidate_real, root_real]) == root_real
+    except ValueError:
+        contained = False
+    if not contained:
+        raise ValueError(
+            f"{kind} escapes the configured workspace root (symlink escape): "
+            f"'{candidate}'"
+        )
+    return candidate_real
+
+
 def carve_buffer(
     data: bytes, *, max_files: int = MAX_CARVED_FILES
 ) -> List[Dict[str, Any]]:
@@ -207,6 +229,7 @@ def extract_firmware(
     output_dir: Optional[str] = None,
     timeout_seconds: int = 600,
     max_bytes: int = MAX_FIRMWARE_BYTES,
+    workspace_root: Optional[str] = None,
     cancellation_check: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Extract + carve one firmware image; external tools optional."""
@@ -218,11 +241,21 @@ def extract_firmware(
         raise ValueError(f"firmware size {size} outside 1-{max_bytes} bytes")
     if timeout_seconds <= 0 or timeout_seconds > 3600:
         raise ValueError("timeout_seconds must be 1-3600")
+    containment_root = os.path.realpath(
+        workspace_root
+        if workspace_root is not None
+        else os.path.dirname(os.path.abspath(image_path))
+    )
     if output_dir is None:
         output_dir = os.path.join(
             os.path.dirname(image_path), f".extract-{extraction_id}"
         )
+    # Verify the destination before creating it, then again after creation:
+    # a symlinked parent could otherwise redirect the extraction outside the
+    # configured root (the extractors themselves write with no further check).
+    output_dir = _require_contained(output_dir, containment_root, "output_dir")
     os.makedirs(output_dir, exist_ok=True)
+    output_dir = _require_contained(output_dir, containment_root, "output_dir")
     started = time.monotonic()
     deadline = started + timeout_seconds
 
@@ -243,10 +276,13 @@ def extract_firmware(
         ("binwalk", _try_binwalk, "binwalk"),
     ):
         _poll_cancel()
+        tool_out_dir = _require_contained(
+            os.path.join(output_dir, subdir),
+            containment_root,
+            f"{tool_name} output_dir",
+        )
         try:
-            result = runner(
-                image_path, os.path.join(output_dir, subdir), int(_budget_left())
-            )
+            result = runner(image_path, tool_out_dir, int(_budget_left()))
         except (OSError, subprocess.SubprocessError) as exc:
             result = {"ok": False, "error": str(exc)}
         if result is None:

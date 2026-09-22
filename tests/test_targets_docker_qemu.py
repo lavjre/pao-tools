@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -143,6 +144,140 @@ class TestDockerStart:
         assert extra in runner.calls[0][0]
 
 
+class TestDockerExtraArgsHardening:
+    @pytest.mark.parametrize(
+        "extra_args",
+        [
+            ["-itv"],
+            ["-itv", "/:/host"],
+            ["-itv/:/host"],
+            ["-tv/:/host"],
+            ["--env-file", "/etc/shadow"],
+            ["--env-file=/etc/shadow"],
+            ["--label-file", "/etc/passwd"],
+            ["--label-file=/etc/passwd"],
+            ["--cidfile", "/tmp/pao.cid"],
+            ["--cidfile=/tmp/pao.cid"],
+            ["-P"],
+            ["--publish-all"],
+        ],
+    )
+    def test_host_impact_spellings_rejected(self, extra_args: List[str]) -> None:
+        runner = _FakeDockerRunner()
+        provider = DockerProvider(runner=runner)
+        handle = _docker_registry(runner).create(
+            _docker_spec(docker_extra_args=extra_args)
+        )
+        with pytest.raises(TargetError, match="Blocked unsafe"):
+            provider.start(handle)
+        assert runner.calls == []
+
+    @pytest.mark.parametrize(
+        "extra_args",
+        [
+            ["-p", "8080:80"],
+            ["-p8080:80"],
+            ["--publish", "8080:80"],
+            ["--publish=8080:80"],
+            ["--publish=0.0.0.0:8080:80"],
+            ["-p[::]:8080:80"],
+            ["-p", "localhost:8080:80"],
+            ["-p", "192.168.1.5:8080:80"],
+        ],
+    )
+    def test_non_loopback_publish_rejected(self, extra_args: List[str]) -> None:
+        runner = _FakeDockerRunner()
+        provider = DockerProvider(runner=runner)
+        handle = _docker_registry(runner).create(
+            _docker_spec(docker_extra_args=extra_args)
+        )
+        with pytest.raises(TargetError, match="publish spec"):
+            provider.start(handle)
+        assert runner.calls == []
+
+    @pytest.mark.parametrize(
+        "extra_args",
+        [
+            ["-p", "127.0.0.1:8080:80"],
+            ["-p127.0.0.1:8080:80"],
+            ["--publish=127.0.0.1:8080:80"],
+            ["-p[::1]:8080:80"],
+            ["-itp127.0.0.1:9000:9000"],
+        ],
+    )
+    def test_loopback_publish_allowed(self, extra_args: List[str]) -> None:
+        runner = _FakeDockerRunner(script=[(0, "cid\n", "")])
+        registry = _docker_registry(runner)
+        handle = registry.create(_docker_spec(docker_extra_args=extra_args))
+        registry.start_target_response(target_id=handle.target_id)
+        assert handle.state == TargetState.RUNNING
+
+    @pytest.mark.parametrize(
+        "extra_args",
+        [
+            ["-e", "APP=web"],
+            ["-e", "VPN=1"],
+            ["-e", "PV=1"],
+            ["--env", "APPDATA=x"],
+            ["--hostname", "pao-box"],
+            ["--cpuset-cpus", "0-1"],
+        ],
+    )
+    def test_plain_values_are_not_mistaken_for_flags(
+        self, extra_args: List[str]
+    ) -> None:
+        runner = _FakeDockerRunner(script=[(0, "cid\n", "")])
+        registry = _docker_registry(runner)
+        handle = registry.create(_docker_spec(docker_extra_args=extra_args))
+        registry.start_target_response(target_id=handle.target_id)
+        assert handle.state == TargetState.RUNNING
+
+
+class TestDockerMetadataRedaction:
+    def test_env_values_masked_in_run_argv_and_responses(self) -> None:
+        runner = _FakeDockerRunner(script=[(0, "cid\n", "")])
+        registry = _docker_registry(runner)
+        handle = registry.create(
+            _docker_spec(
+                env={"CTF_FLAG_DIR": "/flags", "SECRET_TOKEN": "s3cr3t-value"},
+                docker_extra_args=["-e", "EXTRA_TOKEN=abc123"],
+            )
+        )
+        registry.start_target_response(target_id=handle.target_id)
+
+        run_argv = handle.metadata["run_argv"]
+        assert "SECRET_TOKEN=***" in run_argv
+        assert "CTF_FLAG_DIR=***" in run_argv
+        assert "EXTRA_TOKEN=***" in run_argv
+        assert all(
+            "s3cr3t-value" not in token and "abc123" not in token for token in run_argv
+        )
+        # The real invocation still carries the values.
+        assert "SECRET_TOKEN=s3cr3t-value" in runner.calls[0][0]
+
+        listed = json.dumps(registry.list_targets_response()["parsed"])
+        assert "s3cr3t-value" not in listed
+        assert "abc123" not in listed
+        status = json.dumps(
+            registry.get_status_response(target_id=handle.target_id)["parsed"]
+        )
+        assert "s3cr3t-value" not in status
+
+    @pytest.mark.parametrize(
+        "spelling", ["--env=TOKEN=abc", "-eTOKEN=abc", "-e=TOKEN=abc"]
+    )
+    def test_glued_env_spellings_masked(self, spelling: str) -> None:
+        runner = _FakeDockerRunner(script=[(0, "cid\n", "")])
+        registry = _docker_registry(runner)
+        handle = registry.create(_docker_spec(docker_extra_args=[spelling]))
+        registry.start_target_response(target_id=handle.target_id)
+
+        run_argv = handle.metadata["run_argv"]
+        assert all("abc" not in token for token in run_argv)
+        assert any("TOKEN=***" in token for token in run_argv)
+        assert spelling in runner.calls[0][0]
+
+
 class TestDockerStop:
     def test_stop_runs_docker_stop_then_marks_stopped(self) -> None:
         runner = _FakeDockerRunner(script=[(0, "cid\n", ""), (0, "cid\n", "")])
@@ -230,6 +365,31 @@ class TestDockerFileSync:
         assert cp_argv[:2] == ["docker", "cp"]
         assert cp_argv[2] == str(payload)
         assert cp_argv[3].endswith(":/tmp/pushed.bin")
+
+
+class TestDockerTransferContainment:
+    def test_download_rejects_symlinked_destination_dir(self, tmp_path) -> None:
+        from tests.test_target_containment import make_directory_link
+
+        runner = _FakeDockerRunner(script=[(0, "cid\n", ""), (0, "", "")])
+        registry = _docker_registry(runner)
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        link = workspace / "drop"
+        make_directory_link(link, outside)
+        handle = registry.create(_docker_spec(workspace_root=str(workspace)))
+        registry.start_target_response(target_id=handle.target_id)
+
+        with pytest.raises(TargetError, match="workspace"):
+            registry.sync_target_files_response(
+                target_id=handle.target_id,
+                source="/data/flag.bin",
+                destination=str(link / "flag.bin"),
+                direction="download",
+            )
+        assert list(outside.iterdir()) == []
 
 
 class TestDockerCapabilities:

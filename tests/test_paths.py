@@ -4,6 +4,7 @@ import pytest
 
 from paomcp.utils.paths import (
     build_runtime_paths,
+    ensure_realpath_contained,
     resolve_workspace_file,
     resolve_workspace_path,
     stable_file_snapshot,
@@ -94,6 +95,23 @@ def test_workspace_file_rejects_symlink_escape(tmp_path):
 
     with pytest.raises(ValueError, match="outside"):
         resolve_workspace_file(str(link), str(workspace), kind="binary_path")
+
+
+def test_ensure_realpath_contained_rejects_symlinked_directory(tmp_path):
+    from tests.test_target_containment import make_directory_link
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / "drop"
+    make_directory_link(link, outside)
+
+    with pytest.raises(ValueError, match="outside"):
+        ensure_realpath_contained(str(link / "stolen.bin"), str(workspace))
+
+    inside = ensure_realpath_contained(str(workspace / "out.bin"), str(workspace))
+    assert inside == os.path.realpath(str(workspace / "out.bin"))
 
 
 def test_stable_file_snapshot_is_independent_from_later_source_changes(tmp_path):

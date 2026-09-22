@@ -35,6 +35,7 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    ensure_local_path_contained,
 )
 
 
@@ -221,6 +222,11 @@ class SshProvider:
         sftp = client.open_sftp()
         try:
             if direction == "download":
+                destination = ensure_local_path_contained(
+                    destination,
+                    workspace_root=handle.spec.workspace_root,
+                    kind="destination",
+                )
                 local_dir = os.path.dirname(destination)
                 if local_dir:
                     os.makedirs(local_dir, exist_ok=True)
@@ -233,6 +239,11 @@ class SshProvider:
                     "bytes": info.st_size,
                 }
             # upload
+            source = ensure_local_path_contained(
+                source,
+                workspace_root=handle.spec.workspace_root,
+                kind="source",
+            )
             sftp.put(source, destination)
             return {
                 "direction": "upload",
@@ -253,6 +264,11 @@ class SshProvider:
         destination_dir: str,
         candidate_paths: Sequence[str] = DEFAULT_LIBC_FETCH_PATHS,
     ) -> Dict[str, Any]:
+        destination_dir = ensure_local_path_contained(
+            destination_dir,
+            workspace_root=handle.spec.workspace_root,
+            kind="destination_dir",
+        )
         os.makedirs(destination_dir, exist_ok=True)
         client = self._client_for(handle)
         sftp = client.open_sftp()

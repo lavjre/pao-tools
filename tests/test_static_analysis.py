@@ -9,8 +9,20 @@ import pytest
 
 from paomcp.artifacts import ArtifactStore
 from paomcp.operations import OperationCancelledError, OperationRegistry
+from paomcp.tools.backends.firmware import extract_firmware as _extract_firmware
 from paomcp.tools.backends.static_analysis import StaticBinaryAnalyzer
-from paomcp.tools.static_analysis import _resolve_workspace_file, _stream_all_strings
+from paomcp.tools.static_analysis import (
+    _resolve_workspace_file,
+    _resolve_workspace_output_dir,
+    _stream_all_strings,
+)
+
+
+def _make_directory_symlink(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks are not supported on this host")
 
 
 def _align(value: int, alignment: int) -> int:
@@ -396,6 +408,60 @@ def test_static_analysis_rejects_non_elf_and_workspace_escape(tmp_path):
         _resolve_workspace_file(
             os.path.join("..", "outside.elf"), str(workspace), "binary_path"
         )
+
+
+def test_firmware_output_dir_rejects_symlink_escape(tmp_path):
+    # E2.5: lexical containment is not enough; a symlinked parent must not
+    # let extraction write outside the workspace.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    evidence = outside / "victim.txt"
+    evidence.write_text("do not write here", encoding="utf-8")
+    _make_directory_symlink(workspace / "link", outside)
+
+    with pytest.raises(ValueError, match="outside the configured workspace"):
+        _resolve_workspace_output_dir(
+            os.path.join("link", "extract"), str(workspace), "corpus_dir"
+        )
+
+    assert evidence.read_text(encoding="utf-8") == "do not write here"
+    assert not (outside / "extract").exists()
+
+
+def test_firmware_output_dir_accepts_contained_path(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_real = os.path.realpath(workspace)
+
+    resolved = _resolve_workspace_output_dir("extract", str(workspace), "corpus_dir")
+
+    assert resolved == os.path.realpath(workspace / "extract")
+    assert os.path.commonpath([resolved, workspace_real]) == workspace_real
+
+
+def test_extract_firmware_rejects_symlink_escaped_output_dir(tmp_path):
+    # E2.6: the backend re-checks the destination before writing/extracting.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    image = workspace / "firmware.bin"
+    image.write_bytes(b"\x00" * 64 + b"\x7fELF\x01\x01\x01" + b"A" * 32)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    evidence = outside / "victim.txt"
+    evidence.write_text("do not write here", encoding="utf-8")
+    _make_directory_symlink(workspace / "link", outside)
+
+    with pytest.raises(ValueError, match="escapes the configured workspace root"):
+        _extract_firmware(
+            image_path=str(image),
+            output_dir=str(workspace / "link" / "extract"),
+            workspace_root=str(workspace),
+        )
+
+    assert evidence.read_text(encoding="utf-8") == "do not write here"
+    assert not (outside / "extract").exists()
 
 
 def test_sectionless_elf_uses_dynamic_and_note_segments(tmp_path):

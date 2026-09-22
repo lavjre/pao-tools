@@ -187,6 +187,50 @@ class TestQemuSystemArgv:
 
 
 # ---------------------------------------------------------------------------
+# Start-time containment re-check (TOCTOU)
+# ---------------------------------------------------------------------------
+class TestQemuSystemLaunchContainment:
+    def test_start_rejects_symlink_swapped_between_create_and_start(
+        self, tmp_path
+    ) -> None:
+        from tests.test_target_containment import (
+            make_directory_link,
+            retarget_directory_link,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        inside_dir = tmp_path / "inside"
+        inside_dir.mkdir()
+        (inside_dir / "vmlinuz").write_bytes(b"KERNEL")
+        link = workspace / "boot"
+        make_directory_link(link, inside_dir)
+
+        registry = TargetRegistry()
+        spec = TargetSpec.from_config(
+            "qemu_system",
+            {
+                "qemu_binary": "__pao_not_a_real_qemu_system__",
+                "kernel_path": str(link / "vmlinuz"),
+                "workspace_root": str(workspace),
+            },
+            session_id="sess",
+        )
+        handle = registry.create(spec)
+        # Swap the contained link for one resolving outside the workspace.
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "vmlinuz").write_bytes(b"KERNEL")
+        retarget_directory_link(link, outside_dir)
+
+        response = registry.start_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is False
+        assert "workspace" in response["parsed"]["error"]
+        assert handle.state == TargetState.ERROR
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle error paths (host has no qemu-system installed, so we
 # assert the failure surface, not a real boot)
 # ---------------------------------------------------------------------------

@@ -34,6 +34,24 @@ DEFAULT_MAX_PROCESS_OUTPUT_BYTES = int(
 )
 OUTPUT_READ_CHUNK_BYTES = 64 * 1024
 OUTPUT_READER_JOIN_SECONDS = 5.0
+# Bounded descendant sweep after a process-tree signal: a descendant that
+# calls ``setsid`` leaves the managed process group, and a double-forked
+# process is reparented out of psutil's reach once its parent exits, so the
+# signal pass re-enumerates until the tree is quiet or the budget expires.
+PROCESS_TREE_SWEEP_SECONDS = 2.0
+PROCESS_TREE_SWEEP_INTERVAL_SECONDS = 0.02
+PROCESS_TREE_STABLE_SCANS = 2
+_TREE_TRACK_LOCK = threading.Lock()
+_TREE_DESCENDANT_TRACKING: Dict[int, Dict[int, float]] = {}
+# ``python3.13.1 -c ...`` is a real interpreter invocation, so the version
+# suffix must be part of the executable match, not just ``python3.<minor>``.
+_PYTHON_EXECUTABLE_RE = re.compile(r"python(?:3(?:\.\d+)*)?")
+# Fallback for a shell body that ``shlex`` cannot tokenize (unbalanced
+# quotes): match python followed by any short-option cluster containing
+# ``c`` (``-c``, ``-Oc``, ``-Ic``, ``-cprint(1)``).
+_INLINE_PYTHON_DASH_C_RE = re.compile(
+    r"\bpython(?:3(?:\.\d+)*)?\b\s+-[A-Za-z]*c[A-Za-z]*"
+)
 # Shared clamps live in timeouts.py; re-exported here so
 # existing `from subproc import clamp_timeout` imports keep working.
 from paomcp.tools.backends.timeouts import (
@@ -50,6 +68,93 @@ class ProcessLimitError(RuntimeError):
 
 class ProcessOutputLimitError(RuntimeError):
     """Raised when combined process stdout and stderr exceed their byte budget."""
+
+
+def _snapshot_process_descendants(pid: int) -> List[psutil.Process]:
+    """Return live descendants of ``pid``; empty once the parent is reaped."""
+    try:
+        return psutil.Process(pid).children(recursive=True)
+    except psutil.Error:
+        return []
+
+
+def _signal_processes(processes: List[psutil.Process], signal_number: int) -> None:
+    """Signal known descendants leaf-first, ignoring already-dead entries."""
+    for child in reversed(processes):
+        try:
+            if signal_number == KILL_SIGNAL:
+                child.kill()
+            elif signal_number == signal_module.SIGTERM:
+                child.terminate()
+            else:
+                child.send_signal(signal_number)
+        except psutil.Error:
+            continue
+
+
+def _remember_processes(
+    tracked: Dict[int, float], processes: List[psutil.Process]
+) -> None:
+    """Record (pid, create_time) so a process stays addressable after reparenting."""
+    for child in processes:
+        try:
+            tracked.setdefault(child.pid, child.create_time())
+        except psutil.Error:
+            continue
+
+
+def _live_tracked_processes(tracked: Dict[int, float]) -> List[psutil.Process]:
+    """Return tracked processes that are still the same live process."""
+    live: List[psutil.Process] = []
+    for pid, create_time in list(tracked.items()):
+        try:
+            candidate = psutil.Process(pid)
+            if candidate.create_time() != create_time:
+                tracked.pop(pid, None)
+                continue
+        except psutil.Error:
+            tracked.pop(pid, None)
+            continue
+        live.append(candidate)
+    return live
+
+
+def _sweep_process_descendants(
+    root_pid: int, signal_number: int, tracked: Dict[int, float]
+) -> None:
+    """Re-signal known descendants in a bounded loop until none remain.
+
+    ``killpg`` cannot reach a descendant that called ``setsid``, and a
+    double-forked process is reparented out of ``children(recursive=True)``
+    once its parent exits.  Tracking (pid, create_time) of every descendant
+    seen before the parent dies keeps those processes addressable across
+    reparenting, so a later escalation call (TERM -> KILL) still reaches
+    them.  The loop stops after successive empty scans so callers are never
+    delayed indefinitely.
+    """
+    deadline = time.monotonic() + PROCESS_TREE_SWEEP_SECONDS
+    empty_scans = 0
+    while True:
+        discovered = _snapshot_process_descendants(root_pid)
+        _remember_processes(tracked, discovered)
+        live = _live_tracked_processes(tracked)
+        targets: List[psutil.Process] = []
+        seen = set()
+        for process in discovered + live:
+            if process.pid in seen:
+                continue
+            seen.add(process.pid)
+            targets.append(process)
+        if targets:
+            _signal_processes(targets, signal_number)
+            empty_scans = 0
+        else:
+            empty_scans += 1
+            if empty_scans >= PROCESS_TREE_STABLE_SCANS:
+                break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(PROCESS_TREE_SWEEP_INTERVAL_SECONDS)
 
 
 class _BoundedProcessOutput:
@@ -248,6 +353,9 @@ class SubprocessTools:
 
     def _close_process_entry(self, entry: Dict[str, Any]) -> None:
         """Close output handles and release capacity exactly once."""
+        process = entry.get("process")
+        if process is not None:
+            self._forget_tracked_descendants(process.pid)
         output_limiter = entry.get("output_limiter")
         if output_limiter is not None:
             entry["output_limit"] = output_limiter.finish()
@@ -438,20 +546,40 @@ class SubprocessTools:
     def _contains_dash_c(cmd_parts: List[str], token_index: int) -> bool:
         """Whether ``-c`` follows the python executable at ``token_index``.
 
-        Scans the tokens after the executable: option flags (``-O``, ``-u``)
-        are skipped, ``-c`` itself is a hit, and a shell separator or the
-        first non-option argument ends the lookahead.  This keeps
-        ``python3 -c``, ``python3 -O -c`` and ``env python3 -c`` blocked while
-        ``grep -c python3`` (``-c`` precedes python3) and ``python3 -V file``
-        are left alone.
+        Python accepts short options as a cluster and ``-c`` consumes the
+        rest of its token, so ``-c``, ``-Oc``, ``-Ic``, ``-uc`` and
+        ``-cprint(1)`` all run an inline script.  ``-m`` hands the remaining
+        arguments to the module (``python -m pytest -c pytest.ini`` is not an
+        inline script), and ``-W`` / ``-X`` consume their operand, so nothing
+        after them can be a ``-c``.  A shell separator or the first
+        non-option argument ends the lookahead, which keeps ``grep -c
+        python3`` (``-c`` precedes python3) and ``python3 -V file`` allowed.
         """
-        for nxt in cmd_parts[token_index + 1 :]:
-            if nxt in {"&&", "||", ";", "|", "&"}:
-                break
-            if not nxt.startswith("-"):
-                break
-            if nxt == "-c" or nxt.startswith("-c"):
-                return True
+        tokens = cmd_parts[token_index + 1 :]
+        skip_next = False
+        for token in tokens:
+            if skip_next:
+                skip_next = False
+                continue
+            if token in {"&&", "||", ";", "|", "&"}:
+                return False
+            if token == "--":
+                return False
+            if not token.startswith("-") or token == "-":
+                return False
+            if token.startswith("--"):
+                continue
+            for character in token[1:]:
+                if character == "c":
+                    return True
+                if character == "m":
+                    return False
+                if character in {"W", "X"}:
+                    # The rest of the token (or the next token) is this
+                    # option's operand, never another option.
+                    if len(token) == 2:
+                        skip_next = True
+                    break
         return False
 
     @staticmethod
@@ -478,40 +606,115 @@ class SubprocessTools:
 
     @staticmethod
     def _signal_process_tree(process: subprocess.Popen, signal_number: int) -> None:
-        """Signal a managed process and all descendants."""
-        if process.poll() is not None:
-            return
-        if os.name != "nt":
-            getpgid = getattr(os, "getpgid")
-            killpg = getattr(os, "killpg")
-            killpg(getpgid(process.pid), signal_number)
+        """Signal a managed process and all descendants.
+
+        POSIX signals the process group first (reaping ordinary forked
+        grandchildren), Windows signals descendants leaf-first, and both
+        paths then re-enumerate psutil descendants in a bounded loop so
+        descendants that spawn during the kill, call ``setsid``, or
+        double-fork out of the tree are still reached.  Discovered
+        descendants are tracked by (pid, create_time) so an escalation call
+        after the managed root exits can still reach them.
+        """
+        root_pid = process.pid
+        with _TREE_TRACK_LOCK:
+            tracked = dict(_TREE_DESCENDANT_TRACKING.get(root_pid, {}))
+        if process.poll() is not None and not tracked:
             return
 
-        parent = psutil.Process(process.pid)
-        descendants = parent.children(recursive=True)
-        for child in reversed(descendants):
+        if os.name != "nt":
+            # Snapshot before the group signal: once the root dies, a
+            # setsid'ed or double-forked descendant is reparented and
+            # invisible to ``children(recursive=True)``.
+            first_pass = _snapshot_process_descendants(root_pid)
+            _remember_processes(tracked, first_pass)
+            _signal_processes(first_pass, signal_number)
+            try:
+                killpg = getattr(os, "killpg")
+                getpgid = getattr(os, "getpgid")
+                killpg(getpgid(root_pid), signal_number)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        else:
+            first_pass = _snapshot_process_descendants(root_pid)
+            _remember_processes(tracked, first_pass)
+            _signal_processes(first_pass, signal_number)
+
+        if process.poll() is None:
             try:
                 if signal_number == KILL_SIGNAL:
-                    child.kill()
+                    process.kill()
                 elif signal_number == signal_module.SIGTERM:
-                    child.terminate()
+                    process.terminate()
                 else:
-                    child.send_signal(signal_number)
-            except psutil.Error:
+                    process.send_signal(signal_number)
+            except OSError:
                 pass
-        if signal_number == KILL_SIGNAL:
-            parent.kill()
-        elif signal_number == signal_module.SIGTERM:
-            parent.terminate()
-        else:
-            parent.send_signal(signal_number)
+
+        _sweep_process_descendants(root_pid, signal_number, tracked)
+        with _TREE_TRACK_LOCK:
+            if tracked:
+                _TREE_DESCENDANT_TRACKING[root_pid] = tracked
+            else:
+                _TREE_DESCENDANT_TRACKING.pop(root_pid, None)
+
+    @staticmethod
+    def _forget_tracked_descendants(root_pid: int) -> None:
+        """Drop descendant tracking once a managed process entry is retired."""
+        with _TREE_TRACK_LOCK:
+            _TREE_DESCENDANT_TRACKING.pop(root_pid, None)
 
     @staticmethod
     def _is_python_executable(token: str) -> bool:
         name = os.path.basename(token)
-        if name in {"python", "python3"}:
-            return True
-        return bool(re.fullmatch(r"python3\.\d+", name))
+        if os.name == "nt":
+            lowered = name.lower()
+            if lowered.endswith(".exe"):
+                name = lowered[:-4]
+        return bool(_PYTHON_EXECUTABLE_RE.fullmatch(name))
+
+    @classmethod
+    def _inline_script_runs_python_dash_c(cls, inline_script: str) -> bool:
+        """Detect ``python -c`` inside a ``sh -c`` body, clusters included."""
+        if not inline_script:
+            return False
+        script = inline_script
+        if len(script) >= 2 and script[0] == script[-1] and script[0] in {"'", '"'}:
+            # Non-posix ``shlex`` keeps the outer quotes on the token; strip
+            # one matching pair so the body parses as a command line.
+            script = script[1:-1]
+        try:
+            nested_parts = shlex.split(script, posix=True)
+        except ValueError:
+            # Unbalanced quotes defeat tokenization; fall back to a pattern
+            # that still recognizes version suffixes and option clusters.
+            return bool(_INLINE_PYTHON_DASH_C_RE.search(inline_script))
+        for index, token in enumerate(nested_parts):
+            if cls._is_python_executable(token) and cls._contains_dash_c(
+                nested_parts, index
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _command_summary(command: str) -> str:
+        """Safe INFO summary: executable plus argument count, never argv values.
+
+        Commands routinely carry credentials or tokens in their arguments, so
+        INFO only ever records the shape; the full command is DEBUG-only.
+        """
+        try:
+            tokens = shlex.split(command, posix=os.name != "nt")
+        except ValueError:
+            tokens = []
+        if not tokens:
+            return f"<unparsed command, {len(command)} chars>"
+        executable = os.path.basename(tokens[0]) or tokens[0]
+        if "=" in executable:
+            # ``TOKEN=secret cmd``: keep the variable name, drop the value.
+            name, _, _value = executable.partition("=")
+            executable = f"{name}=***"
+        return f"{executable} (+{len(tokens) - 1} args)"
 
     @staticmethod
     def _guardrail_error(
@@ -574,7 +777,7 @@ class SubprocessTools:
                     break
             if script_index is not None and script_index < len(cmd_parts):
                 inline_script = cmd_parts[script_index]
-            if re.search(r"\bpython(?:3(?:\.\d+)?)?\b\s+-c\b", inline_script):
+            if self._inline_script_runs_python_dash_c(inline_script):
                 return self._guardrail_error(
                     command=command,
                     cwd=cwd,
@@ -636,7 +839,8 @@ class SubprocessTools:
             Dictionary with execution results
         """
         timeout = clamp_timeout(timeout)
-        logger.info(f"Running command: {command}")
+        logger.info("Running command: %s", self._command_summary(command))
+        logger.debug("Running command (full argv): %s", command)
         operation_id = current_operation_id()
         if self.operation_registry is not None and operation_id is not None:
             self.operation_registry.update_progress(
@@ -794,7 +998,8 @@ class SubprocessTools:
         Returns:
             Dictionary with process information including PID
         """
-        logger.info(f"Spawning process: {command}")
+        logger.info("Spawning process: %s", self._command_summary(command))
+        logger.debug("Spawning process (full argv): %s", command)
         stdout_file = None
         stderr_file = None
         slot_acquired = False

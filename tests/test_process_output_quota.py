@@ -6,6 +6,9 @@ import threading
 import time
 from pathlib import Path
 
+import psutil
+import pytest
+
 from paomcp.tools.backends.subproc import SubprocessTools
 
 
@@ -14,6 +17,17 @@ def _script_command(path: Path) -> str:
     if os.name == "nt":
         return subprocess.list2cmdline(argv)
     return shlex.join(argv)
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        process = psutil.Process(pid)
+    except psutil.Error:
+        return False
+    try:
+        return process.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 def _wait_for_output_limit(entry: dict, timeout: float = 5.0) -> None:
@@ -173,3 +187,47 @@ def test_process_output_quota_must_be_positive(tmp_path) -> None:
         assert str(exc) == "max_output_bytes must be positive"
     else:
         raise AssertionError("zero process-output quota must be rejected")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group semantics")
+def test_signal_process_tree_reaps_setsid_descendant(tmp_path) -> None:
+    # A descendant that calls setsid leaves the managed process group, so
+    # killpg alone cannot reach it; the bounded psutil sweep must.
+    script = tmp_path / "setsid_child.py"
+    script.write_text(
+        "import os, sys, time\n"
+        "read_fd, write_fd = os.pipe()\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    os.close(read_fd)\n"
+        "    os.setsid()\n"
+        "    os.write(write_fd, b'1')\n"
+        "    os.close(write_fd)\n"
+        "    time.sleep(60)\n"
+        "else:\n"
+        "    os.close(write_fd)\n"
+        "    os.read(read_fd, 1)\n"
+        "    os.close(read_fd)\n"
+        "    sys.stdout.write(f'<PID>{{{child}}}</PID>')\n"
+        "    sys.stdout.flush()\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    tools = SubprocessTools(
+        process_root=str(tmp_path / "processes"), workspace_root=str(tmp_path)
+    )
+    spawned = tools.spawn_process(_script_command(script), cwd=str(tmp_path))
+    assert spawned["success"] is True
+    marker = tools.wait_for_pid_marker(spawned["stdout_path"], timeout=10.0)
+    assert marker["success"] is True
+    child_pid = marker["pid"]
+    # The marker is written only after the child completed setsid().
+    assert _process_is_alive(child_pid) is True
+
+    killed = tools.kill_process(spawned["pid"], signal=9)
+
+    assert killed["success"] is True
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and _process_is_alive(child_pid):
+        time.sleep(0.05)
+    assert _process_is_alive(child_pid) is False

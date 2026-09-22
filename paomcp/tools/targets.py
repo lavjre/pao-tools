@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Mapping, Optional
 
 from fastmcp import Context, FastMCP
 from fastmcp.dependencies import CurrentContext
 
+from paomcp.tools.backends.targets_base import contain_qemu_extra_args
 from paomcp.tools.common import (
     catch_errors,
     get_services,
     resolve_debug_session,
     run_session_action,
 )
-from paomcp.utils.paths import resolve_workspace_path
+from paomcp.utils.paths import ensure_realpath_contained, resolve_workspace_path
 
 # Host-side config keys that must stay inside the workspace. SSH key
 # material is deliberately excluded: secrets live outside the workspace
@@ -29,9 +29,6 @@ _WORKSPACE_PATH_KEYS = (
     "qemu_ld_prefix",
 )
 
-# QEMU flags in extra_args whose file operand must also stay contained.
-_QEMU_FILE_FLAGS = ("-drive", "-kernel", "-initrd")
-
 
 def _realpath_contained(path: str, *, workspace_root: str, kind: str) -> str:
     """Re-check a resolved path after symlink resolution.
@@ -39,20 +36,10 @@ def _realpath_contained(path: str, *, workspace_root: str, kind: str) -> str:
     Lexical containment (``..``) is not enough: ``/workspace/link`` may
     point at ``/etc``, so ``/workspace/link/passwd`` passes the lexical
     check but opens outside. ``realpath`` resolves what exists (parents
-    included) and the containment test runs again on the result.
+    included) and the containment test runs again on the result; the
+    resolved path is stored so a later link swap cannot redirect it.
     """
-    root_real = os.path.realpath(workspace_root)
-    path_real = os.path.realpath(path)
-    try:
-        inside = os.path.commonpath([path_real, root_real]) == root_real
-    except ValueError:
-        inside = False
-    if not inside:
-        raise ValueError(
-            f"{kind} resolves outside the configured workspace "
-            f"(symlink escape): '{path}'"
-        )
-    return path
+    return ensure_realpath_contained(path, workspace_root, kind=kind)
 
 
 def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
@@ -60,11 +47,14 @@ def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
 
     Raises ValueError (surfaced as INVALID_ARGUMENT) when a host-side
     path escapes the workspace. SSH key paths and container-side values
-    pass through untouched; see ``_WORKSPACE_PATH_KEYS``.
+    pass through untouched; see ``_WORKSPACE_PATH_KEYS``. The resolved
+    workspace root is stamped onto the config so providers can re-check
+    their paths right before launching.
     """
     import shlex
 
     contained = dict(config)
+    contained["workspace_root"] = workspace_root
     for key in _WORKSPACE_PATH_KEYS:
         value = contained.get(key)
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -82,57 +72,10 @@ def _contain_target_config(config: dict, *, workspace_root: str) -> dict:
     if isinstance(extra, str):
         extra = shlex.split(extra)
     if isinstance(extra, list):
-        normalized: list = []
-        pending_file_flag: str | None = None
-        for token in extra:
-            if not isinstance(token, str):
-                normalized.append(token)
-                pending_file_flag = None
-                continue
-            if pending_file_flag is not None:
-                normalized.append(
-                    _contain_qemu_file_operand(
-                        pending_file_flag, token, workspace_root=workspace_root
-                    )
-                )
-                pending_file_flag = None
-                continue
-            if token in _QEMU_FILE_FLAGS:
-                pending_file_flag = token
-            normalized.append(token)
-        contained["qemu_extra_args"] = normalized
+        contained["qemu_extra_args"] = contain_qemu_extra_args(
+            extra, workspace_root=workspace_root
+        )
     return contained
-
-
-def _contain_qemu_file_operand(flag: str, value: str, *, workspace_root: str) -> str:
-    """Contain ``-drive file=...`` / ``-kernel`` / ``-initrd`` operands."""
-    if flag == "-drive":
-        parts = value.split(",")
-        rebuilt = []
-        for part in parts:
-            name, sep, val = part.partition("=")
-            if sep and name.strip().lower() == "file" and val.strip():
-                resolved = resolve_workspace_path(
-                    val.strip(),
-                    workspace_root=workspace_root,
-                    require_exists=False,
-                    kind="qemu drive file",
-                )
-                rebuilt.append(
-                    f"{name}={_realpath_contained(resolved, workspace_root=workspace_root, kind='qemu drive file')}"
-                )
-            else:
-                rebuilt.append(part)
-        return ",".join(rebuilt)
-    resolved = resolve_workspace_path(
-        value,
-        workspace_root=workspace_root,
-        require_exists=False,
-        kind=f"qemu {flag} path",
-    )
-    return _realpath_contained(
-        resolved, workspace_root=workspace_root, kind=f"qemu {flag} path"
-    )
 
 
 def _resolve_session_id(services: Any, session_id: Optional[str]) -> Optional[str]:
@@ -342,7 +285,8 @@ def register(mcp: FastMCP) -> None:
         # The provider writes/reads the LOCAL side of the transfer, so
         # contain it under the workspace: ``destination`` on download,
         # ``source`` on upload.  Remote-side paths are the operator's
-        # business on the target host and are not resolvable here.
+        # business on the target host and are not resolvable here.  The
+        # realpath re-check rejects a workspace symlink pointing outside.
         if direction == "upload":
             source = resolve_workspace_path(
                 source,
@@ -350,12 +294,16 @@ def register(mcp: FastMCP) -> None:
                 require_exists=True,
                 kind="source",
             )
+            source = ensure_realpath_contained(source, workspace_root, kind="source")
         else:
             destination = resolve_workspace_path(
                 destination,
                 workspace_root=workspace_root,
                 require_exists=False,
                 kind="destination",
+            )
+            destination = ensure_realpath_contained(
+                destination, workspace_root, kind="destination"
             )
         return services.target_registry.sync_target_files_response(
             target_id=target_id,
@@ -383,11 +331,15 @@ def register(mcp: FastMCP) -> None:
         libc.
         """
         services = get_services(ctx)
+        workspace_root = services.runtime_paths.workspace_root
         destination_dir = resolve_workspace_path(
             destination_dir,
-            workspace_root=services.runtime_paths.workspace_root,
+            workspace_root=workspace_root,
             require_exists=False,
             kind="destination_dir",
+        )
+        destination_dir = ensure_realpath_contained(
+            destination_dir, workspace_root, kind="destination_dir"
         )
         return services.target_registry.fetch_runtime_libraries_response(
             target_id=target_id,

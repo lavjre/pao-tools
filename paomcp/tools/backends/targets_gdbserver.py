@@ -39,6 +39,7 @@ from paomcp.tools.backends.targets_base import (
     TargetHandle,
     TargetKind,
     TargetState,
+    ensure_target_paths_contained,
     resolve_infra_executable,
     start_output_drains,
     validate_target_env,
@@ -136,6 +137,9 @@ class GdbserverProvider:
             if handle.state in (TargetState.RUNNING, TargetState.CONNECTED):
                 raise TargetError(f"target '{handle.target_id}' is already running")
             spec = handle.spec
+            # Re-validate right before launch: a symlink swapped between
+            # create and start must not execute outside the workspace.
+            ensure_target_paths_contained(spec)
             host = spec.host or "127.0.0.1"
             port = spec.port or _find_free_tcp_port(host)
             argv: List[str] = []

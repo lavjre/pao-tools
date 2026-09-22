@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -293,6 +294,47 @@ class TestLocalProcessProvider:
         # Now the session has zero slots used again.
         second = registry.create(self._spec(["-c", "print('again')"]))
         assert second.target_id != handle.target_id
+
+
+class TestLocalProcessLaunchContainment:
+    def test_start_rejects_symlink_swapped_between_create_and_start(
+        self, tmp_path
+    ) -> None:
+        from tests.test_target_containment import (
+            make_directory_link,
+            retarget_directory_link,
+        )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        inside_dir = tmp_path / "inside"
+        inside_dir.mkdir()
+        shutil.copy(sys.executable, inside_dir / "prog")
+        link = workspace / "drop"
+        make_directory_link(link, inside_dir)
+
+        registry = TargetRegistry()
+        spec = TargetSpec.from_config(
+            "local_process",
+            {
+                "binary_path": str(link / "prog"),
+                "argv": ["-c", "pass"],
+                "workspace_root": str(workspace),
+            },
+            session_id="sess",
+        )
+        handle = registry.create(spec)
+        # Swap the contained link for one resolving outside the workspace.
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        shutil.copy(sys.executable, outside_dir / "prog")
+        retarget_directory_link(link, outside_dir)
+
+        response = registry.start_target_response(target_id=handle.target_id)
+
+        assert response["parsed"]["success"] is False
+        assert "workspace" in response["parsed"]["error"]
+        assert handle.state == TargetState.ERROR
 
 
 # ---------------------------------------------------------------------------
